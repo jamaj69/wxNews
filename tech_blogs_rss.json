@@ -1,0 +1,692 @@
+{
+  "sources": [
+    {
+      "name": "Gizmodo",
+      "url": "https://gizmodo.com/rss",
+      "language": "en",
+      "country": "us",
+      "category": "technology",
+      "platform": "wordpress"
+    },
+    {
+      "name": "Mashable",
+      "url": "https://mashable.com/feeds/rss/all",
+      "language": "en",
+      "country": "us",
+      "category": "technology",
+      "platform": "custom"
+    },
+    {
+      "name": "Lifehacker",
+      "url": "https://lifehacker.com/rss",
+      "language": "en",
+      "country": "us",
+      "category": "technology",
+      "platform": "wordpress"
+    },
+    {
+      "name": "9to5Mac",
+      "url": "https://9to5mac.com/feed/",
+      "language": "en",
+      "country": "us",
+      "category": "technology",
+      "platform": "wordpress"
+    },
+    {
+      "name": "9to5Google",
+      "url": "https://9to5google.com/feed/",
+      "language": "en",
+      "country": "us",
+      "category": "technology",
+      "platform": "wordpress"
+    },
+    {
+      "name": "Android Authority",
+      "url": "https://www.androidauthority.com/feed/",
+      "language": "en",
+      "country": "us",
+      "category": "technology",
+      "platform": "wordpress"
+    },
+    {
+      "name": "Android Central",
+      "url": "https://www.androidcentral.com/feed",
+      "language": "en",
+      "country": "us",
+      "category": "technology",
+      "platform": "wordpress"
+    },
+    {
+      "name": "AndroidPIT",
+      "url": "https://www.androidpit.com/feed",
+      "language": "en",
+      "country": "de",
+      "category": "technology",
+      "platform": "wordpress"
+    },
+    {
+      "name": "TechRadar",
+      "url": "https://www.techradar.com/rss",
+      "language": "en",
+      "country": "uk",
+      "category": "technology",
+      "platform": "custom"
+    },
+    {
+      "name": "Tom's Hardware",
+      "url": "https://www.tomshardware.com/feeds/all",
+      "language": "en",
+      "country": "us",
+      "category": "technology",
+      "platform": "custom"
+    },
+    {
+      "name": "PCMag",
+      "url": "https://www.pcmag.com/feed",
+      "language": "en",
+      "country": "us",
+      "category": "technology",
+      "platform": "wordpress"
+    },
+    {
+      "name": "ZDNet",
+      "url": "https://www.zdnet.com/news/rss.xml",
+      "language": "en",
+      "country": "us",
+      "category": "technology",
+      "platform": "custom"
+    },
+    {
+      "name": "Slashdot",
+      "url": "http://rss.slashdot.org/Slashdot/slashdotMain",
+      "language": "en",
+      "country": "us",
+      "category": "technology",
+      "platform": "custom"
+    },
+    {
+      "name": "Hacker News",
+      "url": "https://news.ycombinator.com/rss",
+      "language": "en",
+      "country": "us",
+      "category": "technology",
+      "platform": "custom"
+    },
+    {
+      "name": "The Next Web",
+      "url": "https://thenextweb.com/feed/",
+      "language": "en",
+      "country": "nl",
+      "category": "technology",
+      "platform": "wordpress"
+    },
+    {
+      "name": "VentureBeat",
+      "url": "https://venturebeat.com/feed/",
+      "language": "en",
+      "country": "us",
+      "category": "technology",
+      "platform": "wordpress"
+    },
+    {
+      "name": "ReadWrite",
+      "url": "https://readwrite.com/feed/",
+      "language": "en",
+      "country": "us",
+      "category": "technology",
+      "platform": "wordpress"
+    },
+    {
+      "name": "Digital Trends",
+      "url": "https://www.digitaltrends.com/feed/",
+      "language": "en",
+      "country": "us",
+      "category": "technology",
+      "platform": "wordpress"
+    },
+    {
+      "name": "The Register",
+      "url": "https://www.theregister.com/headlines.atom",
+      "language": "en",
+      "country": "uk",
+      "category": "technology",
+      "platform": "custom"
+    },
+    {
+      "name": "AnandTech",
+      "url": "https://www.anandtech.com/rss/",
+      "language": "en",
+      "country": "us",
+      "category": "technology",
+      "platform": "custom"
+    },
+    {
+      "name": "Gizmodo UK",
+      "url": "https://www.gizmodo.co.uk/feed/",
+      "language": "en",
+      "country": "uk",
+      "category": "technology",
+      "platform": "wordpress"
+    },
+    {
+      "name": "TechSpot",
+      "url": "https://www.techspot.com/backend.xml",
+      "language": "en",
+      "country": "us",
+      "category": "technology",
+      "platform": "custom"
+    },
+    {
+      "name": "How-To Geek",
+      "url": "https://www.howtogeek.com/feed/",
+      "language": "en",
+      "country": "us",
+      "category": "technology",
+      "platform": "wordpress"
+    },
+    {
+      "name": "MakeUseOf",
+      "url": "https://www.makeuseof.com/feed/",
+      "language": "en",
+      "country": "us",
+      "category": "technology",
+      "platform": "wordpress"
+    },
+    {
+      "name": "Techdirt",
+      "url": "https://www.techdirt.com/techdirt_rss.xml",
+      "language": "en",
+      "country": "us",
+      "category": "technology",
+      "platform": "custom"
+    },
+    {
+      "name": "Krebs on Security",
+      "url": "https://krebsonsecurity.com/feed/",
+      "language": "en",
+      "country": "us",
+      "category": "technology",
+      "platform": "wordpress"
+    },
+    {
+      "name": "Schneier on Security",
+      "url": "https://www.schneier.com/feed/atom/",
+      "language": "en",
+      "country": "us",
+      "category": "technology",
+      "platform": "wordpress"
+    },
+    {
+      "name": "Bleeping Computer",
+      "url": "https://www.bleepingcomputer.com/feed/",
+      "language": "en",
+      "country": "us",
+      "category": "technology",
+      "platform": "wordpress"
+    },
+    {
+      "name": "Threatpost",
+      "url": "https://threatpost.com/feed/",
+      "language": "en",
+      "country": "us",
+      "category": "technology",
+      "platform": "wordpress"
+    },
+    {
+      "name": "The Hacker News",
+      "url": "https://feeds.feedburner.com/TheHackersNews",
+      "language": "en",
+      "country": "us",
+      "category": "technology",
+      "platform": "blogger"
+    },
+    {
+      "name": "Genbeta",
+      "url": "https://www.genbeta.com/rss",
+      "language": "es",
+      "country": "es",
+      "category": "technology",
+      "platform": "custom"
+    },
+    {
+      "name": "Xataka",
+      "url": "https://www.xataka.com/rss",
+      "language": "es",
+      "country": "es",
+      "category": "technology",
+      "platform": "custom"
+    },
+    {
+      "name": "Hipertextual",
+      "url": "https://hipertextual.com/feed",
+      "language": "es",
+      "country": "es",
+      "category": "technology",
+      "platform": "wordpress"
+    },
+    {
+      "name": "FayerWayer",
+      "url": "https://www.fayerwayer.com/feed/",
+      "language": "es",
+      "country": "cl",
+      "category": "technology",
+      "platform": "wordpress"
+    },
+    {
+      "name": "Alt1040",
+      "url": "https://alt1040.hipertextual.com/feed",
+      "language": "es",
+      "country": "es",
+      "category": "technology",
+      "platform": "wordpress"
+    },
+    {
+      "name": "Wwwhatsnew",
+      "url": "https://wwwhatsnew.com/feed/",
+      "language": "es",
+      "country": "es",
+      "category": "technology",
+      "platform": "wordpress"
+    },
+    {
+      "name": "Nación Móvil",
+      "url": "https://nacionmovil.com/feed/",
+      "language": "es",
+      "country": "ar",
+      "category": "technology",
+      "platform": "wordpress"
+    },
+    {
+      "name": "TecnoGaming",
+      "url": "https://www.tecnogaming.com/feed/",
+      "language": "es",
+      "country": "es",
+      "category": "technology",
+      "platform": "wordpress"
+    },
+    {
+      "name": "Computer Hoy",
+      "url": "https://computerhoy.com/rss",
+      "language": "es",
+      "country": "es",
+      "category": "technology",
+      "platform": "custom"
+    },
+    {
+      "name": "TuAppPara",
+      "url": "https://www.tuapppara.com/feed/",
+      "language": "es",
+      "country": "es",
+      "category": "technology",
+      "platform": "wordpress"
+    },
+    {
+      "name": "iPhoneros",
+      "url": "https://iphoneros.com/feed",
+      "language": "es",
+      "country": "es",
+      "category": "technology",
+      "platform": "wordpress"
+    },
+    {
+      "name": "MuyComputer",
+      "url": "https://www.muycomputer.com/feed/",
+      "language": "es",
+      "country": "es",
+      "category": "technology",
+      "platform": "wordpress"
+    },
+    {
+      "name": "MuyLinux",
+      "url": "https://www.muylinux.com/feed/",
+      "language": "es",
+      "country": "es",
+      "category": "technology",
+      "platform": "wordpress"
+    },
+    {
+      "name": "Softzone",
+      "url": "https://www.softzone.es/feed/",
+      "language": "es",
+      "country": "es",
+      "category": "technology",
+      "platform": "wordpress"
+    },
+    {
+      "name": "RedesZone",
+      "url": "https://www.redeszone.net/feed/",
+      "language": "es",
+      "country": "es",
+      "category": "technology",
+      "platform": "wordpress"
+    },
+    {
+      "name": "Xataka México",
+      "url": "https://www.xataka.com.mx/rss",
+      "language": "es",
+      "country": "mx",
+      "category": "technology",
+      "platform": "custom"
+    },
+    {
+      "name": "Xataka Android",
+      "url": "https://www.xatakandroid.com/rss",
+      "language": "es",
+      "country": "es",
+      "category": "technology",
+      "platform": "custom"
+    },
+    {
+      "name": "Xataka Colombia",
+      "url": "https://www.xataka.co/rss",
+      "language": "es",
+      "country": "co",
+      "category": "technology",
+      "platform": "custom"
+    },
+    {
+      "name": "Actualidad Gadget",
+      "url": "https://www.actualidadgadget.com/feed/",
+      "language": "es",
+      "country": "es",
+      "category": "technology",
+      "platform": "wordpress"
+    },
+    {
+      "name": "El Androide Libre",
+      "url": "https://elandroidelibre.elespanol.com/rss",
+      "language": "es",
+      "country": "es",
+      "category": "technology",
+      "platform": "custom"
+    },
+    {
+      "name": "Tecnoblog",
+      "url": "https://tecnoblog.net/feed/",
+      "language": "pt",
+      "country": "br",
+      "category": "technology",
+      "platform": "wordpress"
+    },
+    {
+      "name": "Showmetech",
+      "url": "https://www.showmetech.com.br/feed/",
+      "language": "pt",
+      "country": "br",
+      "category": "technology",
+      "platform": "wordpress"
+    },
+    {
+      "name": "Meio Bit",
+      "url": "https://meiobit.com/feed/",
+      "language": "pt",
+      "country": "br",
+      "category": "technology",
+      "platform": "wordpress"
+    },
+    {
+      "name": "Mundo Conectado",
+      "url": "https://www.mundoconectado.com.br/feed/",
+      "language": "pt",
+      "country": "br",
+      "category": "technology",
+      "platform": "wordpress"
+    },
+    {
+      "name": "MacMagazine",
+      "url": "https://macmagazine.com.br/feed/",
+      "language": "pt",
+      "country": "br",
+      "category": "technology",
+      "platform": "wordpress"
+    },
+    {
+      "name": "AppsMania",
+      "url": "https://appsmania.com.br/feed/",
+      "language": "pt",
+      "country": "br",
+      "category": "technology",
+      "platform": "wordpress"
+    },
+    {
+      "name": "Android Pit Brasil",
+      "url": "https://www.androidpit.com.br/feed",
+      "language": "pt",
+      "country": "br",
+      "category": "technology",
+      "platform": "wordpress"
+    },
+    {
+      "name": "Tudocelular",
+      "url": "https://www.tudocelular.com/rss/home.xml",
+      "language": "pt",
+      "country": "br",
+      "category": "technology",
+      "platform": "custom"
+    },
+    {
+      "name": "Adrenaline",
+      "url": "https://adrenaline.com.br/feed/",
+      "language": "pt",
+      "country": "br",
+      "category": "technology",
+      "platform": "wordpress"
+    },
+    {
+      "name": "TechTudo",
+      "url": "https://www.techtudo.com.br/rss",
+      "language": "pt",
+      "country": "br",
+      "category": "technology",
+      "platform": "custom"
+    },
+    {
+      "name": "The Enemy",
+      "url": "https://www.theenemy.com.br/feed",
+      "language": "pt",
+      "country": "br",
+      "category": "technology",
+      "platform": "wordpress"
+    },
+    {
+      "name": "Oficina da Net",
+      "url": "https://www.oficinadanet.com.br/feed",
+      "language": "pt",
+      "country": "br",
+      "category": "technology",
+      "platform": "wordpress"
+    },
+    {
+      "name": "Pplware",
+      "url": "https://pplware.sapo.pt/feed/",
+      "language": "pt",
+      "country": "pt",
+      "category": "technology",
+      "platform": "wordpress"
+    },
+    {
+      "name": "4gnews",
+      "url": "https://4gnews.pt/feed/",
+      "language": "pt",
+      "country": "pt",
+      "category": "technology",
+      "platform": "wordpress"
+    },
+    {
+      "name": "Leak",
+      "url": "https://leak.pt/feed/",
+      "language": "pt",
+      "country": "pt",
+      "category": "technology",
+      "platform": "wordpress"
+    },
+    {
+      "name": "Android Geek",
+      "url": "https://androidgeek.pt/feed/",
+      "language": "pt",
+      "country": "pt",
+      "category": "technology",
+      "platform": "wordpress"
+    },
+    {
+      "name": "TugaTech",
+      "url": "https://tugatech.com.pt/feed",
+      "language": "pt",
+      "country": "pt",
+      "category": "technology",
+      "platform": "wordpress"
+    },
+    {
+      "name": "Zwame",
+      "url": "https://zwame.pt/site/rss",
+      "language": "pt",
+      "country": "pt",
+      "category": "technology",
+      "platform": "custom"
+    },
+    {
+      "name": "MobileMagazine",
+      "url": "https://mobilemagazine.pt/feed/",
+      "language": "pt",
+      "country": "pt",
+      "category": "technology",
+      "platform": "wordpress"
+    },
+    {
+      "name": "TEK Sapo",
+      "url": "https://tek.sapo.pt/feed/",
+      "language": "pt",
+      "country": "pt",
+      "category": "technology",
+      "platform": "wordpress"
+    },
+    {
+      "name": "HDblog",
+      "url": "https://www.hdblog.it/feed/",
+      "language": "it",
+      "country": "it",
+      "category": "technology",
+      "platform": "wordpress"
+    },
+    {
+      "name": "TuttoAndroid",
+      "url": "https://www.tuttoandroid.net/feed/",
+      "language": "it",
+      "country": "it",
+      "category": "technology",
+      "platform": "wordpress"
+    },
+    {
+      "name": "AndroidWorld",
+      "url": "https://www.androidworld.it/feed/",
+      "language": "it",
+      "country": "it",
+      "category": "technology",
+      "platform": "wordpress"
+    },
+    {
+      "name": "Pianeta Cellulare",
+      "url": "https://www.pianetacellulare.it/feed/",
+      "language": "it",
+      "country": "it",
+      "category": "technology",
+      "platform": "wordpress"
+    },
+    {
+      "name": "SmartWorld",
+      "url": "https://www.smartworld.it/feed/",
+      "language": "it",
+      "country": "it",
+      "category": "technology",
+      "platform": "wordpress"
+    },
+    {
+      "name": "TechPrincess",
+      "url": "https://techprincess.it/feed/",
+      "language": "it",
+      "country": "it",
+      "category": "technology",
+      "platform": "wordpress"
+    },
+    {
+      "name": "Everyeye Tech",
+      "url": "https://tech.everyeye.it/feed/rss",
+      "language": "it",
+      "country": "it",
+      "category": "technology",
+      "platform": "custom"
+    },
+    {
+      "name": "HTML.it",
+      "url": "https://www.html.it/feed/",
+      "language": "it",
+      "country": "it",
+      "category": "technology",
+      "platform": "wordpress"
+    },
+    {
+      "name": "Tecnologia++ Blogger",
+      "url": "https://tecnologiapiu.blogspot.com/feeds/posts/default",
+      "language": "it",
+      "country": "it",
+      "category": "technology",
+      "platform": "blogger"
+    },
+    {
+      "name": "HWUpgrade",
+      "url": "https://www.hwupgrade.it/rss/hwupgrade.xml",
+      "language": "it",
+      "country": "it",
+      "category": "technology",
+      "platform": "custom"
+    },
+    {
+      "name": "Downloadblog",
+      "url": "https://www.downloadblog.it/feed",
+      "language": "it",
+      "country": "it",
+      "category": "technology",
+      "platform": "wordpress"
+    },
+    {
+      "name": "Mobileworld",
+      "url": "https://www.mobileworld.it/feed/",
+      "language": "it",
+      "country": "it",
+      "category": "technology",
+      "platform": "wordpress"
+    },
+    {
+      "name": "TechZoom",
+      "url": "https://www.techzoom.it/feed/",
+      "language": "it",
+      "country": "it",
+      "category": "technology",
+      "platform": "wordpress"
+    },
+    {
+      "name": "iSpazio",
+      "url": "https://www.ispazio.net/feed",
+      "language": "it",
+      "country": "it",
+      "category": "technology",
+      "platform": "wordpress"
+    },
+    {
+      "name": "iPhoneItalia",
+      "url": "https://www.iphoneitalia.com/feed",
+      "language": "it",
+      "country": "it",
+      "category": "technology",
+      "platform": "wordpress"
+    },
+    {
+      "name": "Melablog",
+      "url": "https://www.melablog.it/feed",
+      "language": "it",
+      "country": "it",
+      "category": "technology",
+      "platform": "wordpress"
+    }
+  ]
+}
