@@ -1,0 +1,67 @@
+# Broken RSS Feed URLs (43 feeds)
+# Generated: 2026-02-26
+
+
+## Connection/SSL Error (3 feeds)
+
+https://www.biztrailblazer.com/feed
+https://www.revyuh.com/feed/
+https://www.businessinsider.sg/feed/
+
+## Empty Feed (No Content) (5 feeds)
+
+http://www.birminghampost.co.uk/business/rss.xml
+https://www.vox.com/rss/world/index.xml
+https://www.dailytelegraph.com.au/news/world/rss
+https://oglobo.globo.com/rss/
+https://www.jpost.com/rss/rssfeedshealth
+
+## HTTP 403 Forbidden (Access Denied) (12 feeds)
+
+https://www.yahoo.com/news/rss/world
+https://www.yahoo.com/news/rss/
+http://defence-blog.com/feed
+https://www.business-standard.com/rss/home_page_top_stories.rss
+https://mjbizdaily.com/feed/
+https://www.canadianbusiness.com/business-news/feed/
+https://www.yahoo.com/news/rss
+https://libn.com/feed/
+https://www.dnaindia.com/feeds/india.xml
+https://indianexpress.com/feed/
+https://www.oneindia.com/rss/news-india-fb.xml
+https://sbr.com.sg/rss2/news
+
+## HTTP 404 Not Found (Page Removed) (11 feeds)
+
+https://www.e-ir.info/category/blogs/feed/
+https://worldnewssuperfast.blogspot.com/feeds/posts/default?alt=rss
+https://bbj.hu/site/assets/rss/rss.php
+https://www.abc.net.au/news/feed/52278/rss.xml
+https://www.ctvnews.ca/rss/world/ctvnews-ca-world-public-rss-1.822289
+https://www.cnbc.com/id/19746125/device/rss/rss.xml
+http://www.haaretz.com/cmlink/1.4605045
+https://www.haaretz.com/cmlink/1.9188355
+https://www.todayonline.com/hot-news/feed
+https://www.handelsblatt.com/contentexport/feed/research-institut
+http://rss.focus.de/fol/XML/rss_folnews.xml
+
+## HTTP 410 Gone (Permanently Removed) (2 feeds)
+
+https://www.financialexpress.com/feed/
+https://www.sciencemag.org/rss/weekly_news_email.xml
+
+## Malformed XML/HTML (9 feeds)
+
+https://br.noticias.yahoo.com/rss
+https://it.notizie.yahoo.com/rss
+https://sputniknews.com/export/rss2/world/index.xml
+http://www.thestar.com/content/thestar/feed.RSSManagerServlet.articles.news.world.rss
+http://www.koreaherald.com/common/rss_xml.php?ct=102
+http://www.koreaherald.com/common/rss_xml.php?ct=103
+http://www.koreaherald.com/common/rss_xml.php?ct=305
+http://www.koreaherald.com/common/rss_xml.php?ct=107
+https://mothership.sg/feed/
+
+## Timeout (Too Slow) (1 feeds)
+
+http://feeds.washingtonpost.com/rss/world

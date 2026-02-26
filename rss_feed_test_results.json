@@ -1,0 +1,1426 @@
+{
+  "working": [
+    {
+      "url": "http://feeds.bbci.co.uk/news/world/latin_america/rss.xml",
+      "status": 200,
+      "error": null,
+      "entries_count": 19,
+      "title": "BBC News",
+      "response_time": 0.85,
+      "category": "working"
+    },
+    {
+      "url": "http://feeds.bbci.co.uk/news/rss.xml",
+      "status": 200,
+      "error": null,
+      "entries_count": 31,
+      "title": "BBC News",
+      "response_time": 0.1,
+      "category": "working"
+    },
+    {
+      "url": "https://www.nytimes.com/svc/collections/v1/publish/https://www.nytimes.com/section/world/rss.xml",
+      "status": 200,
+      "error": null,
+      "entries_count": 24,
+      "title": "NYT > World News",
+      "response_time": 0.21,
+      "category": "working"
+    },
+    {
+      "url": "https://au.news.yahoo.com/rss",
+      "status": 200,
+      "error": null,
+      "entries_count": 5,
+      "title": "Latest Australian and World News Headlines & Stories - Yahoo7 News",
+      "response_time": 0.7,
+      "category": "working"
+    },
+    {
+      "url": "https://uk.news.yahoo.com/rss",
+      "status": 200,
+      "error": null,
+      "entries_count": 39,
+      "title": "Yahoo News UK & Ireland - Latest World News & UK News Headlines",
+      "response_time": 0.98,
+      "category": "working"
+    },
+    {
+      "url": "https://www.buzzfeed.com/world.xml",
+      "status": 200,
+      "error": null,
+      "entries_count": 50,
+      "title": "BuzzFeed News",
+      "response_time": 0.13,
+      "category": "working"
+    },
+    {
+      "url": "http://www.aljazeera.com/xml/rss/all.xml",
+      "status": 200,
+      "error": null,
+      "entries_count": 25,
+      "title": "Al Jazeera – Breaking News, World News and Video from Al Jazeera",
+      "response_time": 0.22,
+      "category": "working"
+    },
+    {
+      "url": "https://www.globalissues.org/news/feed",
+      "status": 200,
+      "error": null,
+      "entries_count": 10,
+      "title": "Global Issues News Headlines",
+      "response_time": 0.46,
+      "category": "working"
+    },
+    {
+      "url": "https://www.thecipherbrief.com/feed",
+      "status": 200,
+      "error": null,
+      "entries_count": 30,
+      "title": "The Cipher Brief",
+      "response_time": 0.24,
+      "category": "working"
+    },
+    {
+      "url": "http://rss.cnn.com/rss/edition_world.rss",
+      "status": 200,
+      "error": null,
+      "entries_count": 29,
+      "title": "CNN.com - RSS Channel - World",
+      "response_time": 1.0,
+      "category": "working"
+    },
+    {
+      "url": "https://www.theguardian.com/world/rss",
+      "status": 200,
+      "error": null,
+      "entries_count": 45,
+      "title": "World news | The Guardian",
+      "response_time": 0.05,
+      "category": "working"
+    },
+    {
+      "url": "https://timesofindia.indiatimes.com/rssfeeds/296589292.cms",
+      "status": 200,
+      "error": null,
+      "entries_count": 20,
+      "title": "World News, Today World News, Latest International News, World Breaking News, Trending News of World - Times of India",
+      "response_time": 0.48,
+      "category": "working"
+    },
+    {
+      "url": "https://fortune.com/feed",
+      "status": 200,
+      "error": null,
+      "entries_count": 10,
+      "title": "Fortune | FORTUNE",
+      "response_time": 0.25,
+      "category": "working"
+    },
+    {
+      "url": "https://www.ft.com/?format=rss",
+      "status": 200,
+      "error": null,
+      "entries_count": 11,
+      "title": "UK homepage",
+      "response_time": 0.81,
+      "category": "working"
+    },
+    {
+      "url": "https://www.rfi.fr/fr/contenu/general/rss",
+      "status": 200,
+      "error": null,
+      "entries_count": 24,
+      "title": "Unknown",
+      "response_time": 0.93,
+      "category": "working"
+    },
+    {
+      "url": "https://www.rfi.fr/afrique/rss",
+      "status": 200,
+      "error": null,
+      "entries_count": 27,
+      "title": "L'actualité économique et politique en Afrique et au Maghreb en direct - RFI",
+      "response_time": 0.82,
+      "category": "working"
+    },
+    {
+      "url": "https://www.rfi.fr/ameriques/rss",
+      "status": 200,
+      "error": null,
+      "entries_count": 30,
+      "title": "L'actualité économique et politique aux Amériques en direct - RFI",
+      "response_time": 0.9,
+      "category": "working"
+    },
+    {
+      "url": "https://www.rfi.fr/asie-pacifique/rss",
+      "status": 200,
+      "error": null,
+      "entries_count": 30,
+      "title": "L'actualité économique et politique en Asie et dans le Pacifique - RFI",
+      "response_time": 0.97,
+      "category": "working"
+    },
+    {
+      "url": "https://www.rfi.fr/europe/rss",
+      "status": 200,
+      "error": null,
+      "entries_count": 30,
+      "title": "L'actualité économique et politique en Europe - RFI",
+      "response_time": 0.13,
+      "category": "working"
+    },
+    {
+      "url": "https://www.rfi.fr/france/rss",
+      "status": 200,
+      "error": null,
+      "entries_count": 30,
+      "title": "L'actualité économique et politique en France - RFI",
+      "response_time": 0.37,
+      "category": "working"
+    },
+    {
+      "url": "https://www.rfi.fr/moyen-orient/rss",
+      "status": 200,
+      "error": null,
+      "entries_count": 30,
+      "title": "L'actualité économique et politique au Moyen Orient - RFI",
+      "response_time": 0.77,
+      "category": "working"
+    },
+    {
+      "url": "https://www.rfi.fr/economie/rss",
+      "status": 200,
+      "error": null,
+      "entries_count": 30,
+      "title": "L'actualité économique mondiale en direct - RFI",
+      "response_time": 0.16,
+      "category": "working"
+    },
+    {
+      "url": "https://www.rfi.fr/science/rss",
+      "status": 200,
+      "error": null,
+      "entries_count": 30,
+      "title": "L'actualité scientifique en direct - RFI",
+      "response_time": 0.28,
+      "category": "working"
+    },
+    {
+      "url": "https://www.investing.com/rss/news.rss",
+      "status": 200,
+      "error": null,
+      "entries_count": 10,
+      "title": "All News",
+      "response_time": 0.27,
+      "category": "working"
+    },
+    {
+      "url": "https://seekingalpha.com/market_currents.xml",
+      "status": 200,
+      "error": null,
+      "entries_count": 7,
+      "title": "Breaking News on Seeking Alpha",
+      "response_time": 0.23,
+      "category": "working"
+    },
+    {
+      "url": "https://economictimes.indiatimes.com/rssfeedsdefault.cms",
+      "status": 200,
+      "error": null,
+      "entries_count": 76,
+      "title": "Economic Times",
+      "response_time": 0.41,
+      "category": "working"
+    },
+    {
+      "url": "https://finance.yahoo.com/news/rssindex",
+      "status": 200,
+      "error": null,
+      "entries_count": 44,
+      "title": "Yahoo Finance",
+      "response_time": 0.06,
+      "category": "working"
+    },
+    {
+      "url": "https://www.thehindubusinessline.com/?service=rss",
+      "status": 200,
+      "error": null,
+      "entries_count": 100,
+      "title": "Business News Today: Latest Business News, Finance News",
+      "response_time": 1.07,
+      "category": "working"
+    },
+    {
+      "url": "https://prod-qt-images.s3.amazonaws.com/production/bloombergquint/feed.xml",
+      "status": 200,
+      "error": null,
+      "entries_count": 20,
+      "title": "NDTV Profit",
+      "response_time": 0.49,
+      "category": "working"
+    },
+    {
+      "url": "https://www.moneyweb.co.za/feed/",
+      "status": 200,
+      "error": null,
+      "entries_count": 10,
+      "title": "Moneyweb",
+      "response_time": 0.57,
+      "category": "working"
+    },
+    {
+      "url": "https://business.financialpost.com/feed/",
+      "status": 200,
+      "error": null,
+      "entries_count": 10,
+      "title": "Financial Post",
+      "response_time": 0.5,
+      "category": "working"
+    },
+    {
+      "url": "https://www.bmmagazine.co.uk/feed/",
+      "status": 200,
+      "error": null,
+      "entries_count": 50,
+      "title": "Business Matters",
+      "response_time": 1.8,
+      "category": "working"
+    },
+    {
+      "url": "https://www.businessdailyafrica.com/latestrss.rss",
+      "status": 200,
+      "error": null,
+      "entries_count": 25,
+      "title": "- Business Daily",
+      "response_time": 0.28,
+      "category": "working"
+    },
+    {
+      "url": "http://rss.cnn.com/rss/money_topstories.rss",
+      "status": 200,
+      "error": null,
+      "entries_count": 20,
+      "title": "Business and financial news - CNNMoney.com",
+      "response_time": 0.25,
+      "category": "working"
+    },
+    {
+      "url": "https://businessday.ng/feed/",
+      "status": 200,
+      "error": null,
+      "entries_count": 5,
+      "title": "Businessday NG",
+      "response_time": 0.07,
+      "category": "working"
+    },
+    {
+      "url": "http://businessnews.com.ng/feed/",
+      "status": 200,
+      "error": null,
+      "entries_count": 10,
+      "title": "Nigeria Business News",
+      "response_time": 0.83,
+      "category": "working"
+    },
+    {
+      "url": "https://www.businessnews.com.ph/feed/",
+      "status": 200,
+      "error": null,
+      "entries_count": 10,
+      "title": "Business News Philippines",
+      "response_time": 0.85,
+      "category": "working"
+    },
+    {
+      "url": "https://www.thailand-business-news.com/feed",
+      "status": 200,
+      "error": null,
+      "entries_count": 10,
+      "title": "Thailand Business News",
+      "response_time": 0.33,
+      "category": "working"
+    },
+    {
+      "url": "https://www.ibtimes.com.au/rss",
+      "status": 200,
+      "error": null,
+      "entries_count": 25,
+      "title": "International Business Times Australia",
+      "response_time": 0.58,
+      "category": "working"
+    },
+    {
+      "url": "http://feeds.feedburner.com/JewishBusinessNews",
+      "status": 200,
+      "error": null,
+      "entries_count": 3,
+      "title": "Ateneoscienze",
+      "response_time": 0.99,
+      "category": "working"
+    },
+    {
+      "url": "https://iotbusinessnews.com/feed/",
+      "status": 200,
+      "error": null,
+      "entries_count": 25,
+      "title": "IoT Business News",
+      "response_time": 2.11,
+      "category": "working"
+    },
+    {
+      "url": "https://www.businessnews.com.au/rssfeed/latest.rss",
+      "status": 200,
+      "error": null,
+      "entries_count": 10,
+      "title": "Business News - Latest Headlines",
+      "response_time": 1.05,
+      "category": "working"
+    },
+    {
+      "url": "https://www.rt.com/rss/news/",
+      "status": 200,
+      "error": null,
+      "entries_count": 100,
+      "title": "RT World News",
+      "response_time": 1.21,
+      "category": "working"
+    },
+    {
+      "url": "http://feeds.feedburner.com/ndtvnews-world-news",
+      "status": 200,
+      "error": null,
+      "entries_count": 20,
+      "title": "NDTV News Search Records Found 1000",
+      "response_time": 0.22,
+      "category": "working"
+    },
+    {
+      "url": "http://www.npr.org/rss/rss.php?id=1004",
+      "status": 200,
+      "error": null,
+      "entries_count": 10,
+      "title": "NPR Topics: World",
+      "response_time": 0.11,
+      "category": "working"
+    },
+    {
+      "url": "http://abcnews.go.com/abcnews/internationalheadlines",
+      "status": 200,
+      "error": null,
+      "entries_count": 25,
+      "title": "ABC News: International",
+      "response_time": 1.33,
+      "category": "working"
+    },
+    {
+      "url": "https://www.spiegel.de/international/index.rss",
+      "status": 200,
+      "error": null,
+      "entries_count": 20,
+      "title": "DER SPIEGEL - International",
+      "response_time": 0.85,
+      "category": "working"
+    },
+    {
+      "url": "https://www.cbsnews.com/latest/rss/world",
+      "status": 200,
+      "error": null,
+      "entries_count": 30,
+      "title": "World - CBSNews.com",
+      "response_time": 0.62,
+      "category": "working"
+    },
+    {
+      "url": "http://www.independent.co.uk/news/world/rss",
+      "status": 200,
+      "error": null,
+      "entries_count": 100,
+      "title": "The Independent World",
+      "response_time": 0.24,
+      "category": "working"
+    },
+    {
+      "url": "http://www.cbc.ca/cmlink/rss-world",
+      "status": 200,
+      "error": null,
+      "entries_count": 19,
+      "title": "CBC | World News",
+      "response_time": 0.69,
+      "category": "working"
+    },
+    {
+      "url": "http://feeds.feedburner.com/time/world",
+      "status": 200,
+      "error": null,
+      "entries_count": 10,
+      "title": "World – TIME",
+      "response_time": 0.36,
+      "category": "working"
+    },
+    {
+      "url": "https://time.com/feed",
+      "status": 200,
+      "error": null,
+      "entries_count": 100,
+      "title": "TIME",
+      "response_time": 0.36,
+      "category": "working"
+    },
+    {
+      "url": "https://www.thesun.co.uk/news/worldnews/feed/",
+      "status": 200,
+      "error": null,
+      "entries_count": 30,
+      "title": "World News - Latest International & World News Today | The Sun",
+      "response_time": 1.09,
+      "category": "working"
+    },
+    {
+      "url": "https://www.latimes.com/world/rss2.0.xml",
+      "status": 200,
+      "error": null,
+      "entries_count": 98,
+      "title": "World & Nation",
+      "response_time": 0.24,
+      "category": "working"
+    },
+    {
+      "url": "http://www.mirror.co.uk/news/world-news/rss.xml",
+      "status": 200,
+      "error": null,
+      "entries_count": 25,
+      "title": "Mirror - World news",
+      "response_time": 1.96,
+      "category": "working"
+    },
+    {
+      "url": "https://www.euronews.com/rss?level=theme&name=news",
+      "status": 200,
+      "error": null,
+      "entries_count": 50,
+      "title": "News | Euronews RSS",
+      "response_time": 0.05,
+      "category": "working"
+    },
+    {
+      "url": "http://feeds.skynews.com/feeds/rss/world.xml",
+      "status": 200,
+      "error": null,
+      "entries_count": 10,
+      "title": "World News - Breaking international news and headlines | Sky News",
+      "response_time": 1.07,
+      "category": "working"
+    },
+    {
+      "url": "http://feeds.feedburner.com/daily-express-world-news",
+      "status": 200,
+      "error": null,
+      "entries_count": 10,
+      "title": "Daily Express :: World Feed",
+      "response_time": 1.17,
+      "category": "working"
+    },
+    {
+      "url": "http://www.smh.com.au/rssheadlines/world/article/rss.xml",
+      "status": 200,
+      "error": null,
+      "entries_count": 20,
+      "title": "Sydney Morning Herald - World",
+      "response_time": 1.4,
+      "category": "working"
+    },
+    {
+      "url": "https://www.scmp.com/rss/91/feed",
+      "status": 200,
+      "error": null,
+      "entries_count": 50,
+      "title": "News - South China Morning Post",
+      "response_time": 0.82,
+      "category": "working"
+    },
+    {
+      "url": "http://feeds.news24.com/articles/news24/World/rss",
+      "status": 200,
+      "error": null,
+      "entries_count": 20,
+      "title": "News24 news24/World/rss",
+      "response_time": 0.23,
+      "category": "working"
+    },
+    {
+      "url": "https://globalnews.ca/world/feed/",
+      "status": 200,
+      "error": null,
+      "entries_count": 10,
+      "title": ": World",
+      "response_time": 0.47,
+      "category": "working"
+    },
+    {
+      "url": "http://www.channelnewsasia.com/rssfeeds/8395884",
+      "status": 200,
+      "error": null,
+      "entries_count": 20,
+      "title": "Latest News",
+      "response_time": 0.51,
+      "category": "working"
+    },
+    {
+      "url": "https://www.rawstory.com/category/world/feed/",
+      "status": 200,
+      "error": null,
+      "entries_count": 30,
+      "title": "Raw Story",
+      "response_time": 0.32,
+      "category": "working"
+    },
+    {
+      "url": "https://www.seattletimes.com/nation-world/world/feed/",
+      "status": 200,
+      "error": null,
+      "entries_count": 34,
+      "title": "The Seattle Times World – The Seattle Times",
+      "response_time": 0.25,
+      "category": "working"
+    },
+    {
+      "url": "https://feeds.breakingnews.ie/bnworld",
+      "status": 200,
+      "error": null,
+      "entries_count": 10,
+      "title": "World: BreakingNews",
+      "response_time": 0.33,
+      "category": "working"
+    },
+    {
+      "url": "http://contenidos.lanacion.com.ar/herramientas/rss/origen=2",
+      "status": 200,
+      "error": null,
+      "entries_count": 100,
+      "title": "LA NACION",
+      "response_time": 0.84,
+      "category": "working"
+    },
+    {
+      "url": "http://contenidos.lanacion.com.ar/herramientas/rss/categoria_id=272",
+      "status": 200,
+      "error": null,
+      "entries_count": 100,
+      "title": "LA NACION",
+      "response_time": 0.29,
+      "category": "working"
+    },
+    {
+      "url": "https://extra.globo.com/rss.xml",
+      "status": 200,
+      "error": null,
+      "entries_count": 10,
+      "title": "Extra Online  -",
+      "response_time": 0.16,
+      "category": "working"
+    },
+    {
+      "url": "http://g1.globo.com/dynamo/rss2.xml",
+      "status": 200,
+      "error": null,
+      "entries_count": 100,
+      "title": "g1",
+      "response_time": 0.3,
+      "category": "working"
+    },
+    {
+      "url": "http://feeds.feedburner.com/sciencealert-latestnews",
+      "status": 200,
+      "error": null,
+      "entries_count": 10,
+      "title": "ScienceAlert",
+      "response_time": 1.73,
+      "category": "working"
+    },
+    {
+      "url": "https://www.newscientist.com/feed/home/?cmpid=RSS%7CNSNS-Home",
+      "status": 200,
+      "error": null,
+      "entries_count": 100,
+      "title": "New Scientist - Home",
+      "response_time": 0.06,
+      "category": "working"
+    },
+    {
+      "url": "http://rss.sciam.com/ScientificAmerican-Global",
+      "status": 200,
+      "error": null,
+      "entries_count": 50,
+      "title": "Scientific American Content: Global",
+      "response_time": 2.37,
+      "category": "working"
+    },
+    {
+      "url": "http://feeds.feedburner.com/AllDiscovermagazinecomContent",
+      "status": 200,
+      "error": null,
+      "entries_count": 20,
+      "title": "All Articles | Discover Magazine",
+      "response_time": 0.83,
+      "category": "working"
+    },
+    {
+      "url": "https://www.wired.com/category/science/feed",
+      "status": 200,
+      "error": null,
+      "entries_count": 20,
+      "title": "Science Latest",
+      "response_time": 0.22,
+      "category": "working"
+    },
+    {
+      "url": "https://www.popsci.com/arcio/rss/",
+      "status": 200,
+      "error": null,
+      "entries_count": 64,
+      "title": "Popular Science",
+      "response_time": 1.14,
+      "category": "working"
+    },
+    {
+      "url": "http://www.space.com/feeds/all",
+      "status": 200,
+      "error": null,
+      "entries_count": 50,
+      "title": "Latest from Space.com",
+      "response_time": 2.09,
+      "category": "working"
+    },
+    {
+      "url": "https://www.popsci.com/arcio/rss/",
+      "status": 200,
+      "error": null,
+      "entries_count": 64,
+      "title": "Popular Science",
+      "response_time": 0.53,
+      "category": "working"
+    },
+    {
+      "url": "https://www.cnbc.com/id/100727362/device/rss/rss.html",
+      "status": 200,
+      "error": null,
+      "entries_count": 30,
+      "title": "International: Top News And Analysis",
+      "response_time": 0.45,
+      "category": "working"
+    },
+    {
+      "url": "https://www.cnbc.com/id/100003114/device/rss/rss.html",
+      "status": 200,
+      "error": null,
+      "entries_count": 30,
+      "title": "US Top News and Analysis",
+      "response_time": 0.28,
+      "category": "working"
+    },
+    {
+      "url": "https://www.cnbc.com/id/19832390/device/rss/rss.html",
+      "status": 200,
+      "error": null,
+      "entries_count": 30,
+      "title": "Asia News",
+      "response_time": 0.22,
+      "category": "working"
+    },
+    {
+      "url": "https://www.cnbc.com/id/20910258/device/rss/rss.html",
+      "status": 200,
+      "error": null,
+      "entries_count": 30,
+      "title": "Economy",
+      "response_time": 0.25,
+      "category": "working"
+    },
+    {
+      "url": "https://www.cnbc.com/id/10001147/device/rss/rss.html",
+      "status": 200,
+      "error": null,
+      "entries_count": 30,
+      "title": "Business News",
+      "response_time": 0.19,
+      "category": "working"
+    },
+    {
+      "url": "https://www.cnbc.com/id/19836768/device/rss/rss.html",
+      "status": 200,
+      "error": null,
+      "entries_count": 30,
+      "title": "Energy",
+      "response_time": 0.18,
+      "category": "working"
+    },
+    {
+      "url": "https://www.cnbc.com/id/10000664/device/rss/rss.html",
+      "status": 200,
+      "error": null,
+      "entries_count": 30,
+      "title": "Finance",
+      "response_time": 0.48,
+      "category": "working"
+    },
+    {
+      "url": "https://www.cnbc.com/id/19854910/device/rss/rss.html",
+      "status": 200,
+      "error": null,
+      "entries_count": 30,
+      "title": "Tech",
+      "response_time": 0.15,
+      "category": "working"
+    },
+    {
+      "url": "https://www.nytimes.com/svc/collections/v1/publish/http://www.nytimes.com/section/science/rss.xml",
+      "status": 200,
+      "error": null,
+      "entries_count": 19,
+      "title": "NYT > Science",
+      "response_time": 0.81,
+      "category": "working"
+    },
+    {
+      "url": "https://www.indiatoday.in/rss/1206578",
+      "status": 200,
+      "error": null,
+      "entries_count": 20,
+      "title": "India Today | India",
+      "response_time": 0.53,
+      "category": "working"
+    },
+    {
+      "url": "https://www.thehindu.com/news/national/?service=rss",
+      "status": 200,
+      "error": null,
+      "entries_count": 100,
+      "title": "India Latest News: Top National Headlines Today & Breaking News | The Hindu",
+      "response_time": 1.14,
+      "category": "working"
+    },
+    {
+      "url": "http://www.news18.com/rss/india.xml",
+      "status": 200,
+      "error": null,
+      "entries_count": 200,
+      "title": "India News in news18.com, India Latest News, India News",
+      "response_time": 0.93,
+      "category": "working"
+    },
+    {
+      "url": "https://www.koreatimes.co.kr/www/rss/rss.xml",
+      "status": 200,
+      "error": null,
+      "entries_count": 59,
+      "title": "Korea Times News",
+      "response_time": 2.27,
+      "category": "working"
+    },
+    {
+      "url": "https://www.koreatimes.co.kr/www/rss/world.xml",
+      "status": 200,
+      "error": null,
+      "entries_count": 11,
+      "title": "Korea Times News",
+      "response_time": 2.25,
+      "category": "working"
+    },
+    {
+      "url": "https://www.koreatimes.co.kr/www/rss/tech.xml",
+      "status": 200,
+      "error": null,
+      "entries_count": 8,
+      "title": "Korea Times News",
+      "response_time": 2.2,
+      "category": "working"
+    },
+    {
+      "url": "https://www.koreatimes.co.kr/www/rss/biz.xml",
+      "status": 200,
+      "error": null,
+      "entries_count": 8,
+      "title": "Korea Times News",
+      "response_time": 1.66,
+      "category": "working"
+    },
+    {
+      "url": "https://www.timesofisrael.com/feed/",
+      "status": 200,
+      "error": null,
+      "entries_count": 15,
+      "title": "The Times of Israel",
+      "response_time": 0.55,
+      "category": "working"
+    },
+    {
+      "url": "https://www.jpost.com/rss/rssfeedsheadlines.aspx",
+      "status": 200,
+      "error": null,
+      "entries_count": 30,
+      "title": "JPost.com - Breaking News | The Jerusalem Post",
+      "response_time": 0.2,
+      "category": "working"
+    },
+    {
+      "url": "https://www.haaretz.com/cmlink/1.4605102",
+      "status": 200,
+      "error": null,
+      "entries_count": 100,
+      "title": "Haaretz latest headlines",
+      "response_time": 0.53,
+      "category": "working"
+    },
+    {
+      "url": "http://www.haaretz.com/cmlink/1.4605038",
+      "status": 200,
+      "error": null,
+      "entries_count": 35,
+      "title": "World News RSS",
+      "response_time": 0.71,
+      "category": "working"
+    },
+    {
+      "url": "http://www.haaretz.com/cmlink/1.4850006",
+      "status": 200,
+      "error": null,
+      "entries_count": 35,
+      "title": "Middle East News RSS",
+      "response_time": 0.63,
+      "category": "working"
+    },
+    {
+      "url": "http://www.haaretz.com/cmlink/1.4604160",
+      "status": 200,
+      "error": null,
+      "entries_count": 35,
+      "title": "Business RSS",
+      "response_time": 0.67,
+      "category": "working"
+    },
+    {
+      "url": "https://theindependent.sg/feed/",
+      "status": 200,
+      "error": null,
+      "entries_count": 10,
+      "title": "The Independent Singapore News",
+      "response_time": 1.0,
+      "category": "working"
+    },
+    {
+      "url": "https://www.theonlinecitizen.com/feed/",
+      "status": 200,
+      "error": null,
+      "entries_count": 10,
+      "title": "The Online Citizen",
+      "response_time": 1.56,
+      "category": "working"
+    },
+    {
+      "url": "http://feeds.feedburner.com/hardwarezone/all",
+      "status": 200,
+      "error": null,
+      "entries_count": 20,
+      "title": "HardwareZone Singapore",
+      "response_time": 0.22,
+      "category": "working"
+    },
+    {
+      "url": "http://feeds.feedburner.com/blogspot/wKTe",
+      "status": 200,
+      "error": null,
+      "entries_count": 25,
+      "title": "Singapore Stock Market News",
+      "response_time": 0.26,
+      "category": "working"
+    },
+    {
+      "url": "http://www.spiegel.de/schlagzeilen/rss/0,5291,676,00.xml",
+      "status": 200,
+      "error": null,
+      "entries_count": 20,
+      "title": "DER SPIEGEL - International",
+      "response_time": 1.66,
+      "category": "working"
+    },
+    {
+      "url": "https://www.handelsblatt.com/contentexport/feed/finanzen",
+      "status": 200,
+      "error": null,
+      "entries_count": 20,
+      "title": "Handelsblatt Schlagzeilen",
+      "response_time": 0.29,
+      "category": "working"
+    },
+    {
+      "url": "https://www.handelsblatt.com/contentexport/feed/technologie",
+      "status": 200,
+      "error": null,
+      "entries_count": 20,
+      "title": "Handelsblatt Schlagzeilen",
+      "response_time": 2.32,
+      "category": "working"
+    },
+    {
+      "url": "https://www.handelsblatt.com/contentexport/feed/top-themen",
+      "status": 200,
+      "error": null,
+      "entries_count": 24,
+      "title": "Handelsblatt Online Top-Themen",
+      "response_time": 1.61,
+      "category": "working"
+    },
+    {
+      "url": "http://www.tagesspiegel.de/contentexport/feed/home",
+      "status": 200,
+      "error": null,
+      "entries_count": 100,
+      "title": "tagesspiegel.de: News",
+      "response_time": 2.02,
+      "category": "working"
+    },
+    {
+      "url": "http://www.tagesspiegel.de/contentexport/feed/politik",
+      "status": 200,
+      "error": null,
+      "entries_count": 100,
+      "title": "tagesspiegel.de: News",
+      "response_time": 2.6,
+      "category": "working"
+    },
+    {
+      "url": "https://www.wired.com/feed/rss",
+      "status": 200,
+      "error": null,
+      "entries_count": 50,
+      "title": "WIRED",
+      "response_time": 0.05,
+      "category": "working"
+    },
+    {
+      "url": "https://www.wired.com/feed/category/business/latest/rss",
+      "status": 200,
+      "error": null,
+      "entries_count": 20,
+      "title": "Business Latest",
+      "response_time": 0.12,
+      "category": "working"
+    },
+    {
+      "url": "https://www.wired.com/feed/category/science/latest/rss",
+      "status": 200,
+      "error": null,
+      "entries_count": 20,
+      "title": "Science Latest",
+      "response_time": 0.15,
+      "category": "working"
+    },
+    {
+      "url": "https://www.wired.com/feed/category/ideas/latest/rss",
+      "status": 200,
+      "error": null,
+      "entries_count": 20,
+      "title": "Ideas Latest",
+      "response_time": 0.17,
+      "category": "working"
+    }
+  ],
+  "broken": [
+    {
+      "url": "https://www.yahoo.com/news/rss/world",
+      "status": 403,
+      "error": "HTTP 403",
+      "entries_count": 0,
+      "title": null,
+      "response_time": 0.26,
+      "category": "broken"
+    },
+    {
+      "url": "https://www.yahoo.com/news/rss/",
+      "status": 403,
+      "error": "HTTP 403",
+      "entries_count": 0,
+      "title": null,
+      "response_time": 0.25,
+      "category": "broken"
+    },
+    {
+      "url": "http://defence-blog.com/feed",
+      "status": 403,
+      "error": "HTTP 403",
+      "entries_count": 0,
+      "title": null,
+      "response_time": 0.24,
+      "category": "broken"
+    },
+    {
+      "url": "https://www.e-ir.info/category/blogs/feed/",
+      "status": 404,
+      "error": "HTTP 404",
+      "entries_count": 0,
+      "title": null,
+      "response_time": 0.99,
+      "category": "broken"
+    },
+    {
+      "url": "https://worldnewssuperfast.blogspot.com/feeds/posts/default?alt=rss",
+      "status": 404,
+      "error": "HTTP 404",
+      "entries_count": 0,
+      "title": null,
+      "response_time": 1.05,
+      "category": "broken"
+    },
+    {
+      "url": "https://www.financialexpress.com/feed/",
+      "status": 410,
+      "error": "HTTP 410",
+      "entries_count": 0,
+      "title": null,
+      "response_time": 0.39,
+      "category": "broken"
+    },
+    {
+      "url": "https://www.business-standard.com/rss/home_page_top_stories.rss",
+      "status": 403,
+      "error": "HTTP 403",
+      "entries_count": 0,
+      "title": null,
+      "response_time": 0.06,
+      "category": "broken"
+    },
+    {
+      "url": "https://mjbizdaily.com/feed/",
+      "status": 403,
+      "error": "HTTP 403",
+      "entries_count": 0,
+      "title": null,
+      "response_time": 0.28,
+      "category": "broken"
+    },
+    {
+      "url": "https://www.canadianbusiness.com/business-news/feed/",
+      "status": 403,
+      "error": "HTTP 403",
+      "entries_count": 0,
+      "title": null,
+      "response_time": 0.07,
+      "category": "broken"
+    },
+    {
+      "url": "https://www.yahoo.com/news/rss",
+      "status": 403,
+      "error": "HTTP 403",
+      "entries_count": 0,
+      "title": null,
+      "response_time": 0.44,
+      "category": "broken"
+    },
+    {
+      "url": "https://www.biztrailblazer.com/feed",
+      "status": null,
+      "error": "Connection error: Cannot connect to host www.biztrailblazer.com:443 ssl:default [Name or service not known]",
+      "entries_count": 0,
+      "title": null,
+      "response_time": null,
+      "category": "broken"
+    },
+    {
+      "url": "https://www.revyuh.com/feed/",
+      "status": null,
+      "error": "Connection error: Cannot connect to host www.revyuh.com:443 ssl:default [[SSL: SSLV3_ALERT_HANDSHAKE_FAILURE] sslv3 al",
+      "entries_count": 0,
+      "title": null,
+      "response_time": null,
+      "category": "broken"
+    },
+    {
+      "url": "https://bbj.hu/site/assets/rss/rss.php",
+      "status": 404,
+      "error": "HTTP 404",
+      "entries_count": 0,
+      "title": null,
+      "response_time": 0.75,
+      "category": "broken"
+    },
+    {
+      "url": "https://libn.com/feed/",
+      "status": 403,
+      "error": "HTTP 403",
+      "entries_count": 0,
+      "title": null,
+      "response_time": 0.08,
+      "category": "broken"
+    },
+    {
+      "url": "https://www.abc.net.au/news/feed/52278/rss.xml",
+      "status": 404,
+      "error": "HTTP 404",
+      "entries_count": 0,
+      "title": null,
+      "response_time": 0.06,
+      "category": "broken"
+    },
+    {
+      "url": "https://www.ctvnews.ca/rss/world/ctvnews-ca-world-public-rss-1.822289",
+      "status": 404,
+      "error": "HTTP 404",
+      "entries_count": 0,
+      "title": null,
+      "response_time": 0.67,
+      "category": "broken"
+    },
+    {
+      "url": "https://www.sciencemag.org/rss/weekly_news_email.xml",
+      "status": 410,
+      "error": "HTTP 410",
+      "entries_count": 0,
+      "title": null,
+      "response_time": 2.03,
+      "category": "broken"
+    },
+    {
+      "url": "https://www.cnbc.com/id/19746125/device/rss/rss.xml",
+      "status": 404,
+      "error": "HTTP 404",
+      "entries_count": 0,
+      "title": null,
+      "response_time": 0.22,
+      "category": "broken"
+    },
+    {
+      "url": "https://www.dnaindia.com/feeds/india.xml",
+      "status": 403,
+      "error": "HTTP 403",
+      "entries_count": 0,
+      "title": null,
+      "response_time": 0.08,
+      "category": "broken"
+    },
+    {
+      "url": "https://indianexpress.com/feed/",
+      "status": 403,
+      "error": "HTTP 403",
+      "entries_count": 0,
+      "title": null,
+      "response_time": 0.1,
+      "category": "broken"
+    },
+    {
+      "url": "https://www.oneindia.com/rss/news-india-fb.xml",
+      "status": 403,
+      "error": "HTTP 403",
+      "entries_count": 0,
+      "title": null,
+      "response_time": 0.1,
+      "category": "broken"
+    },
+    {
+      "url": "http://www.haaretz.com/cmlink/1.4605045",
+      "status": 404,
+      "error": "HTTP 404",
+      "entries_count": 0,
+      "title": null,
+      "response_time": 1.07,
+      "category": "broken"
+    },
+    {
+      "url": "https://www.haaretz.com/cmlink/1.9188355",
+      "status": 404,
+      "error": "HTTP 404",
+      "entries_count": 0,
+      "title": null,
+      "response_time": 0.77,
+      "category": "broken"
+    },
+    {
+      "url": "https://sbr.com.sg/rss2/news",
+      "status": 403,
+      "error": "HTTP 403",
+      "entries_count": 0,
+      "title": null,
+      "response_time": 0.08,
+      "category": "broken"
+    },
+    {
+      "url": "https://www.todayonline.com/hot-news/feed",
+      "status": 404,
+      "error": "HTTP 404",
+      "entries_count": 0,
+      "title": null,
+      "response_time": 2.19,
+      "category": "broken"
+    },
+    {
+      "url": "https://www.businessinsider.sg/feed/",
+      "status": null,
+      "error": "Connection error: Cannot connect to host www.businessinsider.sg:443 ssl:default [[SSL: TLSV1_ALERT_INTERNAL_ERROR] tls",
+      "entries_count": 0,
+      "title": null,
+      "response_time": null,
+      "category": "broken"
+    },
+    {
+      "url": "https://www.handelsblatt.com/contentexport/feed/research-institut",
+      "status": 404,
+      "error": "HTTP 404",
+      "entries_count": 0,
+      "title": null,
+      "response_time": 0.27,
+      "category": "broken"
+    },
+    {
+      "url": "http://rss.focus.de/fol/XML/rss_folnews.xml",
+      "status": 404,
+      "error": "HTTP 404",
+      "entries_count": 0,
+      "title": null,
+      "response_time": 0.5,
+      "category": "broken"
+    }
+  ],
+  "timeout": [
+    {
+      "url": "http://feeds.washingtonpost.com/rss/world",
+      "status": null,
+      "error": "Timeout",
+      "entries_count": 0,
+      "title": null,
+      "response_time": 15,
+      "category": "timeout"
+    }
+  ],
+  "invalid_xml": [
+    {
+      "url": "https://br.noticias.yahoo.com/rss",
+      "status": 200,
+      "error": "<unknown>:2:0: syntax error",
+      "entries_count": 0,
+      "title": null,
+      "response_time": 1.09,
+      "category": "invalid_xml"
+    },
+    {
+      "url": "https://it.notizie.yahoo.com/rss",
+      "status": 200,
+      "error": "<unknown>:2:0: syntax error",
+      "entries_count": 0,
+      "title": null,
+      "response_time": 1.33,
+      "category": "invalid_xml"
+    },
+    {
+      "url": "http://www.birminghampost.co.uk/business/rss.xml",
+      "status": 200,
+      "error": "No entries found",
+      "entries_count": 0,
+      "title": null,
+      "response_time": 1.5,
+      "category": "invalid_xml"
+    },
+    {
+      "url": "https://sputniknews.com/export/rss2/world/index.xml",
+      "status": 200,
+      "error": "<unknown>:36:59: not well-formed (invalid token)",
+      "entries_count": 0,
+      "title": null,
+      "response_time": 1.96,
+      "category": "invalid_xml"
+    },
+    {
+      "url": "https://www.vox.com/rss/world/index.xml",
+      "status": 200,
+      "error": "No entries found",
+      "entries_count": 0,
+      "title": null,
+      "response_time": 0.1,
+      "category": "invalid_xml"
+    },
+    {
+      "url": "http://www.thestar.com/content/thestar/feed.RSSManagerServlet.articles.news.world.rss",
+      "status": 200,
+      "error": "<unknown>:527:26: not well-formed (invalid token)",
+      "entries_count": 0,
+      "title": null,
+      "response_time": 1.1,
+      "category": "invalid_xml"
+    },
+    {
+      "url": "https://www.dailytelegraph.com.au/news/world/rss",
+      "status": 200,
+      "error": "No entries found",
+      "entries_count": 0,
+      "title": null,
+      "response_time": 0.42,
+      "category": "invalid_xml"
+    },
+    {
+      "url": "https://oglobo.globo.com/rss/",
+      "status": 200,
+      "error": "No entries found",
+      "entries_count": 0,
+      "title": null,
+      "response_time": 0.2,
+      "category": "invalid_xml"
+    },
+    {
+      "url": "http://www.koreaherald.com/common/rss_xml.php?ct=102",
+      "status": 200,
+      "error": "<unknown>:52:2: mismatched tag",
+      "entries_count": 0,
+      "title": null,
+      "response_time": 2.4,
+      "category": "invalid_xml"
+    },
+    {
+      "url": "http://www.koreaherald.com/common/rss_xml.php?ct=103",
+      "status": 200,
+      "error": "<unknown>:52:2: mismatched tag",
+      "entries_count": 0,
+      "title": null,
+      "response_time": 1.96,
+      "category": "invalid_xml"
+    },
+    {
+      "url": "http://www.koreaherald.com/common/rss_xml.php?ct=305",
+      "status": 200,
+      "error": "<unknown>:52:2: mismatched tag",
+      "entries_count": 0,
+      "title": null,
+      "response_time": 2.48,
+      "category": "invalid_xml"
+    },
+    {
+      "url": "http://www.koreaherald.com/common/rss_xml.php?ct=107",
+      "status": 200,
+      "error": "<unknown>:52:2: mismatched tag",
+      "entries_count": 0,
+      "title": null,
+      "response_time": 1.94,
+      "category": "invalid_xml"
+    },
+    {
+      "url": "https://www.jpost.com/rss/rssfeedshealth",
+      "status": 200,
+      "error": "No entries found",
+      "entries_count": 0,
+      "title": null,
+      "response_time": 0.16,
+      "category": "invalid_xml"
+    },
+    {
+      "url": "https://mothership.sg/feed/",
+      "status": 200,
+      "error": "<unknown>:214:79: not well-formed (invalid token)",
+      "entries_count": 0,
+      "title": null,
+      "response_time": 1.69,
+      "category": "invalid_xml"
+    }
+  ],
+  "total": 157,
+  "start_time": "2026-02-26T02:17:31.166474",
+  "end_time": "2026-02-26T02:18:25.220361"
+}

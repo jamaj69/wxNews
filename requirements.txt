@@ -1,0 +1,140 @@
+# pyTweeter - Python Dependencies
+# Generated: 2026-02-26
+# Python Version: 3.10+
+
+# ============================================
+# Core Async I/O
+# ============================================
+aiohttp>=3.9.0
+asyncio-standard-lib>=0.1.0; python_version < "3.10"
+
+# ============================================
+# Database Drivers
+# ============================================
+# SQLite (built-in with Python - no driver needed)
+# psycopg2-binary>=2.9.9  # PostgreSQL - NOT USED ANYMORE
+SQLAlchemy>=2.0.25
+
+# Redis
+redis>=5.0.1
+
+# ============================================
+# Configuration Management
+# ============================================
+python-decouple>=3.8
+
+# ============================================
+# GUI Framework
+# ============================================
+wxPython>=4.2.1
+wxasync>=0.5.0
+
+# ============================================
+# News & Content Collection
+# ============================================
+# RSS feed parsing
+feedparser>=6.0.10
+
+# HTTP requests
+requests>=2.31.0
+
+# Web scraping (optional)
+beautifulsoup4>=4.12.2
+lxml>=5.1.0
+
+# ============================================
+# Social Media (Twitter Replacement)
+# ============================================
+# Mastodon client - FREE real-time streaming!
+Mastodon.py>=1.8.1
+
+# Bluesky AT Protocol (optional)
+# atproto>=0.0.40
+
+# ============================================
+# Utilities
+# ============================================
+# Date/time handling
+python-dateutil>=2.8.2
+pytz>=2024.1
+
+# JSON handling (for compatibility)
+ujson>=5.9.0
+
+# Async utilities
+async-timeout>=4.0.3
+
+# ============================================
+# Logging & Monitoring
+# ============================================
+# Better logging
+loguru>=0.7.2
+
+# Error tracking (optional)
+sentry-sdk>=1.40.0
+
+# ============================================
+# Development & Testing
+# ============================================
+# Testing framework
+pytest>=8.0.0
+pytest-asyncio>=0.23.4
+pytest-cov>=4.1.0
+pytest-mock>=3.12.0
+
+# Code quality
+black>=24.1.1
+flake8>=7.0.0
+mypy>=1.8.0
+pylint>=3.0.3
+
+# Type stubs
+types-redis>=4.6.0
+types-requests>=2.31.0
+
+# ============================================
+# Documentation
+# ============================================
+# Markdown rendering
+markdown>=3.5.2
+
+# ============================================
+# Deprecated (DO NOT USE - Listed for reference)
+# ============================================
+# peony-twitter>=1.1.7  # UNMAINTAINED - Twitter v1.1 API deprecated
+
+# ============================================
+# Optional Enhancements
+# ============================================
+# AI/ML for content processing
+# openai>=1.12.0
+# transformers>=4.37.0
+
+# Image processing
+# Pillow>=10.2.0
+
+# Data analysis
+# pandas>=2.2.0
+# numpy>=1.26.0
+
+# ============================================
+# Production Deployment
+# ============================================
+# WSGI server (if adding web API)
+# gunicorn>=21.2.0
+
+# Task queue (for background jobs)
+# celery>=5.3.6
+
+# Process management
+# supervisor>=4.2.5
+
+# ============================================
+# Notes
+# ============================================
+# Install with: pip install -r requirements.txt
+# For development: pip install -r requirements.txt[dev]
+# For production: pip install -r requirements.txt --no-dev
+#
+# Pin exact versions in production:
+# pip freeze > requirements-lock.txt

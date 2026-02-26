@@ -1,0 +1,1145 @@
+{
+  "sources": [
+    {
+      "name": "BBC News",
+      "url": "http://feeds.bbcnews.com/news/rss.xml",
+      "language": "en",
+      "country": "uk",
+      "category": "general"
+    },
+    {
+      "name": "CNN",
+      "url": "http://rss.cnn.com/rss/edition.rss",
+      "language": "en",
+      "country": "us",
+      "category": "general"
+    },
+    {
+      "name": "The Guardian",
+      "url": "https://www.theguardian.com/world/rss",
+      "language": "en",
+      "country": "uk",
+      "category": "general"
+    },
+    {
+      "name": "Reuters",
+      "url": "https://www.reutersagency.com/feed/",
+      "language": "en",
+      "country": "us",
+      "category": "general"
+    },
+    {
+      "name": "Associated Press",
+      "url": "https://feeds.apnews.com/rss/apf-topnews",
+      "language": "en",
+      "country": "us",
+      "category": "general"
+    },
+    {
+      "name": "NPR News",
+      "url": "https://feeds.npr.org/1001/rss.xml",
+      "language": "en",
+      "country": "us",
+      "category": "general"
+    },
+    {
+      "name": "ABC News",
+      "url": "https://abcnews.go.com/abcnews/topstories",
+      "language": "en",
+      "country": "us",
+      "category": "general"
+    },
+    {
+      "name": "CBS News",
+      "url": "https://www.cbsnews.com/latest/rss/main",
+      "language": "en",
+      "country": "us",
+      "category": "general"
+    },
+    {
+      "name": "NBC News",
+      "url": "https://feeds.nbcnews.com/nbcnews/public/news",
+      "language": "en",
+      "country": "us",
+      "category": "general"
+    },
+    {
+      "name": "Fox News",
+      "url": "https://moxie.foxnews.com/google-publisher/latest.xml",
+      "language": "en",
+      "country": "us",
+      "category": "general"
+    },
+    {
+      "name": "The Washington Post",
+      "url": "https://feeds.washingtonpost.com/rss/world",
+      "language": "en",
+      "country": "us",
+      "category": "general"
+    },
+    {
+      "name": "USA Today",
+      "url": "http://rssfeeds.usatoday.com/usatoday-NewsTopStories",
+      "language": "en",
+      "country": "us",
+      "category": "general"
+    },
+    {
+      "name": "The Wall Street Journal",
+      "url": "https://feeds.a.dj.com/rss/WSJcomUSBusiness.xml",
+      "language": "en",
+      "country": "us",
+      "category": "business"
+    },
+    {
+      "name": "Bloomberg",
+      "url": "https://www.bloomberg.com/feed/news.rss",
+      "language": "en",
+      "country": "us",
+      "category": "business"
+    },
+    {
+      "name": "Financial Times",
+      "url": "https://www.ft.com/?format=rss",
+      "language": "en",
+      "country": "uk",
+      "category": "business"
+    },
+    {
+      "name": "The Economist",
+      "url": "https://www.economist.com/the-world-this-week/rss.xml",
+      "language": "en",
+      "country": "uk",
+      "category": "business"
+    },
+    {
+      "name": "The Independent",
+      "url": "https://www.independent.co.uk/news/world/rss",
+      "language": "en",
+      "country": "uk",
+      "category": "general"
+    },
+    {
+      "name": "The Telegraph",
+      "url": "https://www.telegraph.co.uk/news/rss.xml",
+      "language": "en",
+      "country": "uk",
+      "category": "general"
+    },
+    {
+      "name": "Daily Mail",
+      "url": "https://www.dailymail.co.uk/news/index.rss",
+      "language": "en",
+      "country": "uk",
+      "category": "general"
+    },
+    {
+      "name": "Sky News",
+      "url": "https://feeds.skynews.com/feeds/rss/home.xml",
+      "language": "en",
+      "country": "uk",
+      "category": "general"
+    },
+    {
+      "name": "Al Jazeera English",
+      "url": "https://www.aljazeera.com/xml/rss/all.xml",
+      "language": "en",
+      "country": "qa",
+      "category": "general"
+    },
+    {
+      "name": "Times of India",
+      "url": "https://timesofindia.indiatimes.com/rssfeedstopstories.cms",
+      "language": "en",
+      "country": "in",
+      "category": "general"
+    },
+    {
+      "name": "The Hindu",
+      "url": "https://www.thehindu.com/news/national/?service=rss",
+      "language": "en",
+      "country": "in",
+      "category": "general"
+    },
+    {
+      "name": "NDTV",
+      "url": "https://feeds.feedburner.com/ndtvnews-top-stories",
+      "language": "en",
+      "country": "in",
+      "category": "general"
+    },
+    {
+      "name": "India Today",
+      "url": "https://www.indiatoday.in/rss/1206514",
+      "language": "en",
+      "country": "in",
+      "category": "general"
+    },
+    {
+      "name": "ABC Australia",
+      "url": "https://www.abc.net.au/news/feed/51120/rss.xml",
+      "language": "en",
+      "country": "au",
+      "category": "general"
+    },
+    {
+      "name": "Sydney Morning Herald",
+      "url": "https://www.smh.com.au/rss/feed.xml",
+      "language": "en",
+      "country": "au",
+      "category": "general"
+    },
+    {
+      "name": "The Age",
+      "url": "https://www.theage.com.au/rss/feed.xml",
+      "language": "en",
+      "country": "au",
+      "category": "general"
+    },
+    {
+      "name": "CBC News",
+      "url": "https://www.cbc.ca/cmlink/rss-topstories",
+      "language": "en",
+      "country": "ca",
+      "category": "general"
+    },
+    {
+      "name": "Globe and Mail",
+      "url": "https://www.theglobeandmail.com/arc/outboundfeeds/rss/category/canada/",
+      "language": "en",
+      "country": "ca",
+      "category": "general"
+    },
+    {
+      "name": "Toronto Star",
+      "url": "https://www.thestar.com/search/?f=rss",
+      "language": "en",
+      "country": "ca",
+      "category": "general"
+    },
+    {
+      "name": "Irish Times",
+      "url": "https://www.irishtimes.com/cmlink/news-1.1319192",
+      "language": "en",
+      "country": "ie",
+      "category": "general"
+    },
+    {
+      "name": "New Zealand Herald",
+      "url": "https://www.nzherald.co.nz/arc/outboundfeeds/rss/curated/78/",
+      "language": "en",
+      "country": "nz",
+      "category": "general"
+    },
+    {
+      "name": "South China Morning Post",
+      "url": "https://www.scmp.com/rss/91/feed",
+      "language": "en",
+      "country": "hk",
+      "category": "general"
+    },
+    {
+      "name": "The Straits Times",
+      "url": "https://www.straitstimes.com/news/singapore/rss.xml",
+      "language": "en",
+      "country": "sg",
+      "category": "general"
+    },
+    {
+      "name": "Jerusalem Post",
+      "url": "https://www.jpost.com/rss/rssfeedsheadlines.aspx",
+      "language": "en",
+      "country": "il",
+      "category": "general"
+    },
+    {
+      "name": "Haaretz English",
+      "url": "https://www.haaretz.com/cmlink/1.628152",
+      "language": "en",
+      "country": "il",
+      "category": "general"
+    },
+    {
+      "name": "The Japan Times",
+      "url": "https://www.japantimes.co.jp/feed/",
+      "language": "en",
+      "country": "jp",
+      "category": "general"
+    },
+    {
+      "name": "Korea Times",
+      "url": "https://www.koreatimes.co.kr/www/rss/news.xml",
+      "language": "en",
+      "country": "kr",
+      "category": "general"
+    },
+    {
+      "name": "TechCrunch",
+      "url": "https://techcrunch.com/feed/",
+      "language": "en",
+      "country": "us",
+      "category": "technology"
+    },
+    {
+      "name": "Wired",
+      "url": "https://www.wired.com/feed/rss",
+      "language": "en",
+      "country": "us",
+      "category": "technology"
+    },
+    {
+      "name": "The Verge",
+      "url": "https://www.theverge.com/rss/index.xml",
+      "language": "en",
+      "country": "us",
+      "category": "technology"
+    },
+    {
+      "name": "Ars Technica",
+      "url": "https://feeds.arstechnica.com/arstechnica/index",
+      "language": "en",
+      "country": "us",
+      "category": "technology"
+    },
+    {
+      "name": "MIT Technology Review",
+      "url": "https://www.technologyreview.com/topnews.rss",
+      "language": "en",
+      "country": "us",
+      "category": "technology"
+    },
+    {
+      "name": "CNET",
+      "url": "https://www.cnet.com/rss/news/",
+      "language": "en",
+      "country": "us",
+      "category": "technology"
+    },
+    {
+      "name": "Engadget",
+      "url": "https://www.engadget.com/rss.xml",
+      "language": "en",
+      "country": "us",
+      "category": "technology"
+    },
+    {
+      "name": "Scientific American",
+      "url": "https://www.scientificamerican.com/feed/",
+      "language": "en",
+      "country": "us",
+      "category": "science"
+    },
+    {
+      "name": "Nature News",
+      "url": "https://www.nature.com/nature.rss",
+      "language": "en",
+      "country": "us",
+      "category": "science"
+    },
+    {
+      "name": "New Scientist",
+      "url": "https://www.newscientist.com/feed/home",
+      "language": "en",
+      "country": "uk",
+      "category": "science"
+    },
+    {
+      "name": "El País",
+      "url": "https://feeds.elpais.com/mrss-s/pages/ep/site/elpais.com/portada",
+      "language": "es",
+      "country": "es",
+      "category": "general"
+    },
+    {
+      "name": "El Mundo",
+      "url": "https://e00-elmundo.uecdn.es/elmundo/rss/portada.xml",
+      "language": "es",
+      "country": "es",
+      "category": "general"
+    },
+    {
+      "name": "ABC España",
+      "url": "https://www.abc.es/rss/feeds/abc_portada.xml",
+      "language": "es",
+      "country": "es",
+      "category": "general"
+    },
+    {
+      "name": "La Vanguardia",
+      "url": "https://www.lavanguardia.com/feed/",
+      "language": "es",
+      "country": "es",
+      "category": "general"
+    },
+    {
+      "name": "El Periódico",
+      "url": "https://www.elperiodico.com/es/rss/rss_portada.xml",
+      "language": "es",
+      "country": "es",
+      "category": "general"
+    },
+    {
+      "name": "20 Minutos",
+      "url": "https://www.20minutos.es/rss/",
+      "language": "es",
+      "country": "es",
+      "category": "general"
+    },
+    {
+      "name": "El Confidencial",
+      "url": "https://rss.elconfidencial.com/",
+      "language": "es",
+      "country": "es",
+      "category": "general"
+    },
+    {
+      "name": "El Español",
+      "url": "https://www.elespanol.com/rss/",
+      "language": "es",
+      "country": "es",
+      "category": "general"
+    },
+    {
+      "name": "La Razón",
+      "url": "https://www.larazon.es/rss/",
+      "language": "es",
+      "country": "es",
+      "category": "general"
+    },
+    {
+      "name": "Público España",
+      "url": "https://www.publico.es/rss/",
+      "language": "es",
+      "country": "es",
+      "category": "general"
+    },
+    {
+      "name": "La Nación Argentina",
+      "url": "https://www.lanacion.com.ar/arc/outboundfeeds/rss/",
+      "language": "es",
+      "country": "ar",
+      "category": "general"
+    },
+    {
+      "name": "Clarín",
+      "url": "https://www.clarin.com/rss/lo-ultimo/",
+      "language": "es",
+      "country": "ar",
+      "category": "general"
+    },
+    {
+      "name": "Página/12",
+      "url": "https://www.pagina12.com.ar/rss/portada",
+      "language": "es",
+      "country": "ar",
+      "category": "general"
+    },
+    {
+      "name": "Infobae Argentina",
+      "url": "https://www.infobae.com/feeds/rss/",
+      "language": "es",
+      "country": "ar",
+      "category": "general"
+    },
+    {
+      "name": "Perfil",
+      "url": "https://www.perfil.com/feed/",
+      "language": "es",
+      "country": "ar",
+      "category": "general"
+    },
+    {
+      "name": "El Universal México",
+      "url": "https://www.eluniversal.com.mx/rss.xml",
+      "language": "es",
+      "country": "mx",
+      "category": "general"
+    },
+    {
+      "name": "Reforma",
+      "url": "https://www.reforma.com/rss/portada.xml",
+      "language": "es",
+      "country": "mx",
+      "category": "general"
+    },
+    {
+      "name": "Milenio",
+      "url": "https://www.milenio.com/rss",
+      "language": "es",
+      "country": "mx",
+      "category": "general"
+    },
+    {
+      "name": "Excélsior",
+      "url": "https://www.excelsior.com.mx/rss.xml",
+      "language": "es",
+      "country": "mx",
+      "category": "general"
+    },
+    {
+      "name": "La Jornada",
+      "url": "https://www.jornada.com.mx/rss/edicion.xml",
+      "language": "es",
+      "country": "mx",
+      "category": "general"
+    },
+    {
+      "name": "El Financiero México",
+      "url": "https://www.elfinanciero.com.mx/arc/outboundfeeds/rss/",
+      "language": "es",
+      "country": "mx",
+      "category": "business"
+    },
+    {
+      "name": "El Economista México",
+      "url": "https://www.eleconomista.com.mx/rss/economia",
+      "language": "es",
+      "country": "mx",
+      "category": "business"
+    },
+    {
+      "name": "El Tiempo Colombia",
+      "url": "https://www.eltiempo.com/rss/",
+      "language": "es",
+      "country": "co",
+      "category": "general"
+    },
+    {
+      "name": "El Espectador",
+      "url": "https://www.elespectador.com/rss/",
+      "language": "es",
+      "country": "co",
+      "category": "general"
+    },
+    {
+      "name": "Semana",
+      "url": "https://www.semana.com/feeds/portada.xml",
+      "language": "es",
+      "country": "co",
+      "category": "general"
+    },
+    {
+      "name": "Portafolio Colombia",
+      "url": "https://www.portafolio.co/rss",
+      "language": "es",
+      "country": "co",
+      "category": "business"
+    },
+    {
+      "name": "El Mercurio Chile",
+      "url": "https://digital.elmercurio.com/suscripciones/rss/",
+      "language": "es",
+      "country": "cl",
+      "category": "general"
+    },
+    {
+      "name": "La Tercera",
+      "url": "https://www.latercera.com/arc/outboundfeeds/rss/",
+      "language": "es",
+      "country": "cl",
+      "category": "general"
+    },
+    {
+      "name": "Las Últimas Noticias",
+      "url": "https://www.lun.com/rss/",
+      "language": "es",
+      "country": "cl",
+      "category": "general"
+    },
+    {
+      "name": "Emol",
+      "url": "https://www.emol.com/rss/rss.asp",
+      "language": "es",
+      "country": "cl",
+      "category": "general"
+    },
+    {
+      "name": "El País Uruguay",
+      "url": "https://www.elpais.com.uy/rss",
+      "language": "es",
+      "country": "uy",
+      "category": "general"
+    },
+    {
+      "name": "El Observador Uruguay",
+      "url": "https://www.elobservador.com.uy/rss",
+      "language": "es",
+      "country": "uy",
+      "category": "general"
+    },
+    {
+      "name": "El Comercio Perú",
+      "url": "https://elcomercio.pe/arc/outboundfeeds/rss/",
+      "language": "es",
+      "country": "pe",
+      "category": "general"
+    },
+    {
+      "name": "La República Perú",
+      "url": "https://larepublica.pe/rss/",
+      "language": "es",
+      "country": "pe",
+      "category": "general"
+    },
+    {
+      "name": "El Deber Bolivia",
+      "url": "https://eldeber.com.bo/rss.xml",
+      "language": "es",
+      "country": "bo",
+      "category": "general"
+    },
+    {
+      "name": "El Nacional Venezuela",
+      "url": "https://www.elnacional.com/feed/",
+      "language": "es",
+      "country": "ve",
+      "category": "general"
+    },
+    {
+      "name": "La Prensa Panamá",
+      "url": "https://www.prensa.com/feed/",
+      "language": "es",
+      "country": "pa",
+      "category": "general"
+    },
+    {
+      "name": "La Nación Costa Rica",
+      "url": "https://www.nacion.com/arc/outboundfeeds/rss/",
+      "language": "es",
+      "country": "cr",
+      "category": "general"
+    },
+    {
+      "name": "El Salvador",
+      "url": "https://www.elsalvador.com/rss/",
+      "language": "es",
+      "country": "sv",
+      "category": "general"
+    },
+    {
+      "name": "Prensa Libre Guatemala",
+      "url": "https://www.prensalibre.com/feed/",
+      "language": "es",
+      "country": "gt",
+      "category": "general"
+    },
+    {
+      "name": "La Prensa Honduras",
+      "url": "https://www.laprensa.hn/rss",
+      "language": "es",
+      "country": "hn",
+      "category": "general"
+    },
+    {
+      "name": "El Nuevo Diario Nicaragua",
+      "url": "https://www.elnuevodiario.com.ni/feed/",
+      "language": "es",
+      "country": "ni",
+      "category": "general"
+    },
+    {
+      "name": "Listín Diario",
+      "url": "https://listindiario.com/feed/",
+      "language": "es",
+      "country": "do",
+      "category": "general"
+    },
+    {
+      "name": "CNN en Español",
+      "url": "http://cnnespanol.cnn.com/feed/",
+      "language": "es",
+      "country": "us",
+      "category": "general"
+    },
+    {
+      "name": "BBC Mundo",
+      "url": "https://www.bbc.com/mundo/rss.xml",
+      "language": "es",
+      "country": "uk",
+      "category": "general"
+    },
+    {
+      "name": "DW Español",
+      "url": "https://rss.dw.com/xml/rss-sp-all",
+      "language": "es",
+      "country": "de",
+      "category": "general"
+    },
+    {
+      "name": "France 24 Español",
+      "url": "https://www.france24.com/es/rss",
+      "language": "es",
+      "country": "fr",
+      "category": "general"
+    },
+    {
+      "name": "RT en Español",
+      "url": "https://actualidad.rt.com/rss",
+      "language": "es",
+      "country": "ru",
+      "category": "general"
+    },
+    {
+      "name": "Sputnik Español",
+      "url": "https://sputniknews.lat/export/rss2/archive/index.xml",
+      "language": "es",
+      "country": "ru",
+      "category": "general"
+    },
+    {
+      "name": "Euronews Español",
+      "url": "https://es.euronews.com/rss",
+      "language": "es",
+      "country": "fr",
+      "category": "general"
+    },
+    {
+      "name": "G1 Brasil",
+      "url": "https://g1.globo.com/rss/g1/",
+      "language": "pt",
+      "country": "br",
+      "category": "general"
+    },
+    {
+      "name": "Folha de S.Paulo",
+      "url": "https://feeds.folha.uol.com.br/emcimadahora/rss091.xml",
+      "language": "pt",
+      "country": "br",
+      "category": "general"
+    },
+    {
+      "name": "O Globo",
+      "url": "https://oglobo.globo.com/rss.xml",
+      "language": "pt",
+      "country": "br",
+      "category": "general"
+    },
+    {
+      "name": "Estadão",
+      "url": "https://www.estadao.com.br/rss/manchetes.xml",
+      "language": "pt",
+      "country": "br",
+      "category": "general"
+    },
+    {
+      "name": "UOL Notícias",
+      "url": "https://rss.uol.com.br/feed/noticias.xml",
+      "language": "pt",
+      "country": "br",
+      "category": "general"
+    },
+    {
+      "name": "R7 Notícias",
+      "url": "https://noticias.r7.com/feed.xml",
+      "language": "pt",
+      "country": "br",
+      "category": "general"
+    },
+    {
+      "name": "Veja",
+      "url": "https://veja.abril.com.br/feed/",
+      "language": "pt",
+      "country": "br",
+      "category": "general"
+    },
+    {
+      "name": "IstoÉ",
+      "url": "https://istoe.com.br/feed/",
+      "language": "pt",
+      "country": "br",
+      "category": "general"
+    },
+    {
+      "name": "Época",
+      "url": "https://epoca.globo.com/rss.xml",
+      "language": "pt",
+      "country": "br",
+      "category": "general"
+    },
+    {
+      "name": "Carta Capital",
+      "url": "https://www.cartacapital.com.br/feed/",
+      "language": "pt",
+      "country": "br",
+      "category": "general"
+    },
+    {
+      "name": "Correio Braziliense",
+      "url": "https://www.correiobraziliense.com.br/rss/",
+      "language": "pt",
+      "country": "br",
+      "category": "general"
+    },
+    {
+      "name": "Zero Hora",
+      "url": "https://gauchazh.clicrbs.com.br/ultimas-noticias/feed/",
+      "language": "pt",
+      "country": "br",
+      "category": "general"
+    },
+    {
+      "name": "Estado de Minas",
+      "url": "https://www.em.com.br/rss.xml",
+      "language": "pt",
+      "country": "br",
+      "category": "general"
+    },
+    {
+      "name": "O Dia",
+      "url": "https://odia.ig.com.br/rss",
+      "language": "pt",
+      "country": "br",
+      "category": "general"
+    },
+    {
+      "name": "Metrópoles",
+      "url": "https://www.metropoles.com/feed",
+      "language": "pt",
+      "country": "br",
+      "category": "general"
+    },
+    {
+      "name": "Gazeta do Povo",
+      "url": "https://www.gazetadopovo.com.br/feed/rss/",
+      "language": "pt",
+      "country": "br",
+      "category": "general"
+    },
+    {
+      "name": "Valor Econômico",
+      "url": "https://valor.globo.com/rss/",
+      "language": "pt",
+      "country": "br",
+      "category": "business"
+    },
+    {
+      "name": "Exame",
+      "url": "https://exame.com/feed/",
+      "language": "pt",
+      "country": "br",
+      "category": "business"
+    },
+    {
+      "name": "InfoMoney",
+      "url": "https://www.infomoney.com.br/feed/",
+      "language": "pt",
+      "country": "br",
+      "category": "business"
+    },
+    {
+      "name": "Olhar Digital",
+      "url": "https://olhardigital.com.br/feed/",
+      "language": "pt",
+      "country": "br",
+      "category": "technology"
+    },
+    {
+      "name": "Tecmundo",
+      "url": "https://www.tecmundo.com.br/rss",
+      "language": "pt",
+      "country": "br",
+      "category": "technology"
+    },
+    {
+      "name": "Canaltech",
+      "url": "https://canaltech.com.br/rss/",
+      "language": "pt",
+      "country": "br",
+      "category": "technology"
+    },
+    {
+      "name": "BBC Brasil",
+      "url": "https://www.bbc.com/portuguese/rss.xml",
+      "language": "pt",
+      "country": "uk",
+      "category": "general"
+    },
+    {
+      "name": "DW Brasil",
+      "url": "https://rss.dw.com/xml/rss-br-all",
+      "language": "pt",
+      "country": "de",
+      "category": "general"
+    },
+    {
+      "name": "Público Portugal",
+      "url": "https://www.publico.pt/rss",
+      "language": "pt",
+      "country": "pt",
+      "category": "general"
+    },
+    {
+      "name": "Expresso",
+      "url": "https://expresso.pt/rss",
+      "language": "pt",
+      "country": "pt",
+      "category": "general"
+    },
+    {
+      "name": "Jornal de Notícias",
+      "url": "https://www.jn.pt/rss.aspx",
+      "language": "pt",
+      "country": "pt",
+      "category": "general"
+    },
+    {
+      "name": "Correio da Manhã",
+      "url": "https://www.cmjornal.pt/rss",
+      "language": "pt",
+      "country": "pt",
+      "category": "general"
+    },
+    {
+      "name": "Diário de Notícias",
+      "url": "https://www.dn.pt/rss.aspx",
+      "language": "pt",
+      "country": "pt",
+      "category": "general"
+    },
+    {
+      "name": "Observador",
+      "url": "https://observador.pt/feed/",
+      "language": "pt",
+      "country": "pt",
+      "category": "general"
+    },
+    {
+      "name": "Sábado",
+      "url": "https://www.sabado.pt/rss",
+      "language": "pt",
+      "country": "pt",
+      "category": "general"
+    },
+    {
+      "name": "Sol Portugal",
+      "url": "https://sol.sapo.pt/rss",
+      "language": "pt",
+      "country": "pt",
+      "category": "general"
+    },
+    {
+      "name": "Notícias ao Minuto",
+      "url": "https://www.noticiasaominuto.com/rss/",
+      "language": "pt",
+      "country": "pt",
+      "category": "general"
+    },
+    {
+      "name": "RTP Notícias",
+      "url": "https://www.rtp.pt/noticias/rss",
+      "language": "pt",
+      "country": "pt",
+      "category": "general"
+    },
+    {
+      "name": "SIC Notícias",
+      "url": "https://sicnoticias.pt/rss",
+      "language": "pt",
+      "country": "pt",
+      "category": "general"
+    },
+    {
+      "name": "TVI24",
+      "url": "https://tvi.iol.pt/rss",
+      "language": "pt",
+      "country": "pt",
+      "category": "general"
+    },
+    {
+      "name": "Jornal Económico",
+      "url": "https://jornaleconomico.pt/feed",
+      "language": "pt",
+      "country": "pt",
+      "category": "business"
+    },
+    {
+      "name": "Dinheiro Vivo",
+      "url": "https://www.dinheirovivo.pt/feed/",
+      "language": "pt",
+      "country": "pt",
+      "category": "business"
+    },
+    {
+      "name": "Corriere della Sera",
+      "url": "https://xml2.corriereobjects.it/rss/homepage.xml",
+      "language": "it",
+      "country": "it",
+      "category": "general"
+    },
+    {
+      "name": "La Repubblica",
+      "url": "https://www.repubblica.it/rss/homepage/rss2.0.xml",
+      "language": "it",
+      "country": "it",
+      "category": "general"
+    },
+    {
+      "name": "La Stampa",
+      "url": "https://www.lastampa.it/rss/home.xml",
+      "language": "it",
+      "country": "it",
+      "category": "general"
+    },
+    {
+      "name": "Il Sole 24 Ore",
+      "url": "https://www.ilsole24ore.com/rss/italia.xml",
+      "language": "it",
+      "country": "it",
+      "category": "business"
+    },
+    {
+      "name": "Il Fatto Quotidiano",
+      "url": "https://www.ilfattoquotidiano.it/feed/",
+      "language": "it",
+      "country": "it",
+      "category": "general"
+    },
+    {
+      "name": "Il Messaggero",
+      "url": "https://www.ilmessaggero.it/rss/home.xml",
+      "language": "it",
+      "country": "it",
+      "category": "general"
+    },
+    {
+      "name": "Il Giornale",
+      "url": "https://www.ilgiornale.it/rss.xml",
+      "language": "it",
+      "country": "it",
+      "category": "general"
+    },
+    {
+      "name": "Huffington Post Italia",
+      "url": "https://www.huffingtonpost.it/rss/",
+      "language": "it",
+      "country": "it",
+      "category": "general"
+    },
+    {
+      "name": "Il Post",
+      "url": "https://www.ilpost.it/feed/",
+      "language": "it",
+      "country": "it",
+      "category": "general"
+    },
+    {
+      "name": "ANSA",
+      "url": "https://www.ansa.it/sito/ansait_rss.xml",
+      "language": "it",
+      "country": "it",
+      "category": "general"
+    },
+    {
+      "name": "AGI",
+      "url": "https://www.agi.it/cronaca/rss",
+      "language": "it",
+      "country": "it",
+      "category": "general"
+    },
+    {
+      "name": "Adnkronos",
+      "url": "https://www.adnkronos.com/rss",
+      "language": "it",
+      "country": "it",
+      "category": "general"
+    },
+    {
+      "name": "Sky TG24",
+      "url": "https://tg24.sky.it/rss/",
+      "language": "it",
+      "country": "it",
+      "category": "general"
+    },
+    {
+      "name": "RaiNews",
+      "url": "https://www.rainews.it/rss/homepage.xml",
+      "language": "it",
+      "country": "it",
+      "category": "general"
+    },
+    {
+      "name": "TGCom24",
+      "url": "https://www.tgcom24.mediaset.it/rss/",
+      "language": "it",
+      "country": "it",
+      "category": "general"
+    },
+    {
+      "name": "Libero Quotidiano",
+      "url": "https://www.liberoquotidiano.it/rss.xml",
+      "language": "it",
+      "country": "it",
+      "category": "general"
+    },
+    {
+      "name": "Il Secolo XIX",
+      "url": "https://www.ilsecoloxix.it/rss/",
+      "language": "it",
+      "country": "it",
+      "category": "general"
+    },
+    {
+      "name": "La Gazzetta dello Sport",
+      "url": "https://www.gazzetta.it/rss/home.xml",
+      "language": "it",
+      "country": "it",
+      "category": "sports"
+    },
+    {
+      "name": "Corriere dello Sport",
+      "url": "https://www.corrieredellosport.it/rss/",
+      "language": "it",
+      "country": "it",
+      "category": "sports"
+    },
+    {
+      "name": "Tuttosport",
+      "url": "https://www.tuttosport.com/rss/",
+      "language": "it",
+      "country": "it",
+      "category": "sports"
+    },
+    {
+      "name": "Milano Finanza",
+      "url": "https://www.milanofinanza.it/rss",
+      "language": "it",
+      "country": "it",
+      "category": "business"
+    },
+    {
+      "name": "Wired Italia",
+      "url": "https://www.wired.it/feed/rss",
+      "language": "it",
+      "country": "it",
+      "category": "technology"
+    },
+    {
+      "name": "Punto Informatico",
+      "url": "https://www.punto-informatico.it/feed/",
+      "language": "it",
+      "country": "it",
+      "category": "technology"
+    },
+    {
+      "name": "Tom's Hardware Italia",
+      "url": "https://www.tomshw.it/feed",
+      "language": "it",
+      "country": "it",
+      "category": "technology"
+    },
+    {
+      "name": "Euronews Italiano",
+      "url": "https://it.euronews.com/rss",
+      "language": "it",
+      "country": "fr",
+      "category": "general"
+    },
+    {
+      "name": "Swissinfo Italiano",
+      "url": "https://www.swissinfo.ch/ita/rss",
+      "language": "it",
+      "country": "ch",
+      "category": "general"
+    }
+  ]
+}
