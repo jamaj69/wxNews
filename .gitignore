@@ -184,6 +184,9 @@ dump.rdb
 \#*\#
 .\#*
 
+# wxGlade
+*.wxg
+
 # ============================================
 # Operating System
 # ============================================
@@ -228,6 +231,8 @@ tmp/
 *.tmp
 *.bak
 *.swp
+dask-worker-space/
+archive/
 
 # COVID data (unrelated to project)
 covid*.csv
