@@ -283,7 +283,7 @@ class NewsPanel(wx.Panel):
         self.url_queue = Queue()
   
         self.sources_list.Bind(wx.EVT_LIST_ITEM_SELECTED, self.OnSourceSelected)
-        self.news_list.Bind(wx.EVT_LIST_ITEM_SELECTED , self.OnLinkSelected)
+        self.news_list.Bind(wx.EVT_LIST_ITEM_ACTIVATED, self.OnLinkSelected)  # Double-click to open details
         
         self.Bind(wx.EVT_PAINT, self.OnPaint)
         
@@ -450,7 +450,7 @@ class NewsPanel(wx.Panel):
          
     
     def OnLinkSelected(self, event):
-        """Open article detail frame when article is selected"""
+        """Open article detail frame when article is double-clicked"""
         # Get selected item index
         selected_index = event.GetIndex()
         
