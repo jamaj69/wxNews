@@ -363,6 +363,7 @@ class NewsPanel(wx.Panel):
         # === MODE SELECTOR PANEL ===
         mode_panel = wx.Panel(self)
         mode_panel.SetBackgroundColour(wx.Colour(240, 240, 240))
+        mode_panel.SetMinSize((-1, 50))  # Fixed minimum height to prevent blinking
         mode_sizer = wx.BoxSizer(wx.HORIZONTAL)
         
         mode_label = wx.StaticText(mode_panel, label="View Mode:")
@@ -372,15 +373,19 @@ class NewsPanel(wx.Panel):
         mode_sizer.Add(mode_label, 0, wx.ALL | wx.ALIGN_CENTER_VERTICAL, 10)
         
         self.mode_radio_source = wx.RadioButton(mode_panel, label="By Source", style=wx.RB_GROUP)
+        self.mode_radio_source.SetMinSize((120, -1))  # Minimum width to prevent size issues
         self.mode_radio_all = wx.RadioButton(mode_panel, label="All News (Latest First)")
+        self.mode_radio_all.SetMinSize((180, -1))  # Minimum width to prevent size issues
         
         self.mode_radio_source.SetValue(True)  # Default to source mode
         
         mode_sizer.Add(self.mode_radio_source, 0, wx.ALL | wx.ALIGN_CENTER_VERTICAL, 5)
         mode_sizer.Add(self.mode_radio_all, 0, wx.ALL | wx.ALIGN_CENTER_VERTICAL, 5)
+        mode_sizer.AddStretchSpacer(1)  # Push everything to the left
         
         mode_panel.SetSizer(mode_sizer)
-        main_sizer.Add(mode_panel, 0, wx.EXPAND)
+        mode_sizer.Fit(mode_panel)  # Fit the sizer to contents
+        main_sizer.Add(mode_panel, 0, wx.EXPAND | wx.ALL, 0)
         
         # === CONTENT PANEL (sources list + news list) ===
         content_panel = wx.Panel(self)
@@ -550,9 +555,23 @@ class NewsPanel(wx.Panel):
             self.news_list.DeleteAllItems()
             
             if self.view_mode == 'all':
-                # Hide/show appropriate column labels for "All News" mode
+                # Check if sources are loaded
+                if not self.sources or len(self.sources) == 0:
+                    print("⚠️  Sources not loaded yet. Please wait for sources to load first.")
+                    # Show a message to user
+                    wx.MessageBox(
+                        "Sources are still loading. Please wait a moment and try again.",
+                        "Loading...",
+                        wx.OK | wx.ICON_INFORMATION
+                    )
+                    # Switch back to source mode
+                    self.mode_radio_source.SetValue(True)
+                    self.view_mode = 'source'
+                    return
+                
+                # Load all news
                 self.LoadAllNews()
-                print(f"Loaded {self.news_list.GetItemCount()} articles in All News mode")
+                print(f"✓ Loaded {self.news_list.GetItemCount()} articles in All News mode")
             else:
                 # Back to source mode - clear selection
                 print("Switched to Source mode - select a source to view articles")
@@ -687,88 +706,107 @@ class NewsPanel(wx.Panel):
     
     def LoadAllNews(self):
         """Load all articles from all sources, sorted by date (newest first)"""
-        print("\\nLoading all news articles...")
+        print("\nLoading all news articles...")
         
-        # Collect all articles from all sources
-        all_articles = []
+        # Freeze the window to prevent flickering during update
+        self.Freeze()
         
-        for source_key, source in self.sources.items():
-            source_name = source.get('name', 'Unknown')
-            articles = source.get('articles', {})
+        try:
+            # Collect all articles from all sources
+            all_articles = []
             
-            for article_key, article in articles.items():
-                # Add source info to each article
-                article_with_source = article.copy()
-                article_with_source['source_name'] = source_name
-                article_with_source['source_key'] = source_key
-                all_articles.append(article_with_source)
-        
-        print(f"Collected {len(all_articles)} articles from {len(self.sources)} sources")
-        
-        # Sort by publishedAt (newest first)
-        # Parse dates for sorting
-        def get_date(article):
-            try:
-                date_str = article.get('publishedAt', '')
-                if date_str:
-                    # Try to parse the date
-                    return date_parser.parse(date_str)
-                return datetime.min
-            except:
-                return datetime.min
-        
-        all_articles.sort(key=get_date, reverse=True)
-        
-        print(f"Sorted articles by date, displaying in news list...")
-        
-        # Display in news_list
-        self.populating_list = True
-        self.news_list.DeleteAllItems()
-        
-        for index, article in enumerate(all_articles):
-            url = article.get('url', '')
-            title = article.get('title', 'No Title')
-            article_key = article.get('id_article', '')
-            source_name = article.get('source_name', 'Unknown')
-            published = article.get('publishedAt', 'N/A')
+            for source_key, source in self.sources.items():
+                source_name = source.get('name', 'Unknown')
+                articles = source.get('articles', {})
+                
+                for article_key, article in articles.items():
+                    # Add source info to each article
+                    article_with_source = article.copy()
+                    article_with_source['source_name'] = source_name
+                    article_with_source['source_key'] = source_key
+                    all_articles.append(article_with_source)
             
-            # Convert bytes to string if needed
-            if isinstance(article_key, bytes):
-                article_key = article_key.decode('utf-8')
-            elif not isinstance(article_key, str):
-                article_key = str(article_key)
+            print(f"Collected {len(all_articles)} articles from {len(self.sources)} sources")
             
-            # Insert item
-            actual_index = self.news_list.InsertItem(self.news_list.GetItemCount(), url)
-            if actual_index != -1:
-                self.news_list.SetItem(actual_index, 1, title)
-                self.news_list.SetItem(actual_index, 2, article_key)
-                self.news_list.SetItem(actual_index, 3, source_name)
-                self.news_list.SetItem(actual_index, 4, published)
+            if len(all_articles) == 0:
+                print("⚠️  No articles found!")
+                wx.MessageBox(
+                    "No articles available to display. Please wait for the news to load.",
+                    "No Articles",
+                    wx.OK | wx.ICON_WARNING
+                )
+                return
             
-            # Update display every 100 items
-            if index % 100 == 0 and index > 0:
-                self.news_list.Update()
-                wx.SafeYield()
-                print(f"  Loaded {index} articles...")
-        
-        # Force column resize
-        width, height = self.news_list.GetSize()
-        if width > 0:
-            self.news_list.SetColumnWidth(0, 200)  # URL narrower
-            self.news_list.SetColumnWidth(1, max(450, int(width * 0.4)))  # Title wider
-            self.news_list.SetColumnWidth(2, 100)  # Article ID
-            self.news_list.SetColumnWidth(3, 180)  # Source
-            self.news_list.SetColumnWidth(4, 150)  # Published
-        
-        # Refresh display
-        self.news_list.Update()
-        self.news_list.Refresh()
-        
-        # Clear populating flag
-        wx.CallAfter(self._clear_populating_flag)
-        
-        print(f"✓ Loaded {len(all_articles)} articles in All News mode\\n")
+            # Sort by publishedAt (newest first)
+            # Parse dates for sorting
+            def get_date(article):
+                try:
+                    date_str = article.get('publishedAt', '')
+                    if date_str:
+                        # Try to parse the date
+                        parsed_date = date_parser.parse(date_str)
+                        # Remove timezone info to avoid comparison issues
+                        if parsed_date.tzinfo is not None:
+                            parsed_date = parsed_date.replace(tzinfo=None)
+                        return parsed_date
+                    return datetime.min
+                except Exception as e:
+                    # If parsing fails, return minimum date
+                    return datetime.min
+            
+            all_articles.sort(key=get_date, reverse=True)
+            
+            print(f"Sorted articles by date, displaying in news list...")
+            
+            # Display in news_list
+            self.populating_list = True
+            self.news_list.DeleteAllItems()
+            
+            for index, article in enumerate(all_articles):
+                url = article.get('url', '')
+                title = article.get('title', 'No Title')
+                article_key = article.get('id_article', '')
+                source_name = article.get('source_name', 'Unknown')
+                published = article.get('publishedAt', 'N/A')
+                
+                # Convert bytes to string if needed
+                if isinstance(article_key, bytes):
+                    article_key = article_key.decode('utf-8')
+                elif not isinstance(article_key, str):
+                    article_key = str(article_key)
+                
+                # Insert item
+                actual_index = self.news_list.InsertItem(self.news_list.GetItemCount(), url)
+                if actual_index != -1:
+                    self.news_list.SetItem(actual_index, 1, title)
+                    self.news_list.SetItem(actual_index, 2, article_key)
+                    self.news_list.SetItem(actual_index, 3, source_name)
+                    self.news_list.SetItem(actual_index, 4, published)
+                
+                # Log progress (but don't yield during update)
+                if index % 500 == 0 and index > 0:
+                    print(f"  Loaded {index} articles...")
+            
+            # Force column resize
+            width, height = self.news_list.GetSize()
+            if width > 0:
+                self.news_list.SetColumnWidth(0, 200)  # URL narrower
+                self.news_list.SetColumnWidth(1, max(450, int(width * 0.4)))  # Title wider
+                self.news_list.SetColumnWidth(2, 100)  # Article ID
+                self.news_list.SetColumnWidth(3, 180)  # Source
+                self.news_list.SetColumnWidth(4, 150)  # Published
+            
+            print(f"✓ Loaded {len(all_articles)} articles in All News mode\n")
+            
+        finally:
+            # Always thaw, even if error occurs
+            self.Thaw()
+            
+            # Clear populating flag and refresh display
+            self.populating_list = False
+            self.news_list.Update()
+            self.news_list.Refresh()
+            self.Layout()
     
     def OnLinkSelected(self, event):
         """Open article detail frame when article is double-clicked"""
