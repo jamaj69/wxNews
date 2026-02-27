@@ -525,6 +525,31 @@ class NewsGather():
         
         return None
     
+    async def extract_rss_feed_name(self, session, rss_url):
+        """
+        Extract feed title from RSS feed URL.
+        Used when source name is empty/missing.
+        """
+        try:
+            async with session.get(rss_url, timeout=aiohttp.ClientTimeout(total=10)) as response:
+                if response.status != 200:
+                    return None
+                
+                content = await response.text()
+                feed = feedparser.parse(content)
+                
+                # Try to get feed title
+                if hasattr(feed, 'feed') and hasattr(feed.feed, 'title'):
+                    title = feed.feed.title.strip()
+                    if title:
+                        self.logger.debug(f"Extracted feed name: {title}")
+                        return title
+                
+                return None
+        except Exception as e:
+            self.logger.debug(f"Failed to extract feed name from {rss_url}: {e}")
+            return None
+    
     async def register_rss_source(self, session, source_id, source_name, source_url):
         """
         Check if source has RSS feed and register it if found.
@@ -547,6 +572,13 @@ class NewsGather():
             # Try to discover RSS feed
             rss_url = await self.discover_rss_feed(session, domain, source_name)
             if rss_url:
+                # Extract feed title if source_name is empty
+                if not source_name or source_name.strip() == '':
+                    source_name = await self.extract_rss_feed_name(session, rss_url)
+                    if not source_name:
+                        # Fallback: generate from domain
+                        source_name = domain.replace('www.', '').split('.')[0].upper()
+                
                 # Register as new RSS source
                 new_rss_source = {
                     'id_source': rss_id,
