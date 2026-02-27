@@ -254,6 +254,7 @@ class NewsPanel(wx.Panel):
         
         self.sources = dict()
         self.current_source_key = None  # Track currently selected source
+        self.populating_list = False  # Flag to prevent event firing during list population
 
         self.sources_list = wx.ListCtrl(
             self, 
@@ -283,7 +284,7 @@ class NewsPanel(wx.Panel):
         self.url_queue = Queue()
   
         self.sources_list.Bind(wx.EVT_LIST_ITEM_SELECTED, self.OnSourceSelected)
-        self.news_list.Bind(wx.EVT_LIST_ITEM_ACTIVATED, self.OnLinkSelected)  # Double-click to open details
+        self.news_list.Bind(wx.EVT_LIST_ITEM_SELECTED, self.OnLinkSelected)  # Single-click to open details
         
         self.Bind(wx.EVT_PAINT, self.OnPaint)
         
@@ -410,6 +411,7 @@ class NewsPanel(wx.Panel):
          print(f"Parsed name: '{source}'")
          print(f"Available sources: {len(self.sources)}")
          
+         self.populating_list = True  # Set flag before populating
          self.news_list.DeleteAllItems()
          self.current_source_key = None  # Track current source
          
@@ -446,11 +448,16 @@ class NewsPanel(wx.Panel):
          if not found:
              print(f'✗ NO MATCH FOUND for: "{source}"')
          
+         self.populating_list = False  # Clear flag after populating
          print('='*50 + '\n')
          
     
     def OnLinkSelected(self, event):
-        """Open article detail frame when article is double-clicked"""
+        """Open article detail frame when article is clicked"""
+        # Ignore events during list population
+        if self.populating_list:
+            return
+        
         # Get selected item index
         selected_index = event.GetIndex()
         
