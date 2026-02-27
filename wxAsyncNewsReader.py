@@ -303,18 +303,23 @@ class NewsPanel(wx.Panel):
             print("First load - clearing sources list")
             self.sources_list.DeleteAllItems()
         
+        # Configuration: Minimum articles to show a source
+        MIN_ARTICLES = 10  # Only show sources with at least 10 articles
+        MAX_SOURCES = 50   # Show maximum 50 sources
+        
         con = eng.connect()
         stm = select(gm_sources)
-        rs = con.execute(stm) 
+        rs = con.execute(stm)
+        
+        # First pass: collect all sources with their article counts
+        source_list = []
         for source in rs.fetchall():
             source_id = source[0]
-            print("Source_id:",source_id)
             stm1 = select(gm_articles).where(gm_articles.c.id_source == source_id)
             articles_qry = con.execute(stm1)
             articles = dict()
             for article in articles_qry.fetchall():
                 article_key = article[0]
-#                print("Article_key",article_key)
                 articles[article_key] = {
                                     'id_article' : article_key ,
                                     'id_source' : article[1] ,
@@ -326,8 +331,35 @@ class NewsPanel(wx.Panel):
                                     'publishedAt' : article[7],
                                     'content' : article[8] 
                         }
+            
+            # Only keep sources with minimum article count
+            if len(articles) >= MIN_ARTICLES:
+                source_list.append({
+                    'source_id': source_id,
+                    'source_name': source[1],
+                    'source_data': source,
+                    'articles': articles,
+                    'article_count': len(articles)
+                })
+            
             wx.YieldIfNeeded()
-
+        
+        # Sort by article count (most articles first)
+        source_list.sort(key=lambda x: x['article_count'], reverse=True)
+        
+        # Limit to top N sources
+        source_list = source_list[:MAX_SOURCES]
+        
+        print(f"Filtered to {len(source_list)} sources (min {MIN_ARTICLES} articles, max {MAX_SOURCES} sources)")
+        
+        # Second pass: populate sources dict and list
+        for item in source_list:
+            source_id = item['source_id']
+            source = item['source_data']
+            articles = item['articles']
+            
+            print(f"Source: {item['source_name']} ({item['article_count']} articles)")
+            
             sources[source_id] = { 
                     'id_source': source_id,
                     'name': source[1],
@@ -338,16 +370,15 @@ class NewsPanel(wx.Panel):
                     'country': source[6],
                     'articles': articles
                  }
-            # Add sources with articles to the list (only on first load or if new)
-            if len(articles) > 0:
-                if is_first_load:
-                    self.sources_list.InsertItem(self.sources_list.GetItemCount(), source[1])
-                elif source_id not in self.sources:
-                    self.sources_list.InsertItem(0, source[1])
+            
+            # Add to list
+            if is_first_load:
+                self.sources_list.InsertItem(self.sources_list.GetItemCount(), f"{source[1]} ({item['article_count']})")
+            elif source_id not in self.sources:
+                self.sources_list.InsertItem(0, f"{source[1]} ({item['article_count']})")
 
         self.sources = sources
-        print(f"Loaded {len(sources)} sources, {sum(len(s['articles']) for s in sources.values())} total articles")
-        print(f"Sources with articles in list: {self.sources_list.GetItemCount()}")
+        print(f"Showing {len(sources)} sources with {sum(len(s['articles']) for s in sources.values())} total articles")
 #        print(sources)
         return sources
         
@@ -358,7 +389,13 @@ class NewsPanel(wx.Panel):
         evt.Skip()
     
     def OnSourceSelected(self, event):
-         source = event.GetText() #.replace(" ", "-")
+         source_text = event.GetText()
+         # Strip article count from source name (format: "Source Name (123)")
+         if '(' in source_text:
+             source = source_text.rsplit(' (', 1)[0]
+         else:
+             source = source_text
+         
          self.news_list.DeleteAllItems()
          self.current_source_key = None  # Track current source
 
