@@ -311,12 +311,43 @@ class NewsPanel(wx.Panel):
         stm = select(gm_sources)
         rs = con.execute(stm)
         
-        # First pass: collect all sources with their article counts
+        # First pass: count articles per source (lightweight)
         source_list = []
         for source in rs.fetchall():
             source_id = source[0]
-            stm1 = select(gm_articles).where(gm_articles.c.id_source == source_id)
-            articles_qry = con.execute(stm1)
+            # Use COUNT to get article count efficiently
+            from sqlalchemy import func
+            stm1 = select(func.count()).select_from(gm_articles).where(gm_articles.c.id_source == source_id)
+            article_count = con.execute(stm1).scalar()
+            
+            # Only keep sources with minimum article count AND non-empty names
+            source_name = source[1] if source[1] else ""
+            if article_count >= MIN_ARTICLES and source_name.strip():
+                source_list.append({
+                    'source_id': source_id,
+                    'source_name': source_name.strip(),
+                    'source_data': source,
+                    'article_count': article_count
+                })
+            
+            wx.YieldIfNeeded()
+        
+        # Sort by article count (most articles first)
+        source_list.sort(key=lambda x: x['article_count'], reverse=True)
+        
+        # Limit to top N sources
+        source_list = source_list[:MAX_SOURCES]
+        
+        print(f"Filtered to {len(source_list)} sources (min {MIN_ARTICLES} articles, max {MAX_SOURCES} sources)")
+        
+        # Second pass: load full articles ONLY for filtered sources
+        for item in source_list:
+            source_id = item['source_id']
+            source = item['source_data']
+            
+            # Now load the actual articles
+            stm2 = select(gm_articles).where(gm_articles.c.id_source == source_id)
+            articles_qry = con.execute(stm2)
             articles = dict()
             for article in articles_qry.fetchall():
                 article_key = article[0]
@@ -331,51 +362,29 @@ class NewsPanel(wx.Panel):
                                     'publishedAt' : article[7],
                                     'content' : article[8] 
                         }
-            
-            # Only keep sources with minimum article count
-            if len(articles) >= MIN_ARTICLES:
-                source_list.append({
-                    'source_id': source_id,
-                    'source_name': source[1],
-                    'source_data': source,
-                    'articles': articles,
-                    'article_count': len(articles)
-                })
-            
-            wx.YieldIfNeeded()
-        
-        # Sort by article count (most articles first)
-        source_list.sort(key=lambda x: x['article_count'], reverse=True)
-        
-        # Limit to top N sources
-        source_list = source_list[:MAX_SOURCES]
-        
-        print(f"Filtered to {len(source_list)} sources (min {MIN_ARTICLES} articles, max {MAX_SOURCES} sources)")
-        
-        # Second pass: populate sources dict and list
-        for item in source_list:
-            source_id = item['source_id']
-            source = item['source_data']
-            articles = item['articles']
+            item['articles'] = articles
             
             print(f"Source: {item['source_name']} ({item['article_count']} articles)")
             
+            # Use the stripped source name consistently
+            source_name = item['source_name']
+            
             sources[source_id] = { 
                     'id_source': source_id,
-                    'name': source[1],
+                    'name': source_name,  # Use stripped name
                     'description': source[2],
                     'url': source[3],
                     'category': source[4],
                     'language': source[5],
                     'country': source[6],
-                    'articles': articles
+                    'articles': item['articles']
                  }
             
             # Add to list
             if is_first_load:
-                self.sources_list.InsertItem(self.sources_list.GetItemCount(), f"{source[1]} ({item['article_count']})")
+                self.sources_list.InsertItem(self.sources_list.GetItemCount(), f"{source_name} ({item['article_count']})")
             elif source_id not in self.sources:
-                self.sources_list.InsertItem(0, f"{source[1]} ({item['article_count']})")
+                self.sources_list.InsertItem(0, f"{source_name} ({item['article_count']})")
 
         self.sources = sources
         print(f"Showing {len(sources)} sources with {sum(len(s['articles']) for s in sources.values())} total articles")
@@ -396,23 +405,33 @@ class NewsPanel(wx.Panel):
          else:
              source = source_text
          
+         print(f"\n=== Source Selected ===")
+         print(f"Display text: '{source_text}'")
+         print(f"Parsed name: '{source}'")
+         print(f"Available sources: {len(self.sources)}")
+         
          self.news_list.DeleteAllItems()
          self.current_source_key = None  # Track current source
-
+         
+         found = False
          for key in self.sources:
             source_key          = key
             source_name         = self.sources[key]['name']
             source_url          = self.sources[key]['url']
             source_description  = self.sources[key]['description']
             source_articles     = self.sources[key]['articles']
+            
+            print(f"  Checking: '{source_name}' == '{source}' ? {source_name == source}")
+            
             if source == source_name:
+                found = True
                 self.current_source_key = source_key  # Save for article selection
-                print('source_key',source_key)
-                print('source_name',source_name)
+                print(f'✓ MATCH! source_key: {source_key}')
+                print(f'  Articles: {len(source_articles)}')
 #                print('source_url',source_url)
 #                print('source_description',source_description)
 #                print('source_articles',source_articles)
-                print('\n')
+                
                 index = 0
                 for key in source_articles.keys():
                     self.news_list.InsertItem(index, source_articles[key]["url"])
@@ -420,8 +439,14 @@ class NewsPanel(wx.Panel):
                     self.news_list.SetItem(index, 2, key)
                     self.news_list.SetItem(index, 3, source_articles[key]["publishedAt"])
                     index += 1
-
-         print('\n')
+                
+                print(f'✓ Inserted {index} articles into news_list')
+                break  # Exit loop after finding match
+         
+         if not found:
+             print(f'✗ NO MATCH FOUND for: "{source}"')
+         
+         print('='*50 + '\n')
          
     
     def OnLinkSelected(self, event):
