@@ -436,27 +436,43 @@ class NewsPanel(wx.Panel):
                 
                 index = 0
                 for key in source_articles.keys():
-                    self.news_list.InsertItem(index, source_articles[key]["url"])
-                    self.news_list.SetItem(index, 1, source_articles[key]["title"])
-                    self.news_list.SetItem(index, 2, key)
-                    self.news_list.SetItem(index, 3, source_articles[key]["publishedAt"])
+                    # InsertItem returns the actual index where item was inserted
+                    actual_index = self.news_list.InsertItem(self.news_list.GetItemCount(), source_articles[key]["url"])
+                    self.news_list.SetItem(actual_index, 1, source_articles[key]["title"])
+                    self.news_list.SetItem(actual_index, 2, key)
+                    self.news_list.SetItem(actual_index, 3, source_articles[key]["publishedAt"])
                     index += 1
                 
                 print(f'✓ Inserted {index} articles into news_list')
+                print(f'DEBUG: List item count after insertion: {self.news_list.GetItemCount()}')
                 break  # Exit loop after finding match
          
          if not found:
              print(f'✗ NO MATCH FOUND for: "{source}"')
          
-         self.populating_list = False  # Clear flag after populating
+         # Refresh the list to ensure items are displayed
+         self.news_list.Refresh()
+         
+         # Use CallAfter to clear flag after all pending events are processed
+         wx.CallAfter(self._clear_populating_flag)
          print('='*50 + '\n')
+    
+    def _clear_populating_flag(self):
+        """Clear the populating flag after a short delay"""
+        self.populating_list = False
+        print("DEBUG: populating_list flag cleared")
          
     
     def OnLinkSelected(self, event):
         """Open article detail frame when article is clicked"""
+        print(f"DEBUG: OnLinkSelected fired, populating_list={self.populating_list}")
+        
         # Ignore events during list population
         if self.populating_list:
+            print("DEBUG: Ignoring event - still populating list")
             return
+        
+        print(f"DEBUG: Processing article selection, item count={self.news_list.GetItemCount()}")
         
         # Get selected item index
         selected_index = event.GetIndex()
