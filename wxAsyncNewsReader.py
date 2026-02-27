@@ -453,6 +453,15 @@ class NewsPanel(wx.Panel):
          # Refresh the list to ensure items are displayed
          self.news_list.Refresh()
          
+         # Force column resize to ensure they're visible
+         width, height = self.news_list.GetSize()
+         if width > 0:
+             self.news_list.SetColumnWidth(0, int(width * 0.25))
+             self.news_list.SetColumnWidth(1, int(width * 0.50))
+             self.news_list.SetColumnWidth(2, int(width * 0.10))
+             self.news_list.SetColumnWidth(3, int(width * 0.15))
+             print(f"DEBUG: Resized columns, list size: {width}x{height}")
+         
          # Use CallAfter to clear flag after all pending events are processed
          wx.CallAfter(self._clear_populating_flag)
          print('='*50 + '\n')
@@ -460,7 +469,36 @@ class NewsPanel(wx.Panel):
     def _clear_populating_flag(self):
         """Clear the populating flag after a short delay"""
         self.populating_list = False
-        print("DEBUG: populating_list flag cleared")
+        item_count = self.news_list.GetItemCount()
+        print(f"DEBUG: populating_list flag cleared, final item count: {item_count}")
+        
+        # Force layout update on the panel
+        self.Layout()
+        
+        # Force update of the list control
+        self.news_list.Update()
+        self.news_list.Refresh()
+        
+        # Force parent to update as well
+        parent = self.GetParent()
+        if parent:
+            parent.Layout()
+            parent.Refresh()
+        
+        # Try to select first item to make it visible
+        if item_count > 0:
+            self.news_list.EnsureVisible(0)
+            print(f"DEBUG: Made first item visible")
+            
+            # Check if list is actually shown and has size
+            print(f"DEBUG: news_list.IsShown() = {self.news_list.IsShown()}")
+            print(f"DEBUG: news_list.GetSize() = {self.news_list.GetSize()}")
+            
+            # Print first few items to verify they're actually there
+            for i in range(min(3, item_count)):
+                title = self.news_list.GetItem(i, 1).GetText()
+                url = self.news_list.GetItem(i, 0).GetText()
+                print(f"DEBUG: Item {i}: {title[:50]}... | URL: {url[:40]}...")
          
     
     def OnLinkSelected(self, event):
