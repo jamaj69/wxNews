@@ -15,9 +15,11 @@ from multiprocessing import Queue
 import wx 
 from wx import Frame, DefaultPosition, Size, Menu, MenuBar, App
 from wx import EVT_MENU, EVT_CLOSE
+import wx.html2
 import urllib.request 
 import json
 import webbrowser
+from datetime import datetime
 
 from wxasync import AsyncBind, WxAsyncApp, StartCoroutine
 import asyncio, aiohttp
@@ -47,6 +49,153 @@ class NewsPanel1(wx.Panel):
     def __init__(self, parent):
         wx.Panel.__init__(self, parent)
         self.SetBackgroundColour("gray")
+
+
+class ArticleDetailFrame(wx.Frame):
+    """Frame to display full article details with text and image"""
+    
+    def __init__(self, parent, article_data):
+        super(ArticleDetailFrame, self).__init__(
+            parent, 
+            title=article_data.get('title', 'Article Details')[:100],
+            size=(900, 700)
+        )
+        
+        self.article_data = article_data
+        self.Centre()
+        
+        # Create main panel
+        panel = wx.Panel(self)
+        main_sizer = wx.BoxSizer(wx.VERTICAL)
+        
+        # Title
+        title = article_data.get('title', 'No Title')
+        title_text = wx.StaticText(panel, label=title)
+        title_font = title_text.GetFont()
+        title_font.PointSize += 4
+        title_font = title_font.Bold()
+        title_text.SetFont(title_font)
+        title_text.Wrap(850)
+        main_sizer.Add(title_text, 0, wx.ALL|wx.EXPAND, 10)
+        
+        # Metadata line (Author, Date, Source)
+        metadata_parts = []
+        if article_data.get('author'):
+            metadata_parts.append(f"Author: {article_data['author']}")
+        if article_data.get('publishedAt'):
+            try:
+                pub_date = datetime.fromisoformat(article_data['publishedAt'].replace('Z', '+00:00'))
+                metadata_parts.append(f"Published: {pub_date.strftime('%Y-%m-%d %H:%M')}")
+            except:
+                metadata_parts.append(f"Published: {article_data['publishedAt']}")
+        if article_data.get('id_source'):
+            metadata_parts.append(f"Source: {article_data['id_source']}")
+        
+        if metadata_parts:
+            metadata_text = wx.StaticText(panel, label=" | ".join(metadata_parts))
+            metadata_font = metadata_text.GetFont()
+            metadata_font.PointSize -= 1
+            metadata_text.SetFont(metadata_font)
+            metadata_text.SetForegroundColour(wx.Colour(100, 100, 100))
+            main_sizer.Add(metadata_text, 0, wx.LEFT|wx.RIGHT|wx.BOTTOM|wx.EXPAND, 10)
+        
+        # Separator
+        main_sizer.Add(wx.StaticLine(panel), 0, wx.EXPAND|wx.ALL, 5)
+        
+        # Image (if available)
+        image_url = article_data.get('urlToImage')
+        if image_url and image_url.strip():
+            try:
+                # Try to load image from URL
+                import io
+                from PIL import Image as PILImage
+                import urllib.request
+                
+                req = urllib.request.Request(image_url, headers={'User-Agent': 'Mozilla/5.0'})
+                with urllib.request.urlopen(req, timeout=5) as response:
+                    image_data = response.read()
+                    image_stream = io.BytesIO(image_data)
+                    pil_image = PILImage.open(image_stream)
+                    
+                    # Resize if too large
+                    max_width = 850
+                    if pil_image.width > max_width:
+                        ratio = max_width / pil_image.width
+                        new_height = int(pil_image.height * ratio)
+                        pil_image = pil_image.resize((max_width, new_height), PILImage.Resampling.LANCZOS)
+                    
+                    # Convert to wx.Image
+                    width, height = pil_image.size
+                    wx_image = wx.Image(width, height)
+                    wx_image.SetData(pil_image.convert("RGB").tobytes())
+                    
+                    # Display image
+                    bitmap = wx.StaticBitmap(panel, bitmap=wx.Bitmap(wx_image))
+                    main_sizer.Add(bitmap, 0, wx.ALL|wx.ALIGN_CENTER, 10)
+            except Exception as e:
+                # If image loading fails, show placeholder
+                error_text = wx.StaticText(panel, label=f"[Image unavailable: {str(e)[:50]}]")
+                error_text.SetForegroundColour(wx.Colour(150, 150, 150))
+                main_sizer.Add(error_text, 0, wx.ALL, 10)
+        
+        # Description
+        description = article_data.get('description', '')
+        if description and description.strip():
+            desc_text = wx.StaticText(panel, label=description)
+            desc_font = desc_text.GetFont()
+            desc_font.PointSize += 1
+            desc_text.SetFont(desc_font)
+            desc_text.Wrap(850)
+            main_sizer.Add(desc_text, 0, wx.ALL|wx.EXPAND, 10)
+        
+        # Content
+        content = article_data.get('content', '')
+        if content and content.strip():
+            main_sizer.Add(wx.StaticLine(panel), 0, wx.EXPAND|wx.ALL, 5)
+            content_label = wx.StaticText(panel, label="Content:")
+            content_label_font = content_label.GetFont().Bold()
+            content_label.SetFont(content_label_font)
+            main_sizer.Add(content_label, 0, wx.LEFT|wx.TOP, 10)
+            
+            content_text = wx.TextCtrl(
+                panel, 
+                value=content,
+                style=wx.TE_MULTILINE|wx.TE_READONLY|wx.TE_WORDWRAP
+            )
+            main_sizer.Add(content_text, 1, wx.ALL|wx.EXPAND, 10)
+        else:
+            # Add spacer if no content
+            main_sizer.AddStretchSpacer()
+        
+        # Button panel
+        button_sizer = wx.BoxSizer(wx.HORIZONTAL)
+        
+        # Open in Browser button
+        url = article_data.get('url', '')
+        if url:
+            open_btn = wx.Button(panel, label="Open Full Article in Browser")
+            open_btn.Bind(wx.EVT_BUTTON, lambda evt: webbrowser.open(url))
+            button_sizer.Add(open_btn, 0, wx.ALL, 5)
+        
+        # Close button
+        close_btn = wx.Button(panel, wx.ID_CLOSE, "Close")
+        close_btn.Bind(wx.EVT_BUTTON, lambda evt: self.Close())
+        button_sizer.Add(close_btn, 0, wx.ALL, 5)
+        
+        main_sizer.Add(button_sizer, 0, wx.ALL|wx.ALIGN_CENTER, 10)
+        
+        panel.SetSizer(main_sizer)
+        
+        # Keyboard shortcuts
+        self.Bind(wx.EVT_CHAR_HOOK, self.OnKeyPress)
+        
+    def OnKeyPress(self, event):
+        """Handle keyboard shortcuts"""
+        keycode = event.GetKeyCode()
+        if keycode == wx.WXK_ESCAPE:
+            self.Close()
+        else:
+            event.Skip()
 
 
 def dbCredentials():
@@ -104,6 +253,7 @@ class NewsPanel(wx.Panel):
         self.SetBackgroundColour("gray")
         
         self.sources = dict()
+        self.current_source_key = None  # Track currently selected source
 
         self.sources_list = wx.ListCtrl(
             self, 
@@ -118,10 +268,10 @@ class NewsPanel(wx.Panel):
             size = (-1 , - 1),
             style=wx.LC_REPORT | wx.BORDER_SUNKEN
         )
-        self.news_list.InsertColumn(0, 'Link')
+        self.news_list.InsertColumn(0, 'URL')
         self.news_list.InsertColumn(1, 'Title')
-        self.news_list.InsertColumn(2, 'Hash url key')      
-        self.news_list.InsertColumn(3, 'TimeStamp')      
+        self.news_list.InsertColumn(2, 'Article ID')      
+        self.news_list.InsertColumn(3, 'Published')      
         
         sizer = wx.BoxSizer(wx.HORIZONTAL)
         sizer.Add(self.sources_list, 0, wx.ALL | wx.EXPAND)
@@ -196,6 +346,7 @@ class NewsPanel(wx.Panel):
     def OnSourceSelected(self, event):
          source = event.GetText() #.replace(" ", "-")
          self.news_list.DeleteAllItems()
+         self.current_source_key = None  # Track current source
 
          for key in self.sources:
             source_key          = key
@@ -204,6 +355,7 @@ class NewsPanel(wx.Panel):
             source_description  = self.sources[key]['description']
             source_articles     = self.sources[key]['articles']
             if source == source_name:
+                self.current_source_key = source_key  # Save for article selection
                 print('source_key',source_key)
                 print('source_name',source_name)
 #                print('source_url',source_url)
@@ -222,8 +374,31 @@ class NewsPanel(wx.Panel):
          
     
     def OnLinkSelected(self, event):
-          print(event.GetText()) 
-          webbrowser.open(event.GetText())           
+        """Open article detail frame when article is selected"""
+        # Get selected item index
+        selected_index = event.GetIndex()
+        
+        # Get article key from column 2
+        article_key = self.news_list.GetItem(selected_index, 2).GetText()
+        
+        # Get article data from sources
+        if hasattr(self, 'current_source_key') and self.current_source_key:
+            source = self.sources.get(self.current_source_key)
+            if source:
+                article_data = source['articles'].get(article_key)
+                if article_data:
+                    # Open detail frame
+                    detail_frame = ArticleDetailFrame(self, article_data)
+                    detail_frame.Show()
+                else:
+                    print(f"Article {article_key} not found")
+            else:
+                print(f"Source {self.current_source_key} not found")
+        else:
+            # Fallback: open URL in browser
+            url = self.news_list.GetItem(selected_index, 0).GetText()
+            if url:
+                webbrowser.open(url)           
 
 
 

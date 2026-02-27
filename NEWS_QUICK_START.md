@@ -16,7 +16,8 @@ This opens a GUI window to browse collected news.
 
 ### 3. Browse News!
 - Click a source on the left to see its articles
-- Click an article to open in your browser
+- Click an article to view full details (title, content, image)
+- Click "Open Full Article in Browser" to read on the original website
 
 ## 🛑 Stop the Collector
 ```bash

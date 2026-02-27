@@ -28,6 +28,7 @@ python-decouple>=3.8
 # ============================================
 wxPython>=4.2.1
 wxasync>=0.5.0
+Pillow>=10.0.0  # Image display in article viewer
 
 # ============================================
 # News & Content Collection

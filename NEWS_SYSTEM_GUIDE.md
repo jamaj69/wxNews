@@ -27,9 +27,11 @@ A graphical interface for reading collected news from the database. Does NOT col
 **Features:**
 - 📰 Two-panel interface: Sources list + Articles list
 - 🔍 Browse articles by source
+- 📖 **Detailed article viewer** with full text, images, and metadata
 - 🌐 Open articles in web browser
 - 🕐 Display article timestamps
 - 🔄 Auto-refresh from database every minute
+- ⌨️ Keyboard shortcuts (ESC to close detail view)
 
 ## Architecture
 
@@ -127,7 +129,12 @@ A GUI window will open with:
 - **Left panel**: List of news sources
 - **Right panel**: Articles from selected source
 - Click on a source to see its articles
-- Click on an article to open in browser
+- **Click on an article** to open detailed view with:
+  - Full title and metadata (author, date, source)
+  - Article image (if available)
+  - Description and content
+  - Button to open full article in browser
+- Double-click or use keyboard to navigate
 
 The GUI will auto-refresh every minute to show new articles.
 
