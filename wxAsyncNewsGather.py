@@ -35,6 +35,9 @@ from datetime import datetime
 # Load credentials from environment
 from decouple import config
 
+# Import article content fetcher
+from article_fetcher import fetch_article_content
+
 API_KEY1 = config('NEWS_API_KEY_1')
 API_KEY2 = config('NEWS_API_KEY_2')
 
@@ -47,6 +50,10 @@ RSS_BATCH_SIZE = int(config('RSS_BATCH_SIZE', default=20))
 MEDIASTACK_API_KEY = config('MEDIASTACK_API_KEY')
 MEDIASTACK_BASE_URL = config('MEDIASTACK_BASE_URL', default='https://api.mediastack.com/v1/news')
 MEDIASTACK_RATE_DELAY = 20  # Delay between requests (seconds) - 3 requests/minute
+
+# Content Enrichment Configuration
+ENRICH_MISSING_CONTENT = config('ENRICH_MISSING_CONTENT', default='true').lower() == 'true'
+ENRICH_TIMEOUT = int(config('ENRICH_TIMEOUT', default=10))
 
 
 def url_encode(url):
@@ -371,6 +378,9 @@ class NewsGather():
                             source_name         = article_source_name
                             article_author = article['author']
                             article_title = article['title']
+                            # Clean title: normalize whitespace
+                            if article_title:
+                                article_title = ' '.join(article_title.split())
                             article_description = article['description']
                             article_url = article['url']
                             article_urlToImage = article['urlToImage']
@@ -457,6 +467,9 @@ class NewsGather():
                                                 'publishedAt' : article_publishedAt,
                                                 'content' : article_content 
                                             }
+                            
+                            # Try to enrich with missing content from URL
+                            await self.enrich_article_content(new_article, source_name)
                             
                             self.logger.debug(f"Inserting article: {article_title[:50]}...")
                             # Use lock e context manager para evitar "database is locked"
@@ -686,6 +699,9 @@ class NewsGather():
                 for entry in feed.entries:
                     # Extract article data
                     title = entry.get('title', '')
+                    # Clean title: normalize whitespace
+                    if title:
+                        title = ' '.join(title.split())
                     url = entry.get('link', '')
                     description = entry.get('summary', entry.get('description', ''))
                     author = entry.get('author', '')
@@ -709,6 +725,9 @@ class NewsGather():
                         'publishedAt': published,
                         'content': ''
                     }
+                    
+                    # Try to enrich with missing content from URL
+                    await self.enrich_article_content(new_article, source_name)
                     
                     # Insert article
                     async with self.db_lock:
@@ -851,8 +870,8 @@ class NewsGather():
             published_at = article_data.get('published_at') or ''
             image = article_data.get('image') or ''
             
-            # Strip whitespace only if not empty
-            title = title.strip() if title else ''
+            # Strip and normalize whitespace
+            title = ' '.join(title.split()) if title else ''
             url = url.strip() if url else ''
             description = description.strip() if description else ''
             author = author.strip() if author else ''
@@ -910,6 +929,9 @@ class NewsGather():
                 'publishedAt': pub_date.isoformat(),
                 'content': ''
             }
+            
+            # Try to enrich with missing content from URL
+            await self.enrich_article_content(new_article, source_name)
             
             # Insert article with lock
             async with self.db_lock:
@@ -969,6 +991,86 @@ class NewsGather():
                     self.logger.error(f"Error ensuring MediaStack source exists: {e}")
                     conn.rollback()
                     return False
+    
+    async def enrich_article_content(self, article_dict, source_name=''):
+        """
+        Attempt to fetch missing content from article URL.
+        Updates article_dict in place with fetched data.
+        
+        Args:
+            article_dict: Dictionary with article data (must have 'url' key)
+            source_name: Source name for logging
+            
+        Returns:
+            bool: True if any content was fetched, False otherwise
+        """
+        # Check if enrichment is enabled
+        if not ENRICH_MISSING_CONTENT:
+            return False
+        
+        # Check if content is missing
+        has_author = article_dict.get('author', '').strip()
+        has_description = article_dict.get('description', '').strip()
+        has_content = article_dict.get('content', '').strip()
+        url = article_dict.get('url', '').strip()
+        
+        # If we already have everything, skip fetching
+        if has_author and has_description and has_content:
+            return False
+        
+        # If no URL, can't fetch
+        if not url:
+            return False
+        
+        # Attempt to fetch content
+        try:
+            self.logger.debug(f"🔍 [{source_name}] Attempting to fetch missing content from URL...")
+            
+            # Run fetch in thread pool to avoid blocking async loop
+            loop = asyncio.get_event_loop()
+            result = await loop.run_in_executor(
+                None,  # Use default executor
+                fetch_article_content,
+                url,
+                ENRICH_TIMEOUT
+            )
+            
+            if result and result.get('success'):
+                updated = []
+                
+                # Update author if missing
+                if not has_author and result.get('author'):
+                    article_dict['author'] = result['author'][:200]
+                    updated.append('author')
+                
+                # Update description if missing
+                if not has_description and result.get('description'):
+                    article_dict['description'] = result['description'][:1000]
+                    updated.append('description')
+                
+                # Update content if missing
+                if not has_content and result.get('content'):
+                    article_dict['content'] = result['content'][:2000]  # Store first 2000 chars
+                    updated.append('content')
+                
+                # Update published time if missing and fetched
+                if not article_dict.get('publishedAt') and result.get('published_time'):
+                    article_dict['publishedAt'] = result['published_time']
+                    updated.append('publishedAt')
+                
+                if updated:
+                    self.logger.info(f"✅ [{source_name}] Enriched article with: {', '.join(updated)}")
+                    return True
+                else:
+                    self.logger.debug(f"⚠️  [{source_name}] Fetch succeeded but no new data found")
+                    return False
+            else:
+                self.logger.debug(f"⚠️  [{source_name}] Content fetch failed or returned no data")
+                return False
+                
+        except Exception as e:
+            self.logger.warning(f"⚠️  [{source_name}] Error fetching content: {e}")
+            return False
                      
     def getNewsSources(self):
 #        url = "https://newsapi.org/v2/sources?country=br&apiKey=" + API_KEY

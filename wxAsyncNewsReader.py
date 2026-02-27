@@ -28,6 +28,7 @@ from asyncio.events import get_event_loop
 import time
 import base64
 import zlib
+from article_fetcher import fetch_article_content
 
 from sqlalchemy import (create_engine, Table, Column, Integer, 
     String, MetaData, Text)
@@ -183,8 +184,17 @@ class ArticleDetailFrame(wx.Frame):
         # Button panel
         button_sizer = wx.BoxSizer(wx.HORIZONTAL)
         
-        # Open in Browser button
+        # Fetch Content button (if content is missing)
+        description = article_data.get('description', '')
+        content = article_data.get('content', '')
         url = article_data.get('url', '')
+        
+        if url and not (description and description.strip()) and not (content and content.strip()):
+            fetch_btn = wx.Button(panel, label="🔄 Fetch Missing Content")
+            fetch_btn.Bind(wx.EVT_BUTTON, self.OnFetchContent)
+            button_sizer.Add(fetch_btn, 0, wx.ALL, 5)
+        
+        # Open in Browser button
         if url:
             open_btn = wx.Button(panel, label="Open Full Article in Browser")
             open_btn.Bind(wx.EVT_BUTTON, lambda evt: webbrowser.open(url))
@@ -268,18 +278,20 @@ class ArticleDetailFrame(wx.Frame):
             html += f'<img src="{image_url}" alt="Article image" onerror="this.style.display=\'none\'"/>'
         
         # Add description
-        if description and description.strip():
+        has_description = description and description.strip()
+        if has_description:
             html += f'<div class="description">{description}</div>'
         
         # Add content
-        if content and content.strip():
+        has_content = content and content.strip()
+        if has_content:
             # Replace newlines with <br> for better formatting
             content_html = content.replace('\n', '<br>')
             html += f'<div class="content">{content_html}</div>'
         
         # If no content, show message
-        if not (description or content):
-            html += '<div class="no-content">No article content available in database. Click "Open Full Article" to view in browser.</div>'
+        if not has_description and not has_content:
+            html += '<div class="no-content">📄 No article content available in database.<br><br>This article may only provide a title and link in the RSS feed.<br><br>💡 <b>Tip:</b> Click the "🔄 Fetch Missing Content" button above to automatically extract content from the article webpage.<br><br>Or click "Open Full Article in Browser" below to read the full content on the original site.</div>'
         
         # Add link to full article
         if url and url.strip():
@@ -295,6 +307,95 @@ class ArticleDetailFrame(wx.Frame):
             self.Close()
         else:
             event.Skip()
+    
+    def OnFetchContent(self, event):
+        """Fetch missing content from the article URL"""
+        url = self.article_data.get('url', '')
+        if not url:
+            wx.MessageBox("No URL available to fetch content from.", "Error", wx.OK | wx.ICON_ERROR)
+            return
+        
+        # Show progress dialog
+        progress = wx.ProgressDialog(
+            "Fetching Content",
+            f"Fetching article content from:\n{url[:60]}...",
+            maximum=100,
+            parent=self,
+            style=wx.PD_APP_MODAL | wx.PD_AUTO_HIDE
+        )
+        progress.Pulse("Requesting webpage...")
+        
+        try:
+            # Fetch content (this might take a few seconds)
+            wx.Yield()  # Allow UI to update
+            result = fetch_article_content(url, timeout=15)
+            
+            if result['success']:
+                # Update article data with fetched content
+                if result['author'] and not self.article_data.get('author'):
+                    self.article_data['author'] = result['author']
+                
+                if result['published_time'] and not self.article_data.get('publishedAt'):
+                    self.article_data['publishedAt'] = result['published_time']
+                
+                if result['description']:
+                    self.article_data['description'] = result['description']
+                
+                if result['content']:
+                    self.article_data['content'] = result['content']
+                
+                # Rebuild and refresh HTML content
+                html_content = self._build_html_content()
+                self.html_viewer.SetPage(html_content, "")
+                
+                # Update metadata display
+                author_text = self.article_data.get('author', 'Unknown')
+                published_text = self.article_data.get('publishedAt', 'Unknown')
+                
+                # Find and update the metadata panel
+                for child in self.GetChildren():
+                    if isinstance(child, wx.Panel):
+                        for subchild in child.GetChildren():
+                            if isinstance(subchild, wx.Panel):
+                                # This is likely the metadata panel
+                                for item in subchild.GetChildren():
+                                    if isinstance(item, wx.StaticText):
+                                        text = item.GetLabel()
+                                        if text.startswith('Author:'):
+                                            item.SetLabel(f'Author: {author_text}')
+                                        elif text.startswith('Published:'):
+                                            item.SetLabel(f'Published: {published_text}')
+                
+                progress.Update(100)
+                wx.MessageBox(
+                    f"Successfully fetched content!\n\nAuthor: {result['author'] or 'Not found'}\n"
+                    f"Published: {result['published_time'] or 'Not found'}\n"
+                    f"Content: {'Found' if result['content'] else 'Not found'}",
+                    "Success",
+                    wx.OK | wx.ICON_INFORMATION
+                )
+            else:
+                progress.Update(100)
+                wx.MessageBox(
+                    "Failed to fetch content from the article URL.\n\n"
+                    "This could be due to:\n"
+                    "- Paywall or login required\n"
+                    "- Website blocking automated access\n"
+                    "- Network connectivity issues\n"
+                    "- Page structure not supported",
+                    "Fetch Failed",
+                    wx.OK | wx.ICON_WARNING
+                )
+                
+        except Exception as e:
+            progress.Update(100)
+            wx.MessageBox(
+                f"Error fetching content:\n{str(e)}",
+                "Error",
+                wx.OK | wx.ICON_ERROR
+            )
+        finally:
+            progress.Destroy()
 
 
 def dbCredentials():
@@ -619,7 +720,12 @@ class NewsPanel(wx.Panel):
                 index = 0
                 for key in source_articles.keys():
                     url = source_articles[key]["url"] if source_articles[key]["url"] else ""
+                    # Clean up title: strip whitespace, replace multiple spaces, provide fallback
                     title = source_articles[key]["title"] if source_articles[key]["title"] else ""
+                    if title:
+                        title = ' '.join(title.split())  # Strip and normalize whitespace
+                    if not title or len(title.strip()) == 0:
+                        title = "(No Title)"
                     published = source_articles[key]["publishedAt"] if source_articles[key]["publishedAt"] else "N/A"
                     
                     # Use InsertStringItem for LC_REPORT mode
@@ -764,7 +870,12 @@ class NewsPanel(wx.Panel):
             
             for index, article in enumerate(all_articles):
                 url = article.get('url', '')
-                title = article.get('title', 'No Title')
+                # Clean up title: strip whitespace, replace multiple spaces, provide fallback
+                title = article.get('title', '')
+                if title:
+                    title = ' '.join(title.split())  # Strip and normalize whitespace
+                if not title or len(title.strip()) == 0:
+                    title = "(No Title)"
                 article_key = article.get('id_article', '')
                 source_name = article.get('source_name', 'Unknown')
                 published = article.get('publishedAt', 'N/A')
