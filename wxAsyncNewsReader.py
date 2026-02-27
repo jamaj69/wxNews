@@ -270,10 +270,10 @@ class NewsPanel(wx.Panel):
             size = (-1 , - 1),
             style=wx.LC_REPORT | wx.BORDER_SUNKEN
         )
-        self.news_list.InsertColumn(0, 'URL')
-        self.news_list.InsertColumn(1, 'Title')
-        self.news_list.InsertColumn(2, 'Article ID')      
-        self.news_list.InsertColumn(3, 'Published')      
+        self.news_list.InsertColumn(0, 'URL', width=250)
+        self.news_list.InsertColumn(1, 'Title', width=400)
+        self.news_list.InsertColumn(2, 'Article ID', width=100)      
+        self.news_list.InsertColumn(3, 'Published', width=150)      
         
         sizer = wx.BoxSizer(wx.HORIZONTAL)
         sizer.Add(self.sources_list, 0, wx.ALL | wx.EXPAND)
@@ -286,7 +286,7 @@ class NewsPanel(wx.Panel):
         self.sources_list.Bind(wx.EVT_LIST_ITEM_SELECTED, self.OnSourceSelected)
         self.news_list.Bind(wx.EVT_LIST_ITEM_SELECTED, self.OnLinkSelected)  # Single-click to open details
         
-        self.Bind(wx.EVT_PAINT, self.OnPaint)
+        # EVT_PAINT binding removed - column resizing now done in OnSourceSelected
         
         
 #        self.sources = self.InitArticles(self.eng, self.meta, self.gm_sources,self.gm_articles)
@@ -392,12 +392,6 @@ class NewsPanel(wx.Panel):
 #        print(sources)
         return sources
         
-    def OnPaint(self, evt):
-        width, height = self.news_list.GetSize()
-        for i in range(4):
-            self.news_list.SetColumnWidth(i, int(width/4))
-        evt.Skip()
-    
     def OnSourceSelected(self, event):
          source_text = event.GetText()
          # Strip article count from source name (format: "Source Name (123)")
@@ -436,12 +430,27 @@ class NewsPanel(wx.Panel):
                 
                 index = 0
                 for key in source_articles.keys():
-                    # InsertItem returns the actual index where item was inserted
-                    actual_index = self.news_list.InsertItem(self.news_list.GetItemCount(), source_articles[key]["url"])
-                    self.news_list.SetItem(actual_index, 1, source_articles[key]["title"])
-                    self.news_list.SetItem(actual_index, 2, key)
-                    self.news_list.SetItem(actual_index, 3, source_articles[key]["publishedAt"])
+                    url = source_articles[key]["url"] if source_articles[key]["url"] else ""
+                    title = source_articles[key]["title"] if source_articles[key]["title"] else ""
+                    published = source_articles[key]["publishedAt"] if source_articles[key]["publishedAt"] else "N/A"
+                    
+                    # Use InsertStringItem for LC_REPORT mode
+                    actual_index = self.news_list.InsertItem(self.news_list.GetItemCount(), url)
+                    if actual_index == -1:
+                        print(f"ERROR: InsertItem failed for article {index}")
+                        continue
+                    
+                    # Set remaining columns
+                    self.news_list.SetItem(actual_index, 1, title)
+                    self.news_list.SetItem(actual_index, 2, str(key))
+                    self.news_list.SetItem(actual_index, 3, published)
+                    
                     index += 1
+                    
+                    # Force update every 50 items to show progress
+                    if index % 50 == 0:
+                        self.news_list.Update()
+                        wx.SafeYield()
                 
                 print(f'✓ Inserted {index} articles into news_list')
                 print(f'DEBUG: List item count after insertion: {self.news_list.GetItemCount()}')
@@ -450,17 +459,20 @@ class NewsPanel(wx.Panel):
          if not found:
              print(f'✗ NO MATCH FOUND for: "{source}"')
          
-         # Refresh the list to ensure items are displayed
-         self.news_list.Refresh()
+         # Force immediate update before any other processing
+         self.news_list.Update()
          
          # Force column resize to ensure they're visible
          width, height = self.news_list.GetSize()
          if width > 0:
-             self.news_list.SetColumnWidth(0, int(width * 0.25))
-             self.news_list.SetColumnWidth(1, int(width * 0.50))
-             self.news_list.SetColumnWidth(2, int(width * 0.10))
-             self.news_list.SetColumnWidth(3, int(width * 0.15))
-             print(f"DEBUG: Resized columns, list size: {width}x{height}")
+             self.news_list.SetColumnWidth(0, 250)
+             self.news_list.SetColumnWidth(1, max(400, int(width * 0.5)))
+             self.news_list.SetColumnWidth(2, 100)
+             self.news_list.SetColumnWidth(3, 150)
+             print(f"DEBUG: Resized columns to fixed widths, list size: {width}x{height}")
+         
+         # Refresh the list to ensure items are displayed
+         self.news_list.Refresh()
          
          # Use CallAfter to clear flag after all pending events are processed
          wx.CallAfter(self._clear_populating_flag)
