@@ -216,6 +216,8 @@ $RECYCLE.BIN/
 *.log
 logs/
 pytweeter.log
+backfill.log
+backfill_full.log
 
 # Data files
 *.csv
@@ -231,6 +233,8 @@ tmp/
 *.tmp
 *.bak
 *.swp
+*.pid
+*.pi
 dask-worker-space/
 archive/
 
