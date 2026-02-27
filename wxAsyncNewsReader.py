@@ -52,120 +52,101 @@ class NewsPanel1(wx.Panel):
 
 
 class ArticleDetailFrame(wx.Frame):
-    """Frame to display full article details with text and image"""
+    """Frame to display full article details with metadata fields and HTML viewer"""
     
-    def __init__(self, parent, article_data):
+    def __init__(self, parent, article_data, source_name=''):
         super(ArticleDetailFrame, self).__init__(
             parent, 
             title=article_data.get('title', 'Article Details')[:100],
-            size=(900, 700)
+            size=(1000, 800)
         )
         
         self.article_data = article_data
+        self.source_name = source_name
         self.Centre()
         
         # Create main panel
         panel = wx.Panel(self)
         main_sizer = wx.BoxSizer(wx.VERTICAL)
         
+        # === METADATA SECTION AT TOP ===
+        metadata_panel = wx.Panel(panel)
+        metadata_panel.SetBackgroundColour(wx.Colour(245, 245, 245))
+        metadata_sizer = wx.BoxSizer(wx.VERTICAL)
+        
         # Title
         title = article_data.get('title', 'No Title')
-        title_text = wx.StaticText(panel, label=title)
+        title_text = wx.StaticText(metadata_panel, label=title)
         title_font = title_text.GetFont()
-        title_font.PointSize += 4
+        title_font.PointSize += 3
         title_font = title_font.Bold()
         title_text.SetFont(title_font)
-        title_text.Wrap(850)
-        main_sizer.Add(title_text, 0, wx.ALL|wx.EXPAND, 10)
+        title_text.Wrap(950)
+        metadata_sizer.Add(title_text, 0, wx.ALL|wx.EXPAND, 10)
         
-        # Metadata line (Author, Date, Source)
-        metadata_parts = []
-        if article_data.get('author'):
-            metadata_parts.append(f"Author: {article_data['author']}")
-        if article_data.get('publishedAt'):
+        # Metadata fields in a grid
+        fields_sizer = wx.FlexGridSizer(cols=2, hgap=10, vgap=5)
+        fields_sizer.AddGrowableCol(1, 1)
+        
+        # Source/Origin
+        fields_sizer.Add(wx.StaticText(metadata_panel, label="Source:"), 0, wx.ALIGN_RIGHT|wx.ALIGN_CENTER_VERTICAL)
+        source_value = self.source_name if self.source_name else article_data.get('id_source', 'N/A')
+        fields_sizer.Add(wx.StaticText(metadata_panel, label=source_value), 0, wx.EXPAND)
+        
+        # Author
+        fields_sizer.Add(wx.StaticText(metadata_panel, label="Author:"), 0, wx.ALIGN_RIGHT|wx.ALIGN_CENTER_VERTICAL)
+        author = article_data.get('author', 'N/A') if article_data.get('author') else 'N/A'
+        fields_sizer.Add(wx.StaticText(metadata_panel, label=author), 0, wx.EXPAND)
+        
+        # Published date/time
+        fields_sizer.Add(wx.StaticText(metadata_panel, label="Published:"), 0, wx.ALIGN_RIGHT|wx.ALIGN_CENTER_VERTICAL)
+        published = article_data.get('publishedAt', 'N/A')
+        if published and published != 'N/A':
             try:
-                pub_date = datetime.fromisoformat(article_data['publishedAt'].replace('Z', '+00:00'))
-                metadata_parts.append(f"Published: {pub_date.strftime('%Y-%m-%d %H:%M')}")
+                pub_date = datetime.fromisoformat(published.replace('Z', '+00:00'))
+                published = pub_date.strftime('%Y-%m-%d %H:%M:%S')
             except:
-                metadata_parts.append(f"Published: {article_data['publishedAt']}")
-        if article_data.get('id_source'):
-            metadata_parts.append(f"Source: {article_data['id_source']}")
+                pass
+        fields_sizer.Add(wx.StaticText(metadata_panel, label=published), 0, wx.EXPAND)
         
-        if metadata_parts:
-            metadata_text = wx.StaticText(panel, label=" | ".join(metadata_parts))
-            metadata_font = metadata_text.GetFont()
-            metadata_font.PointSize -= 1
-            metadata_text.SetFont(metadata_font)
-            metadata_text.SetForegroundColour(wx.Colour(100, 100, 100))
-            main_sizer.Add(metadata_text, 0, wx.LEFT|wx.RIGHT|wx.BOTTOM|wx.EXPAND, 10)
+        # URL
+        fields_sizer.Add(wx.StaticText(metadata_panel, label="URL:"), 0, wx.ALIGN_RIGHT|wx.ALIGN_CENTER_VERTICAL)
+        url = article_data.get('url', 'N/A')
+        url_text = wx.StaticText(metadata_panel, label=url)
+        url_text.SetForegroundColour(wx.BLUE)
+        url_text.SetCursor(wx.Cursor(wx.CURSOR_HAND))
+        if url and url != 'N/A':
+            url_text.Bind(wx.EVT_LEFT_DOWN, lambda evt: webbrowser.open(url))
+        fields_sizer.Add(url_text, 0, wx.EXPAND)
         
-        # Separator
-        main_sizer.Add(wx.StaticLine(panel), 0, wx.EXPAND|wx.ALL, 5)
-        
-        # Image (if available)
-        image_url = article_data.get('urlToImage')
+        # Image URL (if available)
+        image_url = article_data.get('urlToImage', '')
         if image_url and image_url.strip():
-            try:
-                # Try to load image from URL
-                import io
-                from PIL import Image as PILImage
-                import urllib.request
-                
-                req = urllib.request.Request(image_url, headers={'User-Agent': 'Mozilla/5.0'})
-                with urllib.request.urlopen(req, timeout=5) as response:
-                    image_data = response.read()
-                    image_stream = io.BytesIO(image_data)
-                    pil_image = PILImage.open(image_stream)
-                    
-                    # Resize if too large
-                    max_width = 850
-                    if pil_image.width > max_width:
-                        ratio = max_width / pil_image.width
-                        new_height = int(pil_image.height * ratio)
-                        pil_image = pil_image.resize((max_width, new_height), PILImage.Resampling.LANCZOS)
-                    
-                    # Convert to wx.Image
-                    width, height = pil_image.size
-                    wx_image = wx.Image(width, height)
-                    wx_image.SetData(pil_image.convert("RGB").tobytes())
-                    
-                    # Display image
-                    bitmap = wx.StaticBitmap(panel, bitmap=wx.Bitmap(wx_image))
-                    main_sizer.Add(bitmap, 0, wx.ALL|wx.ALIGN_CENTER, 10)
-            except Exception as e:
-                # If image loading fails, show placeholder
-                error_text = wx.StaticText(panel, label=f"[Image unavailable: {str(e)[:50]}]")
-                error_text.SetForegroundColour(wx.Colour(150, 150, 150))
-                main_sizer.Add(error_text, 0, wx.ALL, 10)
+            fields_sizer.Add(wx.StaticText(metadata_panel, label="Image URL:"), 0, wx.ALIGN_RIGHT|wx.ALIGN_CENTER_VERTICAL)
+            img_url_text = wx.StaticText(metadata_panel, label=image_url)
+            img_url_text.SetForegroundColour(wx.BLUE)
+            img_url_text.SetCursor(wx.Cursor(wx.CURSOR_HAND))
+            img_url_text.Bind(wx.EVT_LEFT_DOWN, lambda evt: webbrowser.open(image_url))
+            fields_sizer.Add(img_url_text, 0, wx.EXPAND)
         
-        # Description
-        description = article_data.get('description', '')
-        if description and description.strip():
-            desc_text = wx.StaticText(panel, label=description)
-            desc_font = desc_text.GetFont()
-            desc_font.PointSize += 1
-            desc_text.SetFont(desc_font)
-            desc_text.Wrap(850)
-            main_sizer.Add(desc_text, 0, wx.ALL|wx.EXPAND, 10)
+        metadata_sizer.Add(fields_sizer, 0, wx.ALL|wx.EXPAND, 10)
+        metadata_panel.SetSizer(metadata_sizer)
+        main_sizer.Add(metadata_panel, 0, wx.ALL|wx.EXPAND, 5)
         
-        # Content
-        content = article_data.get('content', '')
-        if content and content.strip():
-            main_sizer.Add(wx.StaticLine(panel), 0, wx.EXPAND|wx.ALL, 5)
-            content_label = wx.StaticText(panel, label="Content:")
-            content_label_font = content_label.GetFont().Bold()
-            content_label.SetFont(content_label_font)
-            main_sizer.Add(content_label, 0, wx.LEFT|wx.TOP, 10)
-            
-            content_text = wx.TextCtrl(
-                panel, 
-                value=content,
-                style=wx.TE_MULTILINE|wx.TE_READONLY|wx.TE_WORDWRAP
-            )
-            main_sizer.Add(content_text, 1, wx.ALL|wx.EXPAND, 10)
-        else:
-            # Add spacer if no content
-            main_sizer.AddStretchSpacer()
+        # === HTML VIEWER SECTION AT BOTTOM ===
+        html_label = wx.StaticText(panel, label="Article Content:")
+        html_label_font = html_label.GetFont().Bold()
+        html_label.SetFont(html_label_font)
+        main_sizer.Add(html_label, 0, wx.LEFT|wx.TOP, 10)
+        
+        # Create HTML viewer
+        self.html_viewer = wx.html2.WebView.New(panel)
+        
+        # Build HTML content from article data
+        html_content = self._build_html_content()
+        self.html_viewer.SetPage(html_content, "")
+        
+        main_sizer.Add(self.html_viewer, 1, wx.ALL|wx.EXPAND, 10)
         
         # Button panel
         button_sizer = wx.BoxSizer(wx.HORIZONTAL)
@@ -189,6 +170,92 @@ class ArticleDetailFrame(wx.Frame):
         # Keyboard shortcuts
         self.Bind(wx.EVT_CHAR_HOOK, self.OnKeyPress)
         
+    def _build_html_content(self):
+        """Build HTML content from article data"""
+        description = self.article_data.get('description', '')
+        content = self.article_data.get('content', '')
+        image_url = self.article_data.get('urlToImage', '')
+        url = self.article_data.get('url', '')
+        
+        html = '''<!DOCTYPE html>
+        <html>
+        <head>
+            <meta charset="UTF-8">
+            <style>
+                body {
+                    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+                    padding: 20px;
+                    line-height: 1.6;
+                    color: #333;
+                    background-color: #fff;
+                }
+                img {
+                    max-width: 100%;
+                    height: auto;
+                    display: block;
+                    margin: 20px auto;
+                    border-radius: 8px;
+                    box-shadow: 0 2px 8px rgba(0,0,0,0.1);
+                }
+                .description {
+                    font-size: 1.1em;
+                    font-weight: 500;
+                    margin-bottom: 20px;
+                    color: #444;
+                }
+                .content {
+                    font-size: 1em;
+                    margin-top: 20px;
+                    text-align: justify;
+                }
+                .read-more {
+                    margin-top: 30px;
+                    padding: 10px 20px;
+                    background-color: #007bff;
+                    color: white;
+                    text-decoration: none;
+                    border-radius: 5px;
+                    display: inline-block;
+                }
+                .read-more:hover {
+                    background-color: #0056b3;
+                }
+                .no-content {
+                    color: #999;
+                    font-style: italic;
+                    text-align: center;
+                    padding: 40px;
+                }
+            </style>
+        </head>
+        <body>
+        '''
+        
+        # Add image if available
+        if image_url and image_url.strip():
+            html += f'<img src="{image_url}" alt="Article image" onerror="this.style.display=\'none\'"/>'
+        
+        # Add description
+        if description and description.strip():
+            html += f'<div class="description">{description}</div>'
+        
+        # Add content
+        if content and content.strip():
+            # Replace newlines with <br> for better formatting
+            content_html = content.replace('\n', '<br>')
+            html += f'<div class="content">{content_html}</div>'
+        
+        # If no content, show message
+        if not (description or content):
+            html += '<div class="no-content">No article content available in database. Click "Open Full Article" to view in browser.</div>'
+        
+        # Add link to full article
+        if url and url.strip():
+            html += f'<br><a href="{url}" class="read-more" target="_blank">Open Full Article in Browser</a>'
+        
+        html += '</body></html>'
+        return html
+    
     def OnKeyPress(self, event):
         """Handle keyboard shortcuts"""
         keycode = event.GetKeyCode()
@@ -284,7 +351,7 @@ class NewsPanel(wx.Panel):
         self.url_queue = Queue()
   
         self.sources_list.Bind(wx.EVT_LIST_ITEM_SELECTED, self.OnSourceSelected)
-        self.news_list.Bind(wx.EVT_LIST_ITEM_SELECTED, self.OnLinkSelected)  # Single-click to open details
+        self.news_list.Bind(wx.EVT_LIST_ITEM_ACTIVATED, self.OnLinkSelected)  # Double-click to open details
         
         # EVT_PAINT binding removed - column resizing now done in OnSourceSelected
         
@@ -514,15 +581,8 @@ class NewsPanel(wx.Panel):
          
     
     def OnLinkSelected(self, event):
-        """Open article detail frame when article is clicked"""
-        print(f"DEBUG: OnLinkSelected fired, populating_list={self.populating_list}")
-        
-        # Ignore events during list population
-        if self.populating_list:
-            print("DEBUG: Ignoring event - still populating list")
-            return
-        
-        print(f"DEBUG: Processing article selection, item count={self.news_list.GetItemCount()}")
+        """Open article detail frame when article is double-clicked"""
+        print(f"DEBUG: OnLinkSelected fired (double-click)")
         
         # Get selected item index
         selected_index = event.GetIndex()
@@ -536,8 +596,10 @@ class NewsPanel(wx.Panel):
             if source:
                 article_data = source['articles'].get(article_key)
                 if article_data:
+                    # Get source name for display
+                    source_name = source.get('name', 'Unknown Source')
                     # Open detail frame
-                    detail_frame = ArticleDetailFrame(self, article_data)
+                    detail_frame = ArticleDetailFrame(self, article_data, source_name)
                     detail_frame.Show()
                 else:
                     print(f"Article {article_key} not found")
