@@ -20,6 +20,7 @@ import urllib.request
 import json
 import webbrowser
 from datetime import datetime
+from dateutil import parser as date_parser
 
 from wxasync import AsyncBind, WxAsyncApp, StartCoroutine
 import asyncio, aiohttp
@@ -351,11 +352,42 @@ class NewsPanel(wx.Panel):
         self.SetBackgroundColour("gray")
         
         self.sources = dict()
+        self.all_articles = []  # Store all articles for "All News" mode
         self.current_source_key = None  # Track currently selected source
         self.populating_list = False  # Flag to prevent event firing during list population
+        self.view_mode = 'source'  # 'source' or 'all'
 
+        # Create main vertical sizer
+        main_sizer = wx.BoxSizer(wx.VERTICAL)
+        
+        # === MODE SELECTOR PANEL ===
+        mode_panel = wx.Panel(self)
+        mode_panel.SetBackgroundColour(wx.Colour(240, 240, 240))
+        mode_sizer = wx.BoxSizer(wx.HORIZONTAL)
+        
+        mode_label = wx.StaticText(mode_panel, label="View Mode:")
+        mode_label_font = mode_label.GetFont()
+        mode_label_font = mode_label_font.Bold()
+        mode_label.SetFont(mode_label_font)
+        mode_sizer.Add(mode_label, 0, wx.ALL | wx.ALIGN_CENTER_VERTICAL, 10)
+        
+        self.mode_radio_source = wx.RadioButton(mode_panel, label="By Source", style=wx.RB_GROUP)
+        self.mode_radio_all = wx.RadioButton(mode_panel, label="All News (Latest First)")
+        
+        self.mode_radio_source.SetValue(True)  # Default to source mode
+        
+        mode_sizer.Add(self.mode_radio_source, 0, wx.ALL | wx.ALIGN_CENTER_VERTICAL, 5)
+        mode_sizer.Add(self.mode_radio_all, 0, wx.ALL | wx.ALIGN_CENTER_VERTICAL, 5)
+        
+        mode_panel.SetSizer(mode_sizer)
+        main_sizer.Add(mode_panel, 0, wx.EXPAND)
+        
+        # === CONTENT PANEL (sources list + news list) ===
+        content_panel = wx.Panel(self)
+        content_panel.SetBackgroundColour("gray")
+        
         self.sources_list = wx.ListCtrl(
-            self, 
+            content_panel, 
             style=wx.LC_REPORT | wx.BORDER_SUNKEN
         )
         self.sources_list.InsertColumn(0, "Source", width=200)
@@ -364,25 +396,32 @@ class NewsPanel(wx.Panel):
         # self.getNewsSources()
         
         self.news_list = wx.ListCtrl(
-            self, 
+            content_panel, 
             size = (-1 , - 1),
             style=wx.LC_REPORT | wx.BORDER_SUNKEN
         )
         self.news_list.InsertColumn(0, 'URL', width=250)
         self.news_list.InsertColumn(1, 'Title', width=400)
-        self.news_list.InsertColumn(2, 'Article ID', width=100)      
-        self.news_list.InsertColumn(3, 'Published', width=150)      
+        self.news_list.InsertColumn(2, 'Article ID', width=100)
+        self.news_list.InsertColumn(3, 'Source', width=150)
+        self.news_list.InsertColumn(4, 'Published', width=150)
         
-        sizer = wx.BoxSizer(wx.HORIZONTAL)
-        sizer.Add(self.sources_list, 0, wx.ALL | wx.EXPAND)
-        sizer.Add(self.news_list, 1, wx.ALL | wx.EXPAND)        
-        self.SetSizer(sizer)
+        content_sizer = wx.BoxSizer(wx.HORIZONTAL)
+        content_sizer.Add(self.sources_list, 0, wx.ALL | wx.EXPAND)
+        content_sizer.Add(self.news_list, 1, wx.ALL | wx.EXPAND)
+        content_panel.SetSizer(content_sizer)
+        
+        main_sizer.Add(content_panel, 1, wx.EXPAND)
+        self.SetSizer(main_sizer)
 
 #        self.sources = self.getNewsSources()
         self.url_queue = Queue()
   
+        # Bind events
         self.sources_list.Bind(wx.EVT_LIST_ITEM_SELECTED, self.OnSourceSelected)
         self.news_list.Bind(wx.EVT_LIST_ITEM_ACTIVATED, self.OnLinkSelected)  # Double-click to open details
+        self.mode_radio_source.Bind(wx.EVT_RADIOBUTTON, self.OnModeChange)
+        self.mode_radio_all.Bind(wx.EVT_RADIOBUTTON, self.OnModeChange)
         
         # EVT_PAINT binding removed - column resizing now done in OnSourceSelected
         
@@ -496,7 +535,33 @@ class NewsPanel(wx.Panel):
 #        print(sources)
         return sources
         
+    def OnModeChange(self, event):
+        """Handle mode change between 'By Source' and 'All News'"""
+        if self.mode_radio_source.GetValue():
+            new_mode = 'source'
+        else:
+            new_mode = 'all'
+        
+        if new_mode != self.view_mode:
+            self.view_mode = new_mode
+            print(f"\nMode changed to: {self.view_mode}")
+            
+            # Clear news list
+            self.news_list.DeleteAllItems()
+            
+            if self.view_mode == 'all':
+                # Hide/show appropriate column labels for "All News" mode
+                self.LoadAllNews()
+                print(f"Loaded {self.news_list.GetItemCount()} articles in All News mode")
+            else:
+                # Back to source mode - clear selection
+                print("Switched to Source mode - select a source to view articles")
+    
     def OnSourceSelected(self, event):
+         # Only handle source selection in 'source' mode
+         if self.view_mode != 'source':
+             return
+         
          source_text = event.GetText()
          # Strip article count from source name (format: "Source Name (123)")
          if '(' in source_text:
@@ -547,7 +612,8 @@ class NewsPanel(wx.Panel):
                     # Set remaining columns
                     self.news_list.SetItem(actual_index, 1, title)
                     self.news_list.SetItem(actual_index, 2, key)  # key is already a string
-                    self.news_list.SetItem(actual_index, 3, published)
+                    self.news_list.SetItem(actual_index, 3, source_name)  # Source name
+                    self.news_list.SetItem(actual_index, 4, published)  # Published date
                     
                     index += 1
                     
@@ -573,6 +639,7 @@ class NewsPanel(wx.Panel):
              self.news_list.SetColumnWidth(1, max(400, int(width * 0.5)))
              self.news_list.SetColumnWidth(2, 100)
              self.news_list.SetColumnWidth(3, 150)
+             self.news_list.SetColumnWidth(4, 150)
              print(f"DEBUG: Resized columns to fixed widths, list size: {width}x{height}")
          
          # Refresh the list to ensure items are displayed
@@ -618,9 +685,94 @@ class NewsPanel(wx.Panel):
                 print(f"DEBUG: Item {i}: key='{key}' | {title[:50]}... | URL: {url[:40]}...")
          
     
+    def LoadAllNews(self):
+        """Load all articles from all sources, sorted by date (newest first)"""
+        print("\\nLoading all news articles...")
+        
+        # Collect all articles from all sources
+        all_articles = []
+        
+        for source_key, source in self.sources.items():
+            source_name = source.get('name', 'Unknown')
+            articles = source.get('articles', {})
+            
+            for article_key, article in articles.items():
+                # Add source info to each article
+                article_with_source = article.copy()
+                article_with_source['source_name'] = source_name
+                article_with_source['source_key'] = source_key
+                all_articles.append(article_with_source)
+        
+        print(f"Collected {len(all_articles)} articles from {len(self.sources)} sources")
+        
+        # Sort by publishedAt (newest first)
+        # Parse dates for sorting
+        def get_date(article):
+            try:
+                date_str = article.get('publishedAt', '')
+                if date_str:
+                    # Try to parse the date
+                    return date_parser.parse(date_str)
+                return datetime.min
+            except:
+                return datetime.min
+        
+        all_articles.sort(key=get_date, reverse=True)
+        
+        print(f"Sorted articles by date, displaying in news list...")
+        
+        # Display in news_list
+        self.populating_list = True
+        self.news_list.DeleteAllItems()
+        
+        for index, article in enumerate(all_articles):
+            url = article.get('url', '')
+            title = article.get('title', 'No Title')
+            article_key = article.get('id_article', '')
+            source_name = article.get('source_name', 'Unknown')
+            published = article.get('publishedAt', 'N/A')
+            
+            # Convert bytes to string if needed
+            if isinstance(article_key, bytes):
+                article_key = article_key.decode('utf-8')
+            elif not isinstance(article_key, str):
+                article_key = str(article_key)
+            
+            # Insert item
+            actual_index = self.news_list.InsertItem(self.news_list.GetItemCount(), url)
+            if actual_index != -1:
+                self.news_list.SetItem(actual_index, 1, title)
+                self.news_list.SetItem(actual_index, 2, article_key)
+                self.news_list.SetItem(actual_index, 3, source_name)
+                self.news_list.SetItem(actual_index, 4, published)
+            
+            # Update display every 100 items
+            if index % 100 == 0 and index > 0:
+                self.news_list.Update()
+                wx.SafeYield()
+                print(f"  Loaded {index} articles...")
+        
+        # Force column resize
+        width, height = self.news_list.GetSize()
+        if width > 0:
+            self.news_list.SetColumnWidth(0, 200)  # URL narrower
+            self.news_list.SetColumnWidth(1, max(450, int(width * 0.4)))  # Title wider
+            self.news_list.SetColumnWidth(2, 100)  # Article ID
+            self.news_list.SetColumnWidth(3, 180)  # Source
+            self.news_list.SetColumnWidth(4, 150)  # Published
+        
+        # Refresh display
+        self.news_list.Update()
+        self.news_list.Refresh()
+        
+        # Clear populating flag
+        wx.CallAfter(self._clear_populating_flag)
+        
+        print(f"✓ Loaded {len(all_articles)} articles in All News mode\\n")
+    
     def OnLinkSelected(self, event):
         """Open article detail frame when article is double-clicked"""
-        print(f"DEBUG: OnLinkSelected fired (double-click)")
+        print(f"DEBUG: OnLinkSelected fired (double-click) in {self.view_mode} mode")
         
         # Get selected item index
         selected_index = event.GetIndex()
@@ -629,25 +781,35 @@ class NewsPanel(wx.Panel):
         article_key = self.news_list.GetItem(selected_index, 2).GetText()
         print(f"DEBUG: Retrieved article_key from list: '{article_key}' (type: {type(article_key)})")
         
-        # Get article data from sources
-        if hasattr(self, 'current_source_key') and self.current_source_key:
-            source = self.sources.get(self.current_source_key)
-            if source:
-                print(f"DEBUG: Available article keys in source: {list(source['articles'].keys())[:5]}...")
-                article_data = source['articles'].get(article_key)
-                if article_data:
-                    # Get source name for display
-                    source_name = source.get('name', 'Unknown Source')
-                    print(f"DEBUG: Found article, opening detail frame")
-                    # Open detail frame
-                    detail_frame = ArticleDetailFrame(self, article_data, source_name)
-                    detail_frame.Show()
-                else:
-                    print(f"ERROR: Article '{article_key}' not found in articles dict")
-                    print(f"       Dict has {len(source['articles'])} keys")
-            else:
-                print(f"Source {self.current_source_key} not found")
+        article_data = None
+        source_name = 'Unknown Source'
+        
+        if self.view_mode == 'all':
+            # In "All News" mode, search through all sources
+            source_name = self.news_list.GetItem(selected_index, 3).GetText()
+            for source_key, source in self.sources.items():
+                if article_key in source['articles']:
+                    article_data = source['articles'][article_key]
+                    source_name = source.get('name', source_name)
+                    print(f"DEBUG: Found article in source: {source_name}")
+                    break
         else:
+            # In "By Source" mode, use current selected source
+            if hasattr(self, 'current_source_key') and self.current_source_key:
+                source = self.sources.get(self.current_source_key)
+                if source:
+                    print(f"DEBUG: Available article keys in source: {list(source['articles'].keys())[:5]}...")
+                    article_data = source['articles'].get(article_key)
+                    source_name = source.get('name', 'Unknown Source')
+                else:
+                    print(f"Source {self.current_source_key} not found")
+        
+        if article_data:
+            print(f"DEBUG: Found article, opening detail frame")
+            detail_frame = ArticleDetailFrame(self, article_data, source_name)
+            detail_frame.Show()
+        else:
+            print(f"ERROR: Article '{article_key}' not found")
             # Fallback: open URL in browser
             url = self.news_list.GetItem(selected_index, 0).GetText()
             if url:
