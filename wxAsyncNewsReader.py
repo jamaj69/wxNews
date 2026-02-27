@@ -419,6 +419,12 @@ class NewsPanel(wx.Panel):
             articles = dict()
             for article in articles_qry.fetchall():
                 article_key = article[0]
+                # Convert bytes to string if necessary for consistent key format
+                if isinstance(article_key, bytes):
+                    article_key = article_key.decode('utf-8')
+                elif not isinstance(article_key, str):
+                    article_key = str(article_key)
+                    
                 articles[article_key] = {
                                     'id_article' : article_key ,
                                     'id_source' : article[1] ,
@@ -509,7 +515,7 @@ class NewsPanel(wx.Panel):
                     
                     # Set remaining columns
                     self.news_list.SetItem(actual_index, 1, title)
-                    self.news_list.SetItem(actual_index, 2, str(key))
+                    self.news_list.SetItem(actual_index, 2, key)  # key is already a string
                     self.news_list.SetItem(actual_index, 3, published)
                     
                     index += 1
@@ -577,7 +583,8 @@ class NewsPanel(wx.Panel):
             for i in range(min(3, item_count)):
                 title = self.news_list.GetItem(i, 1).GetText()
                 url = self.news_list.GetItem(i, 0).GetText()
-                print(f"DEBUG: Item {i}: {title[:50]}... | URL: {url[:40]}...")
+                key = self.news_list.GetItem(i, 2).GetText()
+                print(f"DEBUG: Item {i}: key='{key}' | {title[:50]}... | URL: {url[:40]}...")
          
     
     def OnLinkSelected(self, event):
@@ -589,20 +596,24 @@ class NewsPanel(wx.Panel):
         
         # Get article key from column 2
         article_key = self.news_list.GetItem(selected_index, 2).GetText()
+        print(f"DEBUG: Retrieved article_key from list: '{article_key}' (type: {type(article_key)})")
         
         # Get article data from sources
         if hasattr(self, 'current_source_key') and self.current_source_key:
             source = self.sources.get(self.current_source_key)
             if source:
+                print(f"DEBUG: Available article keys in source: {list(source['articles'].keys())[:5]}...")
                 article_data = source['articles'].get(article_key)
                 if article_data:
                     # Get source name for display
                     source_name = source.get('name', 'Unknown Source')
+                    print(f"DEBUG: Found article, opening detail frame")
                     # Open detail frame
                     detail_frame = ArticleDetailFrame(self, article_data, source_name)
                     detail_frame.Show()
                 else:
-                    print(f"Article {article_key} not found")
+                    print(f"ERROR: Article '{article_key}' not found in articles dict")
+                    print(f"       Dict has {len(source['articles'])} keys")
             else:
                 print(f"Source {self.current_source_key} not found")
         else:
