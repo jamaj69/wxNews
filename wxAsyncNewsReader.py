@@ -71,7 +71,7 @@ class ArticleDetailFrame(wx.Frame):
         
         # === METADATA SECTION AT TOP ===
         metadata_panel = wx.Panel(panel)
-        metadata_panel.SetBackgroundColour(wx.Colour(245, 245, 245))
+        metadata_panel.SetBackgroundColour(wx.Colour(255, 255, 255))  # White background for better contrast
         metadata_sizer = wx.BoxSizer(wx.VERTICAL)
         
         # Title
@@ -81,25 +81,43 @@ class ArticleDetailFrame(wx.Frame):
         title_font.PointSize += 3
         title_font = title_font.Bold()
         title_text.SetFont(title_font)
+        title_text.SetForegroundColour(wx.Colour(0, 0, 0))  # Black text
         title_text.Wrap(950)
         metadata_sizer.Add(title_text, 0, wx.ALL|wx.EXPAND, 10)
         
+        # Separator line
+        line1 = wx.StaticLine(metadata_panel)
+        metadata_sizer.Add(line1, 0, wx.EXPAND|wx.LEFT|wx.RIGHT, 10)
+        
         # Metadata fields in a grid
-        fields_sizer = wx.FlexGridSizer(cols=2, hgap=10, vgap=5)
+        fields_sizer = wx.FlexGridSizer(cols=2, hgap=15, vgap=8)
         fields_sizer.AddGrowableCol(1, 1)
         
         # Source/Origin
-        fields_sizer.Add(wx.StaticText(metadata_panel, label="Source:"), 0, wx.ALIGN_RIGHT|wx.ALIGN_CENTER_VERTICAL)
+        source_label = wx.StaticText(metadata_panel, label="Source:")
+        source_label.SetFont(source_label.GetFont().Bold())
+        source_label.SetForegroundColour(wx.Colour(60, 60, 60))  # Dark gray
+        fields_sizer.Add(source_label, 0, wx.ALIGN_RIGHT|wx.ALIGN_CENTER_VERTICAL)
         source_value = self.source_name if self.source_name else article_data.get('id_source', 'N/A')
-        fields_sizer.Add(wx.StaticText(metadata_panel, label=source_value), 0, wx.EXPAND)
+        source_text = wx.StaticText(metadata_panel, label=source_value)
+        source_text.SetForegroundColour(wx.Colour(0, 0, 0))  # Black
+        fields_sizer.Add(source_text, 0, wx.EXPAND)
         
         # Author
-        fields_sizer.Add(wx.StaticText(metadata_panel, label="Author:"), 0, wx.ALIGN_RIGHT|wx.ALIGN_CENTER_VERTICAL)
+        author_label = wx.StaticText(metadata_panel, label="Author:")
+        author_label.SetFont(author_label.GetFont().Bold())
+        author_label.SetForegroundColour(wx.Colour(60, 60, 60))
+        fields_sizer.Add(author_label, 0, wx.ALIGN_RIGHT|wx.ALIGN_CENTER_VERTICAL)
         author = article_data.get('author', 'N/A') if article_data.get('author') else 'N/A'
-        fields_sizer.Add(wx.StaticText(metadata_panel, label=author), 0, wx.EXPAND)
+        author_text = wx.StaticText(metadata_panel, label=author)
+        author_text.SetForegroundColour(wx.Colour(0, 0, 0))
+        fields_sizer.Add(author_text, 0, wx.EXPAND)
         
         # Published date/time
-        fields_sizer.Add(wx.StaticText(metadata_panel, label="Published:"), 0, wx.ALIGN_RIGHT|wx.ALIGN_CENTER_VERTICAL)
+        pub_label = wx.StaticText(metadata_panel, label="Published:")
+        pub_label.SetFont(pub_label.GetFont().Bold())
+        pub_label.SetForegroundColour(wx.Colour(60, 60, 60))
+        fields_sizer.Add(pub_label, 0, wx.ALIGN_RIGHT|wx.ALIGN_CENTER_VERTICAL)
         published = article_data.get('publishedAt', 'N/A')
         if published and published != 'N/A':
             try:
@@ -107,13 +125,18 @@ class ArticleDetailFrame(wx.Frame):
                 published = pub_date.strftime('%Y-%m-%d %H:%M:%S')
             except:
                 pass
-        fields_sizer.Add(wx.StaticText(metadata_panel, label=published), 0, wx.EXPAND)
+        pub_text = wx.StaticText(metadata_panel, label=published)
+        pub_text.SetForegroundColour(wx.Colour(0, 0, 0))
+        fields_sizer.Add(pub_text, 0, wx.EXPAND)
         
         # URL
-        fields_sizer.Add(wx.StaticText(metadata_panel, label="URL:"), 0, wx.ALIGN_RIGHT|wx.ALIGN_CENTER_VERTICAL)
+        url_label = wx.StaticText(metadata_panel, label="URL:")
+        url_label.SetFont(url_label.GetFont().Bold())
+        url_label.SetForegroundColour(wx.Colour(60, 60, 60))
+        fields_sizer.Add(url_label, 0, wx.ALIGN_RIGHT|wx.ALIGN_CENTER_VERTICAL)
         url = article_data.get('url', 'N/A')
         url_text = wx.StaticText(metadata_panel, label=url)
-        url_text.SetForegroundColour(wx.BLUE)
+        url_text.SetForegroundColour(wx.Colour(0, 100, 200))  # Blue for links
         url_text.SetCursor(wx.Cursor(wx.CURSOR_HAND))
         if url and url != 'N/A':
             url_text.Bind(wx.EVT_LEFT_DOWN, lambda evt: webbrowser.open(url))
@@ -122,14 +145,22 @@ class ArticleDetailFrame(wx.Frame):
         # Image URL (if available)
         image_url = article_data.get('urlToImage', '')
         if image_url and image_url.strip():
-            fields_sizer.Add(wx.StaticText(metadata_panel, label="Image URL:"), 0, wx.ALIGN_RIGHT|wx.ALIGN_CENTER_VERTICAL)
+            img_label = wx.StaticText(metadata_panel, label="Image URL:")
+            img_label.SetFont(img_label.GetFont().Bold())
+            img_label.SetForegroundColour(wx.Colour(60, 60, 60))
+            fields_sizer.Add(img_label, 0, wx.ALIGN_RIGHT|wx.ALIGN_CENTER_VERTICAL)
             img_url_text = wx.StaticText(metadata_panel, label=image_url)
-            img_url_text.SetForegroundColour(wx.BLUE)
+            img_url_text.SetForegroundColour(wx.Colour(0, 100, 200))  # Blue for links
             img_url_text.SetCursor(wx.Cursor(wx.CURSOR_HAND))
             img_url_text.Bind(wx.EVT_LEFT_DOWN, lambda evt: webbrowser.open(image_url))
             fields_sizer.Add(img_url_text, 0, wx.EXPAND)
         
         metadata_sizer.Add(fields_sizer, 0, wx.ALL|wx.EXPAND, 10)
+        
+        # Separator line at bottom
+        line2 = wx.StaticLine(metadata_panel)
+        metadata_sizer.Add(line2, 0, wx.EXPAND|wx.LEFT|wx.RIGHT|wx.BOTTOM, 10)
+        
         metadata_panel.SetSizer(metadata_sizer)
         main_sizer.Add(metadata_panel, 0, wx.ALL|wx.EXPAND, 5)
         
