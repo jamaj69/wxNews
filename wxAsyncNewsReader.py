@@ -261,7 +261,8 @@ class NewsPanel(wx.Panel):
         )
         self.sources_list.InsertColumn(0, "Source", width=200)
         
-        self.getNewsSources()
+        # Don't call getNewsSources() - load from database instead
+        # self.getNewsSources()
         
         self.news_list = wx.ListCtrl(
             self, 
@@ -294,6 +295,13 @@ class NewsPanel(wx.Panel):
         
     def UpdateArticles(self, eng, meta, gm_sources, gm_articles):
         sources = dict()
+        
+        # Track if this is first load (self.sources is empty)
+        is_first_load = len(self.sources) == 0
+        
+        if is_first_load:
+            print("First load - clearing sources list")
+            self.sources_list.DeleteAllItems()
         
         con = eng.connect()
         stm = select(gm_sources)
@@ -330,10 +338,16 @@ class NewsPanel(wx.Panel):
                     'country': source[6],
                     'articles': articles
                  }
-            if source_id not in self.sources:
-                self.sources_list.InsertItem(0, source[1])
+            # Add sources with articles to the list (only on first load or if new)
+            if len(articles) > 0:
+                if is_first_load:
+                    self.sources_list.InsertItem(self.sources_list.GetItemCount(), source[1])
+                elif source_id not in self.sources:
+                    self.sources_list.InsertItem(0, source[1])
 
         self.sources = sources
+        print(f"Loaded {len(sources)} sources, {sum(len(s['articles']) for s in sources.values())} total articles")
+        print(f"Sources with articles in list: {self.sources_list.GetItemCount()}")
 #        print(sources)
         return sources
         
