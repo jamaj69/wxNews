@@ -340,7 +340,7 @@ class NewsPanel(wx.Panel):
     def OnPaint(self, evt):
         width, height = self.news_list.GetSize()
         for i in range(4):
-            self.news_list.SetColumnWidth(i, width/4)
+            self.news_list.SetColumnWidth(i, int(width/4))
         evt.Skip()
     
     def OnSourceSelected(self, event):
