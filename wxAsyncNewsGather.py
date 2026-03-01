@@ -1266,11 +1266,11 @@ class NewsGather():
         if not ENRICH_MISSING_CONTENT:
             return False
         
-        # Check if content is missing
-        has_author = article_dict.get('author', '').strip()
-        has_description = article_dict.get('description', '').strip()
-        has_content = article_dict.get('content', '').strip()
-        url = article_dict.get('url', '').strip()
+        # Check if content is missing (handle None values with "or ''")
+        has_author = (article_dict.get('author') or '').strip()
+        has_description = (article_dict.get('description') or '').strip()
+        has_content = (article_dict.get('content') or '').strip()
+        url = (article_dict.get('url') or '').strip()
         
         # If we already have everything, skip fetching
         if has_author and has_description and has_content:
