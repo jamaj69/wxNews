@@ -33,7 +33,9 @@ from sqlalchemy.dialects.sqlite import insert
 import os
 from urllib.parse import urlparse
 import feedparser
-from datetime import datetime
+from datetime import datetime, timezone
+from dateutil import parser as dateutil_parser
+import pytz
 
 # Load credentials from environment
 from decouple import config
@@ -111,6 +113,63 @@ def as_text(value):
     if isinstance(value, list):
         return " ".join(as_text(item) for item in value if item is not None)
     return str(value)
+
+
+# Country code to timezone mapping (most common timezone for each country)
+COUNTRY_TIMEZONES = {
+    'us': 'America/New_York', 'gb': 'Europe/London', 'ca': 'America/Toronto',
+    'au': 'Australia/Sydney', 'de': 'Europe/Berlin', 'fr': 'Europe/Paris',
+    'it': 'Europe/Rome', 'es': 'Europe/Madrid', 'jp': 'Asia/Tokyo',
+    'cn': 'Asia/Shanghai', 'kr': 'Asia/Seoul', 'in': 'Asia/Kolkata',
+    'br': 'America/Sao_Paulo', 'mx': 'America/Mexico_City', 'ru': 'Europe/Moscow',
+    'za': 'Africa/Johannesburg', 'sg': 'Asia/Singapore', 'hk': 'Asia/Hong_Kong',
+    'nz': 'Pacific/Auckland', 'ar': 'America/Argentina/Buenos_Aires',
+    'cl': 'America/Santiago', 'co': 'America/Bogota', 'nl': 'Europe/Amsterdam',
+    'se': 'Europe/Stockholm', 'no': 'Europe/Oslo', 'dk': 'Europe/Copenhagen',
+    'fi': 'Europe/Helsinki', 'pl': 'Europe/Warsaw', 'tr': 'Europe/Istanbul',
+    'il': 'Asia/Jerusalem', 'ae': 'Asia/Dubai', 'sa': 'Asia/Riyadh',
+    'eg': 'Africa/Cairo', 'ng': 'Africa/Lagos', 'ke': 'Africa/Nairobi',
+    'th': 'Asia/Bangkok', 'vn': 'Asia/Ho_Chi_Minh', 'id': 'Asia/Jakarta',
+    'ph': 'Asia/Manila', 'my': 'Asia/Kuala_Lumpur', 'pk': 'Asia/Karachi',
+    'bd': 'Asia/Dhaka', 'ua': 'Europe/Kiev', 'ro': 'Europe/Bucharest',
+    'cz': 'Europe/Prague', 'at': 'Europe/Vienna', 'ch': 'Europe/Zurich',
+    'be': 'Europe/Brussels', 'pt': 'Europe/Lisbon', 'gr': 'Europe/Athens',
+    'ie': 'Europe/Dublin', 'nz': 'Pacific/Auckland', 'tw': 'Asia/Taipei'
+}
+
+
+def normalize_timestamp_to_utc(timestamp_str):
+    """
+    Normalize a timestamp string to UTC (GMT+0) using timezone info from the timestamp itself.
+    
+    Args:
+        timestamp_str: Timestamp string with timezone info (ISO, RFC 2822, etc.)
+    
+    Returns:
+        ISO format UTC timestamp string, or current UTC time if parsing fails
+    """
+    if not timestamp_str or timestamp_str.strip() == '':
+        return datetime.now(timezone.utc).isoformat()
+    
+    try:
+        # Parse the timestamp with dateutil (handles most formats and extracts timezone)
+        parsed_dt = dateutil_parser.parse(timestamp_str)
+        
+        # If no timezone info in the timestamp, assume it's already UTC
+        if parsed_dt.tzinfo is None:
+            parsed_dt = parsed_dt.replace(tzinfo=timezone.utc)
+        
+        # Convert to UTC
+        utc_dt = parsed_dt.astimezone(timezone.utc)
+        
+        # Return ISO format without microseconds for consistency
+        return utc_dt.replace(microsecond=0).isoformat()
+        
+    except Exception as e:
+        # If parsing fails, return current UTC time
+        logging.debug(f"Failed to parse timestamp '{timestamp_str}': {e}")
+        return datetime.now(timezone.utc).isoformat()
+
 
 
 
@@ -389,6 +448,7 @@ class NewsGather():
             Column('url', Text),
             Column('urlToImage' , Text),
             Column('publishedAt', Text),
+            Column('published_at_gmt', Text),  # Normalized UTC version
             Column('content', Text)
         )
         gm_articles.create(bind=eng, checkfirst=True)
@@ -413,6 +473,23 @@ class NewsGather():
         except Exception as e:
             # Log at DEBUG level to avoid noise
             self.logger.debug(f"Error with blocklist columns: {e}")
+        
+        # Add published_at_gmt column to gm_articles if it doesn't exist (migration)
+        try:
+            with eng.connect() as conn:
+                # Check if column exists by querying SQLite schema
+                result = conn.execute(text("PRAGMA table_info(gm_articles)")).fetchall()
+                column_names = [row[1] for row in result]  # row[1] is column name
+                
+                if 'published_at_gmt' not in column_names:
+                    self.logger.info("Adding published_at_gmt column to gm_articles for UTC normalization")
+                    conn.execute(text('ALTER TABLE gm_articles ADD COLUMN published_at_gmt TEXT'))
+                    conn.commit()
+                    self.logger.info("✅ published_at_gmt column added successfully")
+                else:
+                    self.logger.debug("published_at_gmt column already exists")
+        except Exception as e:
+            self.logger.debug(f"Error with published_at_gmt column: {e}")
         
         self.logger.info("Database initialization complete")
         return eng
@@ -616,8 +693,11 @@ class NewsGather():
                                     article_description = article['description']
                                     article_url = article['url']
                                     article_urlToImage = article['urlToImage']
-                                    article_publishedAt = article['publishedAt']
+                                    article_publishedAt = article['publishedAt']  # Keep original with timezone
                                     article_content = article['content']
+                                    
+                                    # Create normalized UTC version
+                                    article_publishedAt_gmt = normalize_timestamp_to_utc(article_publishedAt)
                                     
                                     article_key = url_encode(article_title + article_url + article_publishedAt)
                                     
@@ -675,7 +755,8 @@ class NewsGather():
                                         'description': article_description,
                                         'url': article_url,
                                         'urlToImage': article_urlToImage,
-                                        'publishedAt': article_publishedAt,
+                                        'publishedAt': article_publishedAt,  # Original with timezone
+                                        'published_at_gmt': article_publishedAt_gmt,  # Normalized UTC
                                         'content': article_content
                                     }
                                     
@@ -832,12 +913,15 @@ class NewsGather():
                     url = as_text(entry.get('link', ''))
                     description = as_text(entry.get('summary', entry.get('description', '')))
                     author = as_text(entry.get('author', ''))
-                    published = as_text(entry.get('published', entry.get('updated', '')))
+                    published = as_text(entry.get('published', entry.get('updated', '')))  # Original with timezone
                     
                     if not title or not url:
                         continue
                     
-                    # Generate article key
+                    # Create normalized UTC version
+                    published_gmt = normalize_timestamp_to_utc(published)
+                    
+                    # Generate article key with original timestamp
                     article_key = url_encode(title + url + published)
                     
                     # Create article object
@@ -849,7 +933,8 @@ class NewsGather():
                         'description': description[:500] if description else '',
                         'url': url,
                         'urlToImage': '',
-                        'publishedAt': published,
+                        'publishedAt': published,  # Original with timezone
+                        'published_at_gmt': published_gmt,  # Normalized UTC
                         'content': ''
                     }
                     
@@ -1037,19 +1122,13 @@ class NewsGather():
             except:
                 source_url = ''
             
-            # Parse date
-            try:
-                if published_at:
-                    pub_date = datetime.fromisoformat(published_at.replace('+00:00', ''))
-                else:
-                    pub_date = datetime.utcnow()
-            except ValueError:
-                pub_date = datetime.utcnow()
+            # Create normalized UTC version
+            published_at_gmt = normalize_timestamp_to_utc(published_at)
             
             # Create source ID (mediastack-source_name)
             source_id = f"mediastack-{source_name.lower().replace(' ', '-').replace('_', '-')}"
             
-            # Create article ID using url_encode function
+            # Create article ID using original timestamp
             article_id = url_encode(title + url + published_at)
             
             # Ensure source exists
@@ -1073,7 +1152,8 @@ class NewsGather():
                 'description': description[:1000] if description else '',
                 'url': url[:500] if url else '',
                 'urlToImage': image[:500] if image else '',
-                'publishedAt': pub_date.isoformat(),
+                'publishedAt': published_at,  # Original with timezone
+                'published_at_gmt': published_at_gmt,  # Normalized UTC
                 'content': ''
             }
             
