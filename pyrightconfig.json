@@ -1,0 +1,19 @@
+{
+  "include": [
+    "."
+  ],
+  "exclude": [
+    "**/__pycache__",
+    "**/node_modules",
+    "async"
+  ],
+  "reportMissingTypeStubs": false,
+  "reportUnknownParameterType": false,
+  "reportUnknownArgumentType": false,
+  "reportUnknownMemberType": false,
+  "reportUnknownVariableType": false,
+  "reportMissingImports": "warning",
+  "reportMissingModuleSource": false,
+  "pythonVersion": "3.8",
+  "pythonPlatform": "Linux"
+}
