@@ -50,7 +50,7 @@ class ArticleContentFetcher:
             response = requests.get(url, headers=self.headers, timeout=self.timeout)
             response.raise_for_status()
             
-            soup = BeautifulSoup(response.content, 'html.parser')
+            soup = BeautifulSoup(response.text, 'html.parser')
             
             # Extract author
             result['author'] = self._extract_author(soup)
