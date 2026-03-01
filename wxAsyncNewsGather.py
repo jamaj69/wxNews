@@ -151,9 +151,38 @@ def normalize_timestamp_to_utc(timestamp_str):
     if not timestamp_str or timestamp_str.strip() == '':
         return datetime.now(timezone.utc).isoformat()
     
+    # Mapping of common timezone abbreviations to UTC offsets (in seconds)
+    # This prevents UnknownTimezoneWarning from dateutil
+    tzinfos = {
+        'EDT': -4 * 3600,    # Eastern Daylight Time (UTC-4)
+        'EST': -5 * 3600,    # Eastern Standard Time (UTC-5)
+        'CDT': -5 * 3600,    # Central Daylight Time (UTC-5)
+        'CST': -6 * 3600,    # Central Standard Time (UTC-6)
+        'MDT': -6 * 3600,    # Mountain Daylight Time (UTC-6)
+        'MST': -7 * 3600,    # Mountain Standard Time (UTC-7)
+        'PDT': -7 * 3600,    # Pacific Daylight Time (UTC-7)
+        'PST': -8 * 3600,    # Pacific Standard Time (UTC-8)
+        'AKDT': -8 * 3600,   # Alaska Daylight Time (UTC-8)
+        'AKST': -9 * 3600,   # Alaska Standard Time (UTC-9)
+        'HST': -10 * 3600,   # Hawaii Standard Time (UTC-10)
+        'BST': 1 * 3600,     # British Summer Time (UTC+1)
+        'CEST': 2 * 3600,    # Central European Summer Time (UTC+2)
+        'CET': 1 * 3600,     # Central European Time (UTC+1)
+        'EEST': 3 * 3600,    # Eastern European Summer Time (UTC+3)
+        'EET': 2 * 3600,     # Eastern European Time (UTC+2)
+        'IST': 5.5 * 3600,   # Indian Standard Time (UTC+5:30)
+        'JST': 9 * 3600,     # Japan Standard Time (UTC+9)
+        'KST': 9 * 3600,     # Korea Standard Time (UTC+9)
+        'AEST': 10 * 3600,   # Australian Eastern Standard Time (UTC+10)
+        'AEDT': 11 * 3600,   # Australian Eastern Daylight Time (UTC+11)
+        'AWST': 8 * 3600,    # Australian Western Standard Time (UTC+8)
+        'NZST': 12 * 3600,   # New Zealand Standard Time (UTC+12)
+        'NZDT': 13 * 3600,   # New Zealand Daylight Time (UTC+13)
+    }
+    
     try:
         # Parse the timestamp with dateutil (handles most formats and extracts timezone)
-        parsed_dt = dateutil_parser.parse(timestamp_str)
+        parsed_dt = dateutil_parser.parse(timestamp_str, tzinfos=tzinfos)
         
         # If no timezone info in the timestamp, assume it's already UTC
         if parsed_dt.tzinfo is None:
