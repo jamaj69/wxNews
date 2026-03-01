@@ -138,18 +138,27 @@ COUNTRY_TIMEZONES = {
 }
 
 
-def normalize_timestamp_to_utc(timestamp_str):
+def normalize_timestamp_to_utc(timestamp_str, source_timezone=None):
     """
-    Normalize a timestamp string to UTC (GMT+0) using timezone info from the timestamp itself.
+    Normalize a timestamp string to UTC (GMT+0).
+    
+    PRIORITY ORDER:
+    1. Use timezone from article timestamp (if present) - ALWAYS PREFERRED
+    2. Use source timezone (if article has no timezone) - FALLBACK ONLY
+    3. Assume UTC (if neither timestamp nor source has timezone)
     
     Args:
         timestamp_str: Timestamp string with timezone info (ISO, RFC 2822, etc.)
+        source_timezone: Optional timezone offset string (e.g., 'UTC+05:30', 'UTC-03:00')
+                         Used ONLY when timestamp has no timezone info
     
     Returns:
-        ISO format UTC timestamp string, or current UTC time if parsing fails
+        Tuple: (utc_timestamp_str, detected_timezone_str)
+        - utc_timestamp_str: ISO format UTC timestamp
+        - detected_timezone_str: Detected timezone offset (e.g., 'UTC+05:30') or None
     """
     if not timestamp_str or timestamp_str.strip() == '':
-        return datetime.now(timezone.utc).isoformat()
+        return datetime.now(timezone.utc).isoformat(), None
     
     # Mapping of common timezone abbreviations to UTC offsets (in seconds)
     # This prevents UnknownTimezoneWarning from dateutil
@@ -183,21 +192,59 @@ def normalize_timestamp_to_utc(timestamp_str):
     try:
         # Parse the timestamp with dateutil (handles most formats and extracts timezone)
         parsed_dt = dateutil_parser.parse(timestamp_str, tzinfos=tzinfos)
+        detected_tz = None
         
-        # If no timezone info in the timestamp, assume it's already UTC
-        if parsed_dt.tzinfo is None:
-            parsed_dt = parsed_dt.replace(tzinfo=timezone.utc)
+        # PRIORITY 1: Check if article timestamp has timezone info
+        if parsed_dt.tzinfo is not None:
+            # Article has timezone - USE IT (highest priority)
+            # Extract detected timezone as UTC offset string
+            offset = parsed_dt.utcoffset()
+            if offset:
+                total_seconds = int(offset.total_seconds())
+                hours, remainder = divmod(abs(total_seconds), 3600)
+                minutes = remainder // 60
+                sign = '+' if total_seconds >= 0 else '-'
+                detected_tz = f"UTC{sign}{hours:02d}:{minutes:02d}"
+        else:
+            # No timezone in article timestamp
+            # PRIORITY 2: Check if timestamp text claims to be GMT/UTC
+            if 'GMT' in timestamp_str.upper() or 'UTC' in timestamp_str.upper():
+                # Timestamp claims to be GMT/UTC, treat as such
+                parsed_dt = parsed_dt.replace(tzinfo=timezone.utc)
+                detected_tz = 'UTC+00:00'
+            # PRIORITY 3: Use source timezone as fallback (ONLY when article has no timezone)
+            elif source_timezone:
+                # Parse source timezone offset (e.g., 'UTC+05:30', 'UTC-03:00')
+                try:
+                    if source_timezone.startswith('UTC'):
+                        offset_str = source_timezone[3:]  # Remove 'UTC' prefix
+                        # Parse +HH:MM or -HH:MM
+                        sign = 1 if offset_str[0] == '+' else -1
+                        parts = offset_str[1:].split(':')
+                        hours = int(parts[0])
+                        minutes = int(parts[1]) if len(parts) > 1 else 0
+                        total_seconds = sign * (hours * 3600 + minutes * 60)
+                        tz = timezone(timedelta(seconds=total_seconds))
+                        parsed_dt = parsed_dt.replace(tzinfo=tz)
+                        # Note: We used source timezone as fallback, no detected_tz
+                except Exception as tz_parse_err:
+                    logging.debug(f"Failed to parse source timezone '{source_timezone}': {tz_parse_err}")
+                    # If parsing source timezone fails, assume UTC
+                    parsed_dt = parsed_dt.replace(tzinfo=timezone.utc)
+            else:
+                # PRIORITY 4: No timezone anywhere, assume UTC
+                parsed_dt = parsed_dt.replace(tzinfo=timezone.utc)
         
         # Convert to UTC
         utc_dt = parsed_dt.astimezone(timezone.utc)
         
-        # Return ISO format without microseconds for consistency
-        return utc_dt.replace(microsecond=0).isoformat()
+        # Return ISO format without microseconds for consistency, plus detected timezone
+        return utc_dt.replace(microsecond=0).isoformat(), detected_tz
         
     except Exception as e:
         # If parsing fails, return current UTC time
         logging.debug(f"Failed to parse timestamp '{timestamp_str}': {e}")
-        return datetime.now(timezone.utc).isoformat()
+        return datetime.now(timezone.utc).isoformat(), None
 
 
 
@@ -251,7 +298,15 @@ class NewsGather():
         headers = dict(BASIC_HTTP_HEADERS)
         parsed = urlparse(url)
         if parsed.scheme and parsed.netloc:
-            if parsed.netloc.endswith("indianexpress.com"):
+            # NDTV Profit requires specific User-Agent to allow RSS access
+            if parsed.netloc.endswith("ndtvprofit.com"):
+                headers["User-Agent"] = "FeedReader/1.0 (Linux)"
+                headers["Referer"] = "https://www.ndtvprofit.com/"
+            # OneIndia requires Googlebot User-Agent (blocks regular browsers with 403)
+            elif parsed.netloc.endswith("oneindia.com"):
+                headers["User-Agent"] = "Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)"
+                headers["Referer"] = "https://www.oneindia.com/"
+            elif parsed.netloc.endswith("indianexpress.com"):
                 headers["Referer"] = "https://indianexpress.com/rss/"
             else:
                 headers["Referer"] = f"{parsed.scheme}://{parsed.netloc}/"
@@ -270,8 +325,12 @@ class NewsGather():
         )
         return any(marker in ct for marker in allowed_markers)
 
-    def _looks_like_feed_body(self, text: str) -> bool:
-        sample = (text or "")[:2000].lower()
+    def _looks_like_feed_body(self, content) -> bool:
+        """Check if content (bytes or str) looks like RSS/XML feed"""
+        if isinstance(content, bytes):
+            sample = content[:2000].lower()
+            return any(tag in sample for tag in (b"<?xml", b"<rss", b"<feed", b"<rdf:rdf"))
+        sample = (content or "")[:2000].lower()
         return any(tag in sample for tag in ("<?xml", "<rss", "<feed", "<rdf:rdf"))
 
     def _fetch_rss_with_curl(self, url: str, timeout_seconds: int):
@@ -328,12 +387,9 @@ class NewsGather():
             m = re.search(r"charset=([A-Za-z0-9._-]+)", content_type or "", flags=re.I)
             if m:
                 charset = m.group(1)
-            try:
-                text = body_bytes.decode(charset, errors="replace")
-            except Exception:
-                text = body_bytes.decode("utf-8", errors="replace")
-
-            return status, content_type, text
+            
+            # Return raw bytes - let feedparser handle encoding
+            return status, content_type, body_bytes
         finally:
             try:
                 os.unlink(hdr_path)
@@ -353,16 +409,17 @@ class NewsGather():
         ) as response:
             status = response.status
             content_type = response.headers.get("Content-Type", "")
-            text = await response.text()
+            # Get raw bytes - let feedparser handle encoding detection
+            content = await response.read()
 
         if status == 403:
             try:
-                status, content_type, text = await asyncio.to_thread(
+                status, content_type, content = await asyncio.to_thread(
                     self._fetch_rss_with_curl, rss_url, timeout_seconds
                 )
             except Exception as exc:
                 self.logger.debug(f"Curl fallback failed for {rss_url}: {exc}")
-        return status, content_type, text
+        return status, content_type, content
     
     def InitArticles(self, eng, meta, gm_sources, gm_articles):
         """
@@ -396,6 +453,53 @@ class NewsGather():
 
             self.logger.info(f"InitArticles: Loaded {source_count} sources (articles managed by SQLite)")
         return sources
+
+    async def reload_sources(self):
+        """
+        Reload sources from database.
+        Called at the end of each collection cycle to pick up any changes
+        (new sources added, sources blocked, URLs updated, etc.)
+        """
+        try:
+            async with self.db_lock:
+                with self.eng.connect() as con:
+                    stm = select(self.gm_sources)
+                    rs = con.execute(stm)
+                    
+                    new_sources = dict()
+                    source_count = 0
+                    
+                    for source in rs.fetchall():
+                        source_id = source[0]
+                        source_count += 1
+                        
+                        new_sources[source_id] = {
+                            'id_source': source_id,
+                            'name': source[1],
+                            'description': source[2],
+                            'url': source[3],
+                            'category': source[4],
+                            'language': source[5],
+                            'country': source[6],
+                            'timezone': source[9] if len(source) > 9 else None,  # Timezone offset (UTC+XX:XX)
+                            'articles': {}
+                        }
+                    
+                    # Calculate changes
+                    old_count = len(self.sources)
+                    added = len(set(new_sources.keys()) - set(self.sources.keys()))
+                    removed = len(set(self.sources.keys()) - set(new_sources.keys()))
+                    
+                    # Update sources atomically
+                    self.sources = new_sources
+                    
+                    if added > 0 or removed > 0:
+                        self.logger.info(f"🔄 Sources reloaded: {source_count} total (+{added}, -{removed})")
+                    else:
+                        self.logger.debug(f"🔄 Sources reloaded: {source_count} total (no changes)")
+                        
+        except Exception as e:
+            self.logger.error(f"Error reloading sources: {e}", exc_info=True)
 
     # ========================================================================
     # LEGACY METHODS - Not used in new parallel architecture
@@ -556,7 +660,14 @@ class NewsGather():
                 if status == 200 and (
                     self._looks_like_feed_content_type(content_type) or self._looks_like_feed_body(content)
                 ):
-                    if any(tag in content[:1000] for tag in ['<rss', '<feed', '<channel']):
+                    # Check for feed tags (handle both bytes and str)
+                    sample = content[:1000]
+                    if isinstance(sample, bytes):
+                        has_feed = any(tag in sample for tag in [b'<rss', b'<feed', b'<channel'])
+                    else:
+                        has_feed = any(tag in sample for tag in ['<rss', '<feed', '<channel'])
+                    
+                    if has_feed:
                         self.logger.info(f"📡 Discovered RSS for {source_name}: {rss_url}")
                         return rss_url
             except Exception:
@@ -652,6 +763,51 @@ class NewsGather():
         except Exception as e:
             self.logger.debug(f"Could not discover RSS for {source_name}: {e}")
     
+    async def update_source_timezone(self, source_id, detected_timezone):
+        """
+        Update source timezone when detected from article timestamps.
+        Only updates if:
+        - Detected timezone is different from configured timezone
+        - Timezone is detected from actual article data (not inferred)
+        
+        Args:
+            source_id: Source ID to update
+            detected_timezone: Timezone detected from articles (e.g., 'UTC+05:30')
+        """
+        try:
+            # Get current source info
+            if source_id not in self.sources:
+                return
+            
+            current_tz = self.sources[source_id].get('timezone')
+            
+            # Only update if different
+            if current_tz == detected_timezone:
+                return
+            
+            self.logger.info(f"🕐 Updating timezone for {self.sources[source_id].get('name')}: {current_tz} -> {detected_timezone}")
+            
+            # Update database
+            async with self.db_lock:
+                with self.eng.connect() as conn:
+                    try:
+                        update_stmt = (
+                            self.gm_sources.update()
+                            .where(self.gm_sources.c.id_source == source_id)
+                            .values(timezone=detected_timezone)
+                        )
+                        conn.execute(update_stmt)
+                        conn.commit()
+                        
+                        # Update in-memory sources
+                        self.sources[source_id]['timezone'] = detected_timezone
+                        
+                    except Exception as e:
+                        self.logger.error(f"Failed to update timezone for {source_id}: {e}")
+                        conn.rollback()
+        except Exception as e:
+            self.logger.debug(f"Error updating source timezone for {source_id}: {e}")
+    
     async def collect_newsapi(self):
         """
         Collect articles from NewsAPI in continuous loop with API key rotation.
@@ -725,8 +881,15 @@ class NewsGather():
                                     article_publishedAt = article['publishedAt']  # Keep original with timezone
                                     article_content = article['content']
                                     
-                                    # Create normalized UTC version
-                                    article_publishedAt_gmt = normalize_timestamp_to_utc(article_publishedAt)
+                                    # Get source timezone if available
+                                    source_tz = self.sources.get(source_id, {}).get('timezone')
+                                    
+                                    # Create normalized UTC version (article timezone has priority over source timezone)
+                                    article_publishedAt_gmt, detected_tz = normalize_timestamp_to_utc(article_publishedAt, source_tz)
+                                    
+                                    # Update source timezone if detected from article and different from configured
+                                    if detected_tz and source_tz != detected_tz:
+                                        self.loop.create_task(self.update_source_timezone(source_id, detected_tz))
                                     
                                     article_key = url_encode(article_title + article_url + article_publishedAt)
                                     
@@ -823,6 +986,8 @@ class NewsGather():
                 
                 if not self.shutdown_flag:
                     self.logger.info(f"NewsAPI cycle {cycle_count} complete. Sleeping {NEWSAPI_CYCLE_INTERVAL}s...")
+                    # Reload sources to pick up any database changes
+                    await self.reload_sources()
                     await asyncio.sleep(NEWSAPI_CYCLE_INTERVAL)
         except asyncio.CancelledError:
             self.logger.info("🗞️  NewsAPI collector cancelled")
@@ -887,6 +1052,8 @@ class NewsGather():
                 
                 if not self.shutdown_flag:
                     self.logger.info(f"RSS cycle {cycle_count} complete. Sleeping {RSS_CYCLE_INTERVAL}s...")
+                    # Reload sources to pick up any database changes
+                    await self.reload_sources()
                     await asyncio.sleep(RSS_CYCLE_INTERVAL)
         except asyncio.CancelledError:
             self.logger.info("📡 RSS collector cancelled")
@@ -947,8 +1114,13 @@ class NewsGather():
                     if not title or not url:
                         continue
                     
-                    # Create normalized UTC version
-                    published_gmt = normalize_timestamp_to_utc(published)
+                    # Create normalized UTC version (article timezone has priority over source timezone)
+                    source_tz = source.get('timezone')
+                    published_gmt, detected_tz = normalize_timestamp_to_utc(published, source_tz)
+                    
+                    # Update source timezone if detected from article and different from configured
+                    if detected_tz and source_tz != detected_tz:
+                        self.loop.create_task(self.update_source_timezone(source_id, detected_tz))
                     
                     # Generate article key with original timestamp
                     article_key = url_encode(title + url + published)
@@ -1109,6 +1281,8 @@ class NewsGather():
                 
                 if not self.shutdown_flag:
                     self.logger.info(f"MediaStack: Sleeping {MEDIASTACK_CYCLE_INTERVAL}s...")
+                    # Reload sources to pick up any database changes
+                    await self.reload_sources()
                     await asyncio.sleep(MEDIASTACK_CYCLE_INTERVAL)
         except asyncio.CancelledError:
             self.logger.info("🌍 MediaStack collector cancelled")
@@ -1151,11 +1325,18 @@ class NewsGather():
             except:
                 source_url = ''
             
-            # Create normalized UTC version
-            published_at_gmt = normalize_timestamp_to_utc(published_at)
-            
             # Create source ID (mediastack-source_name)
             source_id = f"mediastack-{source_name.lower().replace(' ', '-').replace('_', '-')}"
+            
+            # Get source timezone if available
+            source_tz = self.sources.get(source_id, {}).get('timezone')
+            
+            # Create normalized UTC version (article timezone has priority over source timezone)
+            published_at_gmt, detected_tz = normalize_timestamp_to_utc(published_at, source_tz)
+            
+            # Update source timezone if detected from article and different from configured
+            if detected_tz and source_tz != detected_tz:
+                self.loop.create_task(self.update_source_timezone(source_id, detected_tz))
             
             # Create article ID using original timestamp
             article_id = url_encode(title + url + published_at)
