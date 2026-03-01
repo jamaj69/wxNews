@@ -491,6 +491,22 @@ class NewsGather():
         except Exception as e:
             self.logger.debug(f"Error with published_at_gmt column: {e}")
         
+        # Create index on published_at_gmt DESC for efficient querying of most recent news
+        try:
+            with eng.connect() as conn:
+                # Check if index exists
+                result = conn.execute(text("SELECT name FROM sqlite_master WHERE type='index' AND name='idx_articles_published_gmt_desc'")).fetchone()
+                
+                if not result:
+                    self.logger.info("Creating index on published_at_gmt for fast recent news queries")
+                    conn.execute(text('CREATE INDEX idx_articles_published_gmt_desc ON gm_articles(published_at_gmt DESC)'))
+                    conn.commit()
+                    self.logger.info("✅ Index idx_articles_published_gmt_desc created successfully")
+                else:
+                    self.logger.debug("Index on published_at_gmt already exists")
+        except Exception as e:
+            self.logger.debug(f"Error with published_at_gmt index: {e}")
+        
         self.logger.info("Database initialization complete")
         return eng
         
