@@ -1328,8 +1328,8 @@ class NewsGather():
                 ENRICH_TIMEOUT
             )
             
-            # Check for blocking error codes (402 Payment Required, 403 Forbidden, 406 Not Acceptable, 410 Gone)
-            if result and result.get('error_code') in [402, 403, 406, 410]:
+            # Check for blocking error codes (402 Payment Required, 403 Forbidden, 406 Not Acceptable, 410 Gone, TIMEOUT)
+            if result and result.get('error_code') in [402, 403, 406, 410, 'TIMEOUT']:
                 if source_id:
                     await self._increment_blocked_count(source_id, source_name, result.get('error_code'))
             
@@ -1386,12 +1386,12 @@ class NewsGather():
     async def _increment_blocked_count(self, source_id, source_name='', error_code=403):
         """
         Increment the blocked_count for a source and mark as blocked if threshold reached.
-        Threshold: 3 consecutive HTTP errors (402/403/406/410) marks source as blocked.
+        Threshold: 3 consecutive errors (402/403/406/410/TIMEOUT) marks source as blocked.
         
         Args:
             source_id: Source identifier
             source_name: Source name for logging
-            error_code: HTTP error code (402 Payment Required, 403 Forbidden, 406 Not Acceptable, 410 Gone, etc.)
+            error_code: HTTP error code or 'TIMEOUT' (402 Payment Required, 403 Forbidden, 406 Not Acceptable, 410 Gone, TIMEOUT, etc.)
         """
         try:
             async with self.db_lock:

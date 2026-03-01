@@ -81,6 +81,10 @@ class ArticleContentFetcher:
             if e.response is not None:
                 result['error_code'] = e.response.status_code
             logger.error(f"Request error for {url}: {e}")
+        except requests.Timeout as e:
+            # Connection or read timeout
+            result['error_code'] = 'TIMEOUT'
+            logger.error(f"Request error for {url}: {e}")
         except requests.RequestException as e:
             logger.error(f"Request error for {url}: {e}")
         except Exception as e:
