@@ -1099,6 +1099,7 @@ class NewsGather():
             
             articles_inserted = 0
             articles_skipped = 0
+            detected_timezones = []  # Track detected timezones from all articles
             
             for entry in feed.entries:
                     # Extract article data
@@ -1118,9 +1119,9 @@ class NewsGather():
                     source_tz = source.get('timezone')
                     published_gmt, detected_tz = normalize_timestamp_to_utc(published, source_tz)
                     
-                    # Update source timezone if detected from article and different from configured
-                    if detected_tz and source_tz != detected_tz:
-                        self.loop.create_task(self.update_source_timezone(source_id, detected_tz))
+                    # Track detected timezone for consistency check
+                    if detected_tz:
+                        detected_timezones.append(detected_tz)
                     
                     # Generate article key with original timestamp
                     article_key = url_encode(title + url + published)
@@ -1165,6 +1166,22 @@ class NewsGather():
                 self.logger.debug(f"✅ [{source_name}] {articles_inserted} new, {articles_skipped} existing")
             else:
                 self.logger.debug(f"⏭️  [{source_name}] All {articles_skipped} articles already exist")
+            
+            # Check if all articles in the feed have the same timezone
+            # If yes, and it's different from source timezone, update it
+            if detected_timezones:
+                unique_timezones = set(detected_timezones)
+                if len(unique_timezones) == 1:
+                    # All articles have the same timezone
+                    consistent_tz = detected_timezones[0]
+                    source_tz = source.get('timezone')
+                    if source_tz != consistent_tz:
+                        # Update source timezone with the consistent value from articles
+                        self.logger.info(f"🕐 [{source_name}] All {len(detected_timezones)} articles have timezone {consistent_tz}, updating source")
+                        await self.update_source_timezone(source_id, consistent_tz)
+                elif len(unique_timezones) > 1:
+                    # Multiple different timezones detected - log for debugging
+                    self.logger.debug(f"⚠️  [{source_name}] Multiple timezones in feed: {unique_timezones}")
                     
         except asyncio.TimeoutError:
             self.logger.warning(f"⏱️  [{source_name}] Timeout after {RSS_TIMEOUT}s")
