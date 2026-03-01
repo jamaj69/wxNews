@@ -302,9 +302,6 @@ backups/
 old/
 archive/
 
-async/
-
-
 # ============================================
 # Deprecated Files (Keep for now)
 # ============================================
@@ -312,4 +309,3 @@ async/
 # twitterasync.py
 # wxAsyncNewsReaderv[1-4].py
 # wxAsyncNewsGather1.py
-async
