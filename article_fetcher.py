@@ -19,11 +19,18 @@ class ArticleContentFetcher:
     def __init__(self, timeout=10):
         self.timeout = timeout
         self.headers = {
-            'User-Agent': 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+            'User-Agent': 'Mozilla/5.0 (X11; Linux x86_64; rv:140.0) Gecko/20100101 Firefox/140.0',
             'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-            'Accept-Language': 'en-US,en;q=0.5',
-            'Accept-Encoding': 'gzip, deflate',
+            'Accept-Language': 'pt-BR,pt;q=0.8,en-US;q=0.5,en;q=0.3',
+            'Accept-Encoding': 'gzip, deflate, br, zstd',
             'Connection': 'keep-alive',
+            'Upgrade-Insecure-Requests': '1',
+            'Sec-Fetch-Dest': 'document',
+            'Sec-Fetch-Mode': 'navigate',
+            'Sec-Fetch-Site': 'none',
+            'DNT': '1',
+            'Sec-GPC': '1',
+            'TE': 'trailers',
         }
     
     def fetch(self, url):
@@ -36,17 +43,19 @@ class ArticleContentFetcher:
         - description: Article summary/description
         - content: First few paragraphs of article text
         - success: Boolean indicating if content was fetched
+        - error_code: HTTP error code if request failed (403, 404, etc.)
         """
         result = {
             'author': None,
             'published_time': None,
             'description': None,
             'content': None,
-            'success': False
+            'success': False,
+            'error_code': None
         }
         
         try:
-            logger.info(f"Fetching content from: {url}")
+            logger.debug(f"Fetching content from: {url}")
             response = requests.get(url, headers=self.headers, timeout=self.timeout)
             response.raise_for_status()
             
@@ -65,8 +74,13 @@ class ArticleContentFetcher:
             result['content'] = self._extract_content(soup)
             
             result['success'] = True
-            logger.info(f"Successfully extracted content from {url}")
+            logger.debug(f"Successfully extracted content from {url}")
             
+        except requests.HTTPError as e:
+            # Capture HTTP error code (403, 404, etc.)
+            if e.response is not None:
+                result['error_code'] = e.response.status_code
+            logger.error(f"Request error for {url}: {e}")
         except requests.RequestException as e:
             logger.error(f"Request error for {url}: {e}")
         except Exception as e:

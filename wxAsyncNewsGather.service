@@ -1,0 +1,30 @@
+[Unit]
+Description=wxAsyncNewsGather - Async News Collection Service
+After=network-online.target
+Wants=network-online.target
+StartLimitIntervalSec=500
+StartLimitBurst=5
+
+[Service]
+Type=simple
+User=jamaj
+Group=jamaj
+WorkingDirectory=/home/jamaj/src/python/pyTweeter
+Environment="PYTHONUNBUFFERED=1"
+Environment="PATH=/home/python/pyenv/bin:/usr/local/bin:/usr/bin:/bin"
+EnvironmentFile=-/home/jamaj/src/python/pyTweeter/.env
+ExecStart=/home/python/pyenv/bin/python /home/jamaj/src/python/pyTweeter/wxAsyncNewsGather.py
+Restart=on-failure
+RestartSec=30
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=wxAsyncNewsGather
+
+# Security and resource limits
+Nice=10
+PrivateTmp=yes
+NoNewPrivileges=true
+LimitNOFILE=4096
+
+[Install]
+WantedBy=multi-user.target

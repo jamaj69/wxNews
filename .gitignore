@@ -309,3 +309,5 @@ archive/
 # twitterasync.py
 # wxAsyncNewsReaderv[1-4].py
 # wxAsyncNewsGather1.py
+*.db-shm
+*.db-wal

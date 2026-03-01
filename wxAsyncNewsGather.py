@@ -28,7 +28,7 @@ import zlib
 
 from sqlalchemy import (create_engine, Table, Column, Integer, 
     String, MetaData, Text)
-from sqlalchemy import inspect,select
+from sqlalchemy import inspect, select, text
 from sqlalchemy.dialects.sqlite import insert
 import os
 from urllib.parse import urlparse
@@ -40,22 +40,31 @@ from decouple import config
 
 # Import article content fetcher
 from article_fetcher import fetch_article_content
+import signal
 
-API_KEY1 = config('NEWS_API_KEY_1')
-API_KEY2 = config('NEWS_API_KEY_2')
+# NewsAPI Configuration
+API_KEY1 = config('NEWS_API_KEY_1', cast=str)
+API_KEY2 = config('NEWS_API_KEY_2', cast=str)
+NEWSAPI_CYCLE_INTERVAL = int(config('NEWSAPI_CYCLE_INTERVAL', default=600))  # 10 minutes
 
 # RSS Configuration
 RSS_TIMEOUT = int(config('RSS_TIMEOUT', default=15))
 RSS_MAX_CONCURRENT = int(config('RSS_MAX_CONCURRENT', default=10))
 RSS_BATCH_SIZE = int(config('RSS_BATCH_SIZE', default=20))
+RSS_CYCLE_INTERVAL = int(config('RSS_CYCLE_INTERVAL', default=900))  # 15 minutes
 
 # MediaStack Configuration
-MEDIASTACK_API_KEY = config('MEDIASTACK_API_KEY')
-MEDIASTACK_BASE_URL = config('MEDIASTACK_BASE_URL', default='https://api.mediastack.com/v1/news')
+MEDIASTACK_API_KEY = config('MEDIASTACK_API_KEY', cast=str)
+MEDIASTACK_BASE_URL = config(
+    'MEDIASTACK_BASE_URL',
+    default='https://api.mediastack.com/v1/news',
+    cast=str,
+)
 MEDIASTACK_RATE_DELAY = 20  # Delay between requests (seconds) - 3 requests/minute
+MEDIASTACK_CYCLE_INTERVAL = int(config('MEDIASTACK_CYCLE_INTERVAL', default=3600))  # 60 minutes
 
 # Content Enrichment Configuration
-ENRICH_MISSING_CONTENT = config('ENRICH_MISSING_CONTENT', default='true').lower() == 'true'
+ENRICH_MISSING_CONTENT = config('ENRICH_MISSING_CONTENT', default=True, cast=bool)
 ENRICH_TIMEOUT = int(config('ENRICH_TIMEOUT', default=10))
 
 # Basic browser-like headers improve compatibility with feeds/CDNs
@@ -65,8 +74,15 @@ BROWSER_USER_AGENT = (
 )
 BASIC_HTTP_HEADERS = {
     "User-Agent": BROWSER_USER_AGENT,
-    "Accept": "application/rss+xml, application/xml;q=0.9, text/xml;q=0.8, */*;q=0.7",
-    "Accept-Language": "en-US,en;q=0.9",
+    "Accept": (
+        "application/rss+xml, application/atom+xml, application/rdf+xml, "
+        "application/xml;q=0.95, text/xml;q=0.9, "
+        "application/json;q=0.8, text/html;q=0.7, text/plain;q=0.6, */*;q=0.5"
+    ),
+    "Accept-Language": (
+        "en-US,en;q=0.95, pt-BR,pt;q=0.9, es-ES,es;q=0.85, "
+        "fr-FR,fr;q=0.8, de-DE,de;q=0.75, it-IT,it;q=0.7"
+    ),
     "Cache-Control": "max-age=0",
 }
 
@@ -78,12 +94,23 @@ def url_encode(url):
 
 def dbCredentials():
     """Return SQLite database path"""
-    db_path = config('DB_PATH', default='predator_news.db')
+    db_path = config('DB_PATH', default='predator_news.db', cast=str)
     # Make path absolute if relative
     if not os.path.isabs(db_path):
         script_dir = os.path.dirname(os.path.abspath(__file__))
         db_path = os.path.join(script_dir, db_path)
     return db_path
+
+
+def as_text(value):
+    """Return a safe string for loosely-typed feed/API fields."""
+    if value is None:
+        return ""
+    if isinstance(value, str):
+        return value
+    if isinstance(value, list):
+        return " ".join(as_text(item) for item in value if item is not None)
+    return str(value)
 
 
 
@@ -93,7 +120,11 @@ class NewsGather():
         self.sources = dict()
         self.loop = loop
         self.db_lock = asyncio.Lock()  # Lock para serializar inserções SQLite
-        self.mediastack_cycle_count = 0  # Counter for MediaStack collection cycles
+        self.shutdown_flag = False  # Flag para shutdown gracioso
+        
+        # API key rotation for NewsAPI
+        self.newsapi_keys = [API_KEY1, API_KEY2]
+        self.current_newsapi_key_index = 0
    
         self.logger.info("Initializing NewsGather...")
         self.logger.debug("Creating URL queue")
@@ -108,10 +139,25 @@ class NewsGather():
         self.logger.info("Loading existing articles from database")
         self.sources = self.InitArticles(self.eng, self.meta, self.gm_sources,self.gm_articles)
         self.logger.info(f"Loaded {len(self.sources)} sources from database")
-
-        self.logger.info("Starting news update cycle")
-#        self.loop.call_later(1, self.UpdateNews)
-        self.UpdateNews()
+    
+    def shutdown(self):
+        """
+        Gracefully shutdown the application:
+        - Close database connections
+        - Clean up resources
+        Note: shutdown_flag should already be set before calling this
+        """
+        self.logger.info("🛑 Shutting down NewsGather...")
+        
+        try:
+            if hasattr(self, 'eng') and self.eng:
+                self.logger.info("Closing database connection...")
+                self.eng.dispose()
+                self.logger.info("✅ Database connection closed")
+        except Exception as e:
+            self.logger.error(f"Error closing database: {e}")
+        
+        self.logger.info("✅ Shutdown complete")
 
     def _build_http_headers(self, url: str) -> dict:
         headers = dict(BASIC_HTTP_HEADERS)
@@ -279,53 +325,42 @@ class NewsGather():
 #        print(sources)
         return sources
 
-    def UpdateNews(self):
-#        self.InitQueue()   
-        self.logger.info("UpdateNews: Queuing news API and RSS requests")
-        
-        # NewsAPI requests (only EN works on free tier)
-        self.logger.debug("Queuing EN request (API_KEY1)")
-        url = "https://newsapi.org/v2/top-headlines?language=en&pageSize=100&apiKey=" + API_KEY1        
-        self.url_queue.put(url)      
-        
-        self.logger.debug("Queuing PT request (API_KEY2)")
-        url = "https://newsapi.org/v2/top-headlines?language=pt&pageSize=100&apiKey=" + API_KEY2
-        self.url_queue.put(url)      
-        
-        self.logger.debug("Queuing ES request (API_KEY1)")
-        url = "https://newsapi.org/v2/top-headlines?language=es&pageSize=100&apiKey=" + API_KEY1
-        self.url_queue.put(url)      
-        
-        self.logger.debug("Queuing IT request (API_KEY2)")
-        url = "https://newsapi.org/v2/top-headlines?language=it&pageSize=100&apiKey=" + API_KEY2
-        self.url_queue.put(url)
-        
-        # Schedule RSS collection
-        self.logger.debug("Scheduling RSS collection")
-        self.loop.create_task(self.collect_rss_feeds())
-        
-        # Schedule MediaStack collection (every 6 cycles = 1 hour)
-        # Free tier: 500 req/month, so ~16 req/day = ~8 collection cycles/day
-        self.mediastack_cycle_count += 1
-        if self.mediastack_cycle_count >= 6:  # Every 6 cycles (60 minutes)
-            self.logger.debug("Scheduling MediaStack collection")
-            self.loop.create_task(self.collect_mediastack())
-            self.mediastack_cycle_count = 0
-        else:
-            self.logger.debug(f"Skipping MediaStack collection (cycle {self.mediastack_cycle_count}/6)")
-        
-        self.logger.info("UpdateNews: Scheduling next update in 600 seconds (10 minutes)")
-        self.loop.call_later(600, self.UpdateNews)
+    # ========================================================================
+    # LEGACY METHODS - Not used in new parallel architecture
+    # Kept for reference only
+    # ========================================================================
+    
+    # def UpdateNews(self):
+    #     """LEGACY: Replaced by individual collector methods running in parallel"""
+    #     pass
+    
+    # async def async_getALLNews(self):
+    #     """LEGACY: Replaced by collect_newsapi() running in parallel loop"""
+    #     pass
 
     def dbOpen(self):    
         db_path = dbCredentials()
         self.logger.info(f"Opening SQLite database: {db_path}")
-        # SQLite connection string with timeout to prevent "database is locked" 
+        # SQLite connection string with WAL mode and increased timeout for concurrent writes
         eng = create_engine(
             f'sqlite:///{db_path}',
-            connect_args={'timeout': 30, 'check_same_thread': False},
-            pool_pre_ping=True
+            connect_args={
+                'timeout': 60,  # Increased from 30 to 60 seconds
+                'check_same_thread': False,
+                'isolation_level': None  # Autocommit mode for better concurrency
+            },
+            pool_pre_ping=True,
+            pool_size=10,  # Connection pool to avoid creating new connections
+            max_overflow=20
         )
+        
+        # Enable WAL mode for better concurrent access (allows multiple readers + 1 writer)
+        with eng.connect() as conn:
+            conn.execute(text("PRAGMA journal_mode=WAL"))
+            conn.execute(text("PRAGMA synchronous=NORMAL"))  # Faster writes, still safe
+            conn.execute(text("PRAGMA busy_timeout=60000"))  # 60 second busy timeout
+            conn.commit()
+            self.logger.info("✅ SQLite WAL mode enabled for concurrent access")
     #    cur = eng.connect()  
     
         self.logger.debug("Creating metadata and tables if not exist")
@@ -358,286 +393,35 @@ class NewsGather():
         )
         gm_articles.create(bind=eng, checkfirst=True)
         self.logger.debug("Table gm_articles ready")
+        
+        # Add fetch_blocked columns if they don't exist (migration)
+        try:
+            with eng.connect() as conn:
+                # Check if columns exist by trying to select them
+                try:
+                    conn.execute(select(gm_sources.c.fetch_blocked).limit(1))
+                except Exception:
+                    # Columns don't exist, add them
+                    self.logger.info("Adding fetch_blocked and blocked_count columns to gm_sources")
+                    conn.execute(text('ALTER TABLE gm_sources ADD COLUMN fetch_blocked INTEGER DEFAULT 0'))
+                    conn.execute(text('ALTER TABLE gm_sources ADD COLUMN blocked_count INTEGER DEFAULT 0'))
+                    conn.commit()
+                    self.logger.info("Blocklist columns added successfully")
+        except Exception as e:
+            self.logger.warning(f"Could not add blocklist columns (may already exist): {e}")
+        
         self.logger.info("Database initialization complete")
         return eng
         
 
-    async def track():
-        req = client.stream.statuses.filter.post(follow=USERIDS)
-        # req is an asynchronous context
-        async with req as stream:
-            # stream is an asynchronous iterator
-            async for tweet in stream:
-                # check that you actually receive a tweet
-                if events.tweet(tweet):
-                    # you can then access items as you would do with a
-                    # `PeonyResponse` object
-                    user_id = tweet['user']['id_str']
-                    username = tweet.user.screen_name   
-                    description = tweet['user']['description']
-                    location = tweet['user']['location']
-                    followers_count = tweet['user']['followers_count']
-                    friends_count = tweet['user']['friends_count']
-                    listed_count = tweet['user']['listed_count']
-                    favourites_count = tweet['user']['favourites_count']
-                    statuses_count = tweet['user']['statuses_count']
-                    verified = tweet['user']['verified']
-                    twitter_id = tweet['id']
-                    twitter_ts = tweet['timestamp_ms']
-                    
-                    #tid_reply = tweet['in_reply_to_status_id_str']
-                    #tid_retweet = tweet['retweeted_status']
-                    #print('in_reply_to_status_id_str',':',tweet['in_reply_to_status_id_str'])
-                    #print('retweeted_status',':',tweet['retweeted_status'])
-                    
-                    #flds = ['in_reply_to_status_id_str','retweeted_status']
-                    #flds = ['in_reply_to_status_id_str']
-                    #for key in flds:
-                    #    if key in tweet.keys():
-                    #        print(key,':',tweet[key])
-                    
-                    #print(tweet)
-                    #for key in tweet.keys():
-                    #    print(key,':',tweet[key])
-                    hashtags = tweet['entities']['hashtags']
-                    user_mentions = tweet['entities']['user_mentions']
-                    urls = tweet['entities']['urls']
-                    retweeted_status = tweet['retweeted_status'] if 'retweeted_status' in tweet.keys() else ""
-                    in_reply_to_status_id_str = tweet['in_reply_to_status_id_str'] if 'in_reply_to_status_id_str' in tweet.keys() else ""
+    async def track(self):
+        """Legacy Twitter stream hook kept as a no-op placeholder."""
+        self.logger.debug("track() is disabled in this build")
 
-                    
-                    #print('hashtags:',hashtags)
-                    #print('mentions:',user_mentions)
-                    #print('urls:',urls)
-                    #print('retweeted_status:',retweeted_status)
-                    lRetweet = False
-                    lReply = False
-           
-                    if retweeted_status == None or retweeted_status == "" or retweeted_status == "None":
-                        pass
-                    else: 
-                        #print(type(retweeted_status))
-                        print("Retweet:",retweeted_status)
-                        twitter_id = retweeted_status['id_str']
-                        lRetweet = True
-
-                    in_reply_to_status_id_str = str(in_reply_to_status_id_str)
-                    if in_reply_to_status_id_str == None or in_reply_to_status_id_str == "" or in_reply_to_status_id_str == "None":
-                        pass
-                    else: 
-                        #print(type(in_reply_to_status_id_str))
-                        print("Reply:",in_reply_to_status_id_str)
-                        twitter_id = in_reply_to_status_id_str
-                        lReply = True
-                        
-                    
-                    if lRetweet or lReply:
-                        print("Retweet or reply")
-                        pass
-                    else:
-                        uid  = create_user(conn, user_id, username)
-                        #print(tweet)
-                        data = dict(**tweet)
-                        data = ToString(data)
-                        #print(data)
-                        sid =  create_status(conn, uid, tweet.text, data)
-                        twt = "uid:{uid} sid:{sid}" 
-                        print(twt.format(uid=uid,sid=sid))
-                        msg = "{tw_ts} ({tw_id}) | @{username} ({location})({id}): {text}"
-                        print(msg.format(tw_id = twitter_id,
-                                         tw_ts = twitter_ts,
-                                         location = location,
-                                         username=username,
-                                         id=user_id,
-                                         text=tweet.text))
-                    
-                    #for key in tweet.keys():
-                    #    print(key,':',tweet[key])
-
-    async def async_getALLNews(self):
-        self.logger.info("async_getALLNews: Starting news collection loop")
-        lTrue = True
-  
-     
-        getnewsQueue = self.url_queue                
-        self.logger.info(f"Queue size: {getnewsQueue.qsize()} URLs to process")
-      
-        async with aiohttp.ClientSession() as session:
-            while lTrue:
-                await asyncio.sleep(0) # cooperate with other tasks
-                if not getnewsQueue.empty():
-                    url = getnewsQueue.get()
-                    # Extract language from URL for logging
-                    lang = 'unknown'
-                    if 'language=en' in url:
-                        lang = 'EN'
-                    elif 'language=pt' in url:
-                        lang = 'PT'
-                    elif 'language=es' in url:
-                        lang = 'ES'
-                    elif 'language=it' in url:
-                        lang = 'IT'
-                    self.logger.info(f"Fetching news for language: {lang}")
-                    self.logger.debug(f"URL: {url[:80]}...")
-                    try:
-                        async with session.get(url, headers=self._build_http_headers(url)) as response:
-                            if response.status != 200:
-                                self.logger.warning(f"HTTP {response.status} for {lang}")
-                                continue
-                            
-                            self.logger.debug(f"Response received for {lang}, parsing JSON")
-                            response_text = await response.text()
-                            JSON_object = json.loads(response_text)
-                            
-                            if JSON_object.get('status') != 'ok':
-                                self.logger.error(f"API error for {lang}: {JSON_object.get('message')}")
-                                continue
-                            
-#                        print(JSON_object)
-                        articles = JSON_object["articles"]
-                        self.logger.info(f"Processing {len(articles)} articles for {lang}")
-                        
-                        articles_inserted = 0
-                        articles_skipped = 0
-                        sources_added = 0
-                        
-                        for article in articles:
-                            await asyncio.sleep(0) # cooperate with other tasks
-                            article_source = article['source']
-                            article_source_id = article_source['id']
-                            article_source_name = article_source['name']
-                            source_id           = article_source_name if article_source_id is None else article_source_id
-                            source_name         = article_source_name
-                            article_author = article['author']
-                            article_title = article['title']
-                            # Clean title: normalize whitespace
-                            if article_title:
-                                article_title = ' '.join(article_title.split())
-                            article_description = article['description']
-                            article_url = article['url']
-                            article_urlToImage = article['urlToImage']
-                            article_publishedAt = article['publishedAt']
-                            article_content = article['content']
-#                            print('article_source_id',source_id)
-#                            print('article_source_name',source_name)
-#                            print('article_author',article_author)
-#                            print('article_title',article_title)
-#                            print('article_description',article_description)
-#                            print('article_url',article_url)
-#                            print('article_urlToImage',article_urlToImage)
-#                            print('article_publishedAt',article_publishedAt)
-#                            print('article_content',article_content)
-                            article_key = url_encode(article_title+article_url+article_publishedAt)
-                            
-                            # Try to extract source URL from article URL
-                            if not article_url:
-                                article_url = ''
-                            try:
-                                parsed_url = urlparse(article_url)
-                                inferred_source_url = f"{parsed_url.scheme}://{parsed_url.netloc}"
-                            except:
-                                inferred_source_url = ''
-                            
-                            if not source_id in self.sources:
-                                self.logger.debug(f"New source detected: {source_name} (id: {source_id})")
-                                source_url          = inferred_source_url
-                                source_description  = ''
-                                source_articles = dict()
-                                
-                                new_source = { 
-                                        'id_source' : source_id ,
-                                        'name' : source_name, 
-                                        'url': source_url, 
-                                        'description': source_description, 
-                                        'articles': source_articles, 
-                                        'category' : '', 
-                                        'country': '', 
-                                        'language': '' 
-                                        }                             
-                                
-                                self.sources[source_id] = new_source
-                                new_source = { 
-                                        'id_source' : source_id ,
-                                        'name' : source_name, 
-                                        'url': source_url, 
-                                        'description': source_description, 
-                                        'category' : '', 
-                                        'country': '', 
-                                        'language': '' 
-                                    }                             
-
-                                self.logger.debug(f"Inserting new source: {source_name}")
-                                # Use lock e context manager para evitar "database is locked"
-                                async with self.db_lock:
-                                    with self.eng.connect() as conn:
-                                        try:
-                                            ins = insert(self.gm_sources).values(**new_source)
-                                            result = conn.execute(ins)
-                                            conn.commit()
-                                            sources_added += 1
-                                            self.logger.info(f"✅ Added source: {source_name}")
-                                            
-                                            # Try to discover RSS feed for this new source
-                                            if source_url:
-                                                self.logger.debug(f"Attempting to discover RSS for {source_name}...")
-                                                self.loop.create_task(
-                                                    self.register_rss_source(session, source_id, source_name, source_url)
-                                                )
-                                        except Exception as e:
-                                            self.logger.error(f"Failed to insert source {source_name}: {e}")
-                                            conn.rollback()
-                                
-                            
-                            new_article = {
-                                                'id_article' : article_key ,
-                                                'id_source' : source_id ,
-                                                'author' : article_author,
-                                                'title' : article_title,
-                                                'description' : article_description,
-                                                'url' : article_url,
-                                                'urlToImage' : article_urlToImage,
-                                                'publishedAt' : article_publishedAt,
-                                                'content' : article_content 
-                                            }
-                            
-                            # Try to enrich with missing content from URL
-                            await self.enrich_article_content(new_article, source_name)
-                            
-                            self.logger.debug(f"Inserting article: {article_title[:50]}...")
-                            # Use lock e context manager para evitar "database is locked"
-                            async with self.db_lock:
-                                with self.eng.connect() as conn:
-                                    try:
-                                        ins = insert(self.gm_articles).values(**new_article)
-                                        # Ignore conflicts on both id_article and url (both have UNIQUE constraints)
-                                        ins_do_nothing = ins.on_conflict_do_nothing()
-                                        result = conn.execute(ins_do_nothing)
-                                        conn.commit()
-                                        
-                                        if result.rowcount > 0:
-                                            articles_inserted += 1
-                                            self.logger.info(f"✅ [{source_name}] {article_title[:60]}...")
-                                        else:
-                                            articles_skipped += 1
-                                            self.logger.debug(f"⏭️  [{source_name}] Already exists: {article_title[:40]}...")
-                                        
-                                        self.sources[source_id]['articles'][article_key] = new_article
-                                    except Exception as e:
-                                        self.logger.error(f"Failed to insert article '{article_title[:40]}...': {e}")
-                                        conn.rollback()
-                        self.logger.info(f"Summary for {lang}: {articles_inserted} inserted, {articles_skipped} skipped, {sources_added} new sources")
-                        
-                    except aiohttp.ClientError as e:
-                        self.logger.error(f"Network error fetching {lang}: {e}")
-                    except json.JSONDecodeError as e:
-                        self.logger.error(f"JSON decode error for {lang}: {e}")
-                    except Exception as e:
-                        self.logger.error(f"Unexpected error processing {lang}: {e}", exc_info=True)
-                else:
-                    await asyncio.sleep(0) # cooperate with other tasks
-
-        self.logger.info("async_getALLNews: Exiting news collection loop")
-        return None       
+    # async def async_getALLNews(self):
+    #     """LEGACY: Replaced by collect_newsapi() running in parallel loop"""
+    #     # This method has been replaced by the new architecture
+    #     pass
 
     async def discover_rss_feed(self, session, domain, source_name):
         """
@@ -682,12 +466,21 @@ class NewsGather():
             if not self._looks_like_feed_content_type(content_type) and not self._looks_like_feed_body(content):
                 return None
 
-            feed = feedparser.parse(content)
-            if hasattr(feed, 'feed') and hasattr(feed.feed, 'title'):
-                title = feed.feed.title.strip()
-                if title:
-                    self.logger.debug(f"Extracted feed name: {title}")
-                    return title
+            try:
+                feed = feedparser.parse(content)
+            except (AssertionError, ValueError, Exception) as parse_err:
+                # feedparser can raise AssertionError on malformed HTML/XML
+                self.logger.debug(f"Parser error for {rss_url}: {parse_err}")
+                return None
+                
+            feed_info = getattr(feed, "feed", {})
+            if isinstance(feed_info, dict):
+                title = as_text(feed_info.get("title", "")).strip()
+            else:
+                title = as_text(getattr(feed_info, "title", "")).strip()
+            if title:
+                self.logger.debug(f"Extracted feed name: {title}")
+                return title
             return None
         except Exception as e:
             self.logger.debug(f"Failed to extract feed name from {rss_url}: {e}")
@@ -749,49 +542,242 @@ class NewsGather():
         except Exception as e:
             self.logger.debug(f"Could not discover RSS for {source_name}: {e}")
     
+    async def collect_newsapi(self):
+        """
+        Collect articles from NewsAPI in continuous loop with API key rotation.
+        Languages: EN, PT, ES, IT
+        """
+        self.logger.info("🗞️  NewsAPI collector started")
+        cycle_count = 0
+        
+        # Language to API key mapping for rotation
+        languages = ['en', 'pt', 'es', 'it']
+        
+        try:
+            while not self.shutdown_flag:
+                cycle_count += 1
+                self.logger.info(f"📰 NewsAPI Cycle {cycle_count} starting...")
+                
+                async with aiohttp.ClientSession() as session:
+                    for lang in languages:
+                        if self.shutdown_flag:
+                            break
+                        
+                        # Rotate API key
+                        api_key = self.newsapi_keys[self.current_newsapi_key_index]
+                        self.current_newsapi_key_index = (self.current_newsapi_key_index + 1) % len(self.newsapi_keys)
+                        
+                        url = f"https://newsapi.org/v2/top-headlines?language={lang}&pageSize=100&apiKey={api_key}"
+                        
+                        self.logger.info(f"Fetching NewsAPI [{lang.upper()}] (key #{self.current_newsapi_key_index})...")
+                        
+                        try:
+                            async with session.get(url, headers=self._build_http_headers(url)) as response:
+                                if response.status != 200:
+                                    self.logger.warning(f"HTTP {response.status} for NewsAPI {lang}")
+                                    continue
+                                
+                                response_text = await response.text()
+                                JSON_object = json.loads(response_text)
+                                
+                                if JSON_object.get('status') != 'ok':
+                                    self.logger.error(f"NewsAPI error [{lang}]: {JSON_object.get('message')}")
+                                    continue
+                                
+                                articles = JSON_object.get("articles", [])
+                                self.logger.info(f"Processing {len(articles)} articles for {lang}")
+                                
+                                articles_inserted = 0
+                                articles_skipped = 0
+                                sources_added = 0
+                                
+                                for article in articles:
+                                    if self.shutdown_flag:
+                                        break
+                                    
+                                    await asyncio.sleep(0)  # cooperate with other tasks
+                                    
+                                    article_source = article['source']
+                                    article_source_id = article_source['id']
+                                    article_source_name = article_source['name']
+                                    source_id = article_source_name if article_source_id is None else article_source_id
+                                    source_name = article_source_name
+                                    article_author = article['author']
+                                    article_title = article['title']
+                                    
+                                    # Clean title: normalize whitespace
+                                    if article_title:
+                                        article_title = ' '.join(article_title.split())
+                                    
+                                    article_description = article['description']
+                                    article_url = article['url']
+                                    article_urlToImage = article['urlToImage']
+                                    article_publishedAt = article['publishedAt']
+                                    article_content = article['content']
+                                    
+                                    article_key = url_encode(article_title + article_url + article_publishedAt)
+                                    
+                                    # Try to extract source URL from article URL
+                                    if not article_url:
+                                        article_url = ''
+                                    try:
+                                        parsed_url = urlparse(article_url)
+                                        inferred_source_url = f"{parsed_url.scheme}://{parsed_url.netloc}"
+                                    except:
+                                        inferred_source_url = ''
+                                    
+                                    # Add new source if not exists
+                                    if source_id not in self.sources:
+                                        self.logger.debug(f"New source detected: {source_name} (id: {source_id})")
+                                        source_url = inferred_source_url
+                                        source_description = ''
+                                        
+                                        new_source = {
+                                            'id_source': source_id,
+                                            'name': source_name,
+                                            'url': source_url,
+                                            'description': source_description,
+                                            'category': '',
+                                            'country': '',
+                                            'language': lang
+                                        }
+                                        
+                                        self.sources[source_id] = {**new_source, 'articles': {}}
+                                        
+                                        async with self.db_lock:
+                                            with self.eng.connect() as conn:
+                                                try:
+                                                    ins = insert(self.gm_sources).values(**new_source)
+                                                    result = conn.execute(ins)
+                                                    conn.commit()
+                                                    sources_added += 1
+                                                    self.logger.info(f"✅ Added source: {source_name}")
+                                                    
+                                                    # Try to discover RSS feed
+                                                    if source_url:
+                                                        self.loop.create_task(
+                                                            self.register_rss_source(session, source_id, source_name, source_url)
+                                                        )
+                                                except Exception as e:
+                                                    self.logger.error(f"Failed to insert source {source_name}: {e}")
+                                                    conn.rollback()
+                                    
+                                    # Insert article
+                                    new_article = {
+                                        'id_article': article_key,
+                                        'id_source': source_id,
+                                        'author': article_author,
+                                        'title': article_title,
+                                        'description': article_description,
+                                        'url': article_url,
+                                        'urlToImage': article_urlToImage,
+                                        'publishedAt': article_publishedAt,
+                                        'content': article_content
+                                    }
+                                    
+                                    # Try to enrich with missing content
+                                    await self.enrich_article_content(new_article, source_name, source_id)
+                                    
+                                    async with self.db_lock:
+                                        with self.eng.connect() as conn:
+                                            try:
+                                                ins = insert(self.gm_articles).values(**new_article)
+                                                ins_do_nothing = ins.on_conflict_do_nothing()
+                                                result = conn.execute(ins_do_nothing)
+                                                conn.commit()
+                                                
+                                                if result.rowcount > 0:
+                                                    articles_inserted += 1
+                                                    self.logger.debug(f"✅ [{source_name}] {article_title[:60]}...")
+                                                else:
+                                                    articles_skipped += 1
+                                                    self.logger.debug(f"⏭️  [{source_name}] Already exists: {article_title[:40]}...")
+                                                
+                                                self.sources[source_id]['articles'][article_key] = new_article
+                                            except Exception as e:
+                                                self.logger.error(f"Failed to insert article '{article_title[:40]}...': {e}")
+                                                conn.rollback()
+                                
+                                self.logger.info(f"Summary NewsAPI {lang}: {articles_inserted} inserted, {articles_skipped} skipped, {sources_added} new sources")
+                        
+                        except aiohttp.ClientError as e:
+                            self.logger.error(f"Network error fetching NewsAPI {lang}: {e}")
+                        except json.JSONDecodeError as e:
+                            self.logger.error(f"JSON decode error for NewsAPI {lang}: {e}")
+                        except Exception as e:
+                            self.logger.error(f"Unexpected error processing NewsAPI {lang}: {e}", exc_info=True)
+                
+                if not self.shutdown_flag:
+                    self.logger.info(f"NewsAPI cycle {cycle_count} complete. Sleeping {NEWSAPI_CYCLE_INTERVAL}s...")
+                    await asyncio.sleep(NEWSAPI_CYCLE_INTERVAL)
+        except asyncio.CancelledError:
+            self.logger.info("🗞️  NewsAPI collector cancelled")
+        finally:
+            self.logger.info("🗞️  NewsAPI collector stopped")
+    
     async def collect_rss_feeds(self):
         """
-        Collect articles from all RSS sources in database.
+        Collect articles from all RSS sources in database in continuous loop.
         """
-        self.logger.info("Starting RSS collection...")        
+        self.logger.info("📡 RSS collector started")
+        cycle_count = 0
         
-        # Get all RSS sources from database
-        rss_sources = []
-        with self.eng.connect() as conn:
-            stmt = select(self.gm_sources).where(
-                self.gm_sources.c.id_source.like('rss-%')
-            )
-            results = conn.execute(stmt).fetchall()
-            for row in results:
-                rss_sources.append({
-                    'id': row[0],
-                    'name': row[1],
-                    'url': row[3],
-                    'language': row[5] or 'en'
-                })
-        
-        if not rss_sources:
-            self.logger.info("No RSS sources found in database")
-            return
-        
-        self.logger.info(f"Found {len(rss_sources)} RSS sources to process")
-        
-        # Process feeds with semaphore for concurrency control
-        semaphore = asyncio.Semaphore(RSS_MAX_CONCURRENT)
-        
-        async with aiohttp.ClientSession() as session:
-            # Process in batches
-            for i in range(0, len(rss_sources), RSS_BATCH_SIZE):
-                batch = rss_sources[i:i+RSS_BATCH_SIZE]
-                self.logger.info(f"Processing RSS batch {i//RSS_BATCH_SIZE + 1} ({len(batch)} feeds)...")
+        try:
+            while not self.shutdown_flag:
+                cycle_count += 1
+                self.logger.info(f"📡 RSS Cycle {cycle_count} starting...")
                 
-                tasks = [
-                    self.process_rss_feed_with_semaphore(session, source, semaphore)
-                    for source in batch
-                ]
-                await asyncio.gather(*tasks, return_exceptions=True)
-        
-        self.logger.info("RSS collection complete")
+                # Get all RSS sources from database
+                rss_sources = []
+                with self.eng.connect() as conn:
+                    stmt = select(self.gm_sources).where(
+                        self.gm_sources.c.id_source.like('rss-%')
+                    )
+                    results = conn.execute(stmt).fetchall()
+                    for row in results:
+                        if self.shutdown_flag:
+                            break
+                        rss_sources.append({
+                            'id': row[0],
+                            'name': row[1],
+                            'url': row[3],
+                            'language': row[5] or 'en'
+                        })
+                
+                if not rss_sources:
+                    self.logger.info("No RSS sources found in database")
+                    if not self.shutdown_flag:
+                        self.logger.info(f"RSS: No sources yet. Sleeping {RSS_CYCLE_INTERVAL}s...")
+                        await asyncio.sleep(RSS_CYCLE_INTERVAL)
+                    continue
+                
+                self.logger.info(f"Found {len(rss_sources)} RSS sources to process")
+                
+                # Process feeds with semaphore for concurrency control
+                semaphore = asyncio.Semaphore(RSS_MAX_CONCURRENT)
+                
+                async with aiohttp.ClientSession() as session:
+                    # Process in batches
+                    for i in range(0, len(rss_sources), RSS_BATCH_SIZE):
+                        if self.shutdown_flag:
+                            break
+                        
+                        batch = rss_sources[i:i+RSS_BATCH_SIZE]
+                        self.logger.info(f"Processing RSS batch {i//RSS_BATCH_SIZE + 1} ({len(batch)} feeds)...")
+                        
+                        tasks = [
+                            self.process_rss_feed_with_semaphore(session, source, semaphore)
+                            for source in batch
+                        ]
+                        await asyncio.gather(*tasks, return_exceptions=True)
+                
+                if not self.shutdown_flag:
+                    self.logger.info(f"RSS cycle {cycle_count} complete. Sleeping {RSS_CYCLE_INTERVAL}s...")
+                    await asyncio.sleep(RSS_CYCLE_INTERVAL)
+        except asyncio.CancelledError:
+            self.logger.info("📡 RSS collector cancelled")
+        finally:
+            self.logger.info("📡 RSS collector stopped")
     
     async def process_rss_feed_with_semaphore(self, session, source, semaphore):
         """
@@ -817,7 +803,13 @@ class NewsGather():
                 self.logger.warning(f"❌ [{source_name}] Invalid content type: {content_type}")
                 return
 
-            feed = feedparser.parse(content)
+            try:
+                feed = feedparser.parse(content)
+            except (AssertionError, ValueError, Exception) as parse_err:
+                # feedparser can raise AssertionError on malformed HTML/XML in marked sections
+                self.logger.debug(f"⚠️  [{source_name}] Parser error (malformed feed): {parse_err}")
+                return
+                
             if not feed.entries:
                 self.logger.debug(f"⚠️  [{source_name}] No entries found")
                 return
@@ -829,14 +821,14 @@ class NewsGather():
             
             for entry in feed.entries:
                     # Extract article data
-                    title = entry.get('title', '')
+                    title = as_text(entry.get('title', ''))
                     # Clean title: normalize whitespace
                     if title:
                         title = ' '.join(title.split())
-                    url = entry.get('link', '')
-                    description = entry.get('summary', entry.get('description', ''))
-                    author = entry.get('author', '')
-                    published = entry.get('published', entry.get('updated', ''))
+                    url = as_text(entry.get('link', ''))
+                    description = as_text(entry.get('summary', entry.get('description', '')))
+                    author = as_text(entry.get('author', ''))
+                    published = as_text(entry.get('published', entry.get('updated', '')))
                     
                     if not title or not url:
                         continue
@@ -858,7 +850,7 @@ class NewsGather():
                     }
                     
                     # Try to enrich with missing content from URL
-                    await self.enrich_article_content(new_article, source_name)
+                    await self.enrich_article_content(new_article, source_name, source['id'])
                     
                     # Insert article
                     async with self.db_lock:
@@ -872,7 +864,7 @@ class NewsGather():
                                 if result.rowcount > 0:
                                     articles_inserted += 1
                                     if articles_inserted <= 5:  # Log first 5
-                                        self.logger.info(f"  ✅ [{source_name}] {title[:60]}...")
+                                        self.logger.debug(f"  ✅ [{source_name}] {title[:60]}...")
                                 else:
                                     articles_skipped += 1
                             except Exception as e:
@@ -880,7 +872,7 @@ class NewsGather():
                                 conn.rollback()
                 
             if articles_inserted > 0:
-                self.logger.info(f"✅ [{source_name}] {articles_inserted} new, {articles_skipped} existing")
+                self.logger.debug(f"✅ [{source_name}] {articles_inserted} new, {articles_skipped} existing")
             else:
                 self.logger.debug(f"⏭️  [{source_name}] All {articles_skipped} articles already exist")
                     
@@ -891,100 +883,119 @@ class NewsGather():
     
     async def collect_mediastack(self):
         """
-        Collect articles from MediaStack API with rate limiting.
+        Collect articles from MediaStack API with rate limiting in continuous loop.
         Free tier: 500 requests/month, ~3-4 requests/minute
         Strategy: Collect PT, ES, IT (EN covered by NewsAPI)
         """
-        self.logger.info("Starting MediaStack collection...")
+        self.logger.info("🌍 MediaStack collector started")
+        cycle_count = 0
         
         # Languages to collect (EN already covered by NewsAPI)
         languages = ['pt', 'es', 'it']
         
-        stats = {
-            'total_fetched': 0,
-            'inserted': 0,
-            'skipped': 0,
-            'errors': 0
-        }
-        
-        async with aiohttp.ClientSession() as session:
-            for i, language in enumerate(languages):
-                self.logger.info(f"🌍 Collecting MediaStack news for language: {language}")
+        try:
+            while not self.shutdown_flag:
+                cycle_count += 1
+                self.logger.info(f"🌍 MediaStack Cycle {cycle_count} starting...")
                 
-                try:
-                    # Prepare request
-                    params = {
-                        'access_key': MEDIASTACK_API_KEY,
-                        'languages': language,
-                        'limit': 25,  # Collect 25 articles per language
-                        'sort': 'published_desc'
-                    }
-                    
-                    # Fetch news
-                    async with session.get(
-                        MEDIASTACK_BASE_URL, 
-                        params=params, 
-                        headers=self._build_http_headers(MEDIASTACK_BASE_URL),
-                        timeout=aiohttp.ClientTimeout(total=30)
-                    ) as response:
-                        if response.status == 200:
-                            data = await response.json()
-                            
-                            # Check for API errors
-                            if 'error' in data:
-                                error_info = data['error']
-                                self.logger.error(
-                                    f"❌ MediaStack API Error: {error_info.get('code')} - "
-                                    f"{error_info.get('message')}"
-                                )
-                                continue
-                            
-                            articles = data.get('data', [])
-                            total = data.get('pagination', {}).get('total', 0)
-                            stats['total_fetched'] += len(articles)
-                            
-                            self.logger.info(
-                                f"📥 MediaStack [{language}]: Received {len(articles)}/{total} articles"
-                            )
-                            
-                            # Process and store articles
-                            for article_data in articles:
-                                result = await self.process_mediastack_article(article_data, language, session)
-                                if result == 'inserted':
-                                    stats['inserted'] += 1
-                                elif result == 'skipped':
-                                    stats['skipped'] += 1
-                                else:
-                                    stats['errors'] += 1
-                        
-                        elif response.status == 429:
-                            self.logger.error(f"❌ MediaStack: Rate limit exceeded (429)")
-                            break  # Stop processing
-                        elif response.status == 401:
-                            self.logger.error(f"❌ MediaStack: Invalid API key (401)")
+                stats = {
+                    'total_fetched': 0,
+                    'inserted': 0,
+                    'skipped': 0,
+                    'errors': 0
+                }
+                
+                async with aiohttp.ClientSession() as session:
+                    for i, language in enumerate(languages):
+                        if self.shutdown_flag:
                             break
-                        else:
-                            error_text = await response.text()
-                            self.logger.error(f"❌ MediaStack: HTTP {response.status} - {error_text[:200]}")
+                        
+                        self.logger.info(f"🌍 Collecting MediaStack news for language: {language}")
+                        
+                        try:
+                            # Prepare request
+                            params = {
+                                'access_key': MEDIASTACK_API_KEY,
+                                'languages': language,
+                                'limit': 25,  # Collect 25 articles per language
+                                'sort': 'published_desc'
+                            }
+                            
+                            # Fetch news
+                            async with session.get(
+                                MEDIASTACK_BASE_URL, 
+                                params=params, 
+                                headers=self._build_http_headers(MEDIASTACK_BASE_URL),
+                                timeout=aiohttp.ClientTimeout(total=30)
+                            ) as response:
+                                if response.status == 200:
+                                    data = await response.json()
+                                    
+                                    # Check for API errors
+                                    if 'error' in data:
+                                        error_info = data['error']
+                                        self.logger.error(
+                                            f"❌ MediaStack API Error: {error_info.get('code')} - "
+                                            f"{error_info.get('message')}"
+                                        )
+                                        continue
+                                    
+                                    articles = data.get('data', [])
+                                    total = data.get('pagination', {}).get('total', 0)
+                                    stats['total_fetched'] += len(articles)
+                                    
+                                    self.logger.info(
+                                        f"📥 MediaStack [{language}]: Received {len(articles)}/{total} articles"
+                                    )
+                                    
+                                    # Process and store articles
+                                    for article_data in articles:
+                                        if self.shutdown_flag:
+                                            break
+                                        result = await self.process_mediastack_article(article_data, language, session)
+                                        if result == 'inserted':
+                                            stats['inserted'] += 1
+                                        elif result == 'skipped':
+                                            stats['skipped'] += 1
+                                        else:
+                                            stats['errors'] += 1
+                                
+                                elif response.status == 429:
+                                    self.logger.error(f"❌ MediaStack: Rate limit exceeded (429)")
+                                    break  # Stop processing
+                                elif response.status == 401:
+                                    self.logger.error(f"❌ MediaStack: Invalid API key (401)")
+                                    break
+                                else:
+                                    error_text = await response.text()
+                                    self.logger.error(f"❌ MediaStack: HTTP {response.status} - {error_text[:200]}")
+                        
+                        except asyncio.TimeoutError:
+                            self.logger.error(f"⏱️  MediaStack [{language}]: Timeout")
+                            stats['errors'] += 1
+                        except Exception as e:
+                            self.logger.error(f"❌ MediaStack [{language}]: Error - {str(e)}")
+                            stats['errors'] += 1
+                        
+                        # Rate limiting: Wait before next request (except after last one)
+                        if not self.shutdown_flag and i < len(languages) - 1:
+                            self.logger.debug(f"⏳ Waiting {MEDIASTACK_RATE_DELAY}s for rate limiting...")
+                            await asyncio.sleep(MEDIASTACK_RATE_DELAY)
                 
-                except asyncio.TimeoutError:
-                    self.logger.error(f"⏱️  MediaStack [{language}]: Timeout")
-                    stats['errors'] += 1
-                except Exception as e:
-                    self.logger.error(f"❌ MediaStack [{language}]: Error - {str(e)}")
-                    stats['errors'] += 1
+                # Log statistics
+                self.logger.info(
+                    f"✅ MediaStack cycle {cycle_count} complete: "
+                    f"{stats['inserted']} inserted, {stats['skipped']} skipped, {stats['errors']} errors "
+                    f"(fetched {stats['total_fetched']} total)"
+                )
                 
-                # Rate limiting: Wait before next request (except after last one)
-                if i < len(languages) - 1:
-                    self.logger.debug(f"⏳ Waiting {MEDIASTACK_RATE_DELAY}s for rate limiting...")
-                    await asyncio.sleep(MEDIASTACK_RATE_DELAY)
-        
-        # Log statistics
-        self.logger.info(
-            f"✅ MediaStack collection complete: "
-            f"{stats['inserted']} inserted, {stats['skipped']} skipped, {stats['errors']} errors "
-            f"(fetched {stats['total_fetched']} total)"
-        )
+                if not self.shutdown_flag:
+                    self.logger.info(f"MediaStack: Sleeping {MEDIASTACK_CYCLE_INTERVAL}s...")
+                    await asyncio.sleep(MEDIASTACK_CYCLE_INTERVAL)
+        except asyncio.CancelledError:
+            self.logger.info("🌍 MediaStack collector cancelled")
+        finally:
+            self.logger.info("🌍 MediaStack collector stopped")
     
     async def process_mediastack_article(self, article_data, language, session):
         """
@@ -1063,7 +1074,7 @@ class NewsGather():
             }
             
             # Try to enrich with missing content from URL
-            await self.enrich_article_content(new_article, source_name)
+            await self.enrich_article_content(new_article, source_name, source_id)
             
             # Insert article with lock
             async with self.db_lock:
@@ -1124,14 +1135,16 @@ class NewsGather():
                     conn.rollback()
                     return False
     
-    async def enrich_article_content(self, article_dict, source_name=''):
+    async def enrich_article_content(self, article_dict, source_name='', source_id=''):
         """
         Attempt to fetch missing content from article URL.
         Updates article_dict in place with fetched data.
+        Skips sources that are marked as blocked (403 errors).
         
         Args:
             article_dict: Dictionary with article data (must have 'url' key)
             source_name: Source name for logging
+            source_id: Source ID for blocklist tracking
             
         Returns:
             bool: True if any content was fetched, False otherwise
@@ -1154,6 +1167,25 @@ class NewsGather():
         if not url:
             return False
         
+        # Check if this source is blocked (403s)
+        if source_id:
+            try:
+                async with self.db_lock:
+                    with self.eng.connect() as conn:
+                        stmt = select(
+                            self.gm_sources.c.fetch_blocked,
+                            self.gm_sources.c.blocked_count
+                        ).where(self.gm_sources.c.id_source == source_id)
+                        result = conn.execute(stmt).fetchone()
+                        
+                        if result:
+                            fetch_blocked, blocked_count = result
+                            if fetch_blocked == 1:
+                                self.logger.debug(f"⏭️  [{source_name}] Skipping fetch - source is blocklisted (403 count: {blocked_count})")
+                                return False
+            except Exception as e:
+                self.logger.debug(f"Could not check blocklist for {source_name}: {e}")
+        
         # Attempt to fetch content
         try:
             self.logger.debug(f"🔍 [{source_name}] Attempting to fetch missing content from URL...")
@@ -1166,6 +1198,11 @@ class NewsGather():
                 url,
                 ENRICH_TIMEOUT
             )
+            
+            # Check for blocking error codes (403 Forbidden, 406 Not Acceptable, 410 Gone)
+            if result and result.get('error_code') in [403, 406, 410]:
+                if source_id:
+                    await self._increment_blocked_count(source_id, source_name, result.get('error_code'))
             
             if result and result.get('success'):
                 updated = []
@@ -1191,7 +1228,7 @@ class NewsGather():
                     updated.append('publishedAt')
                 
                 if updated:
-                    self.logger.info(f"✅ [{source_name}] Enriched article with: {', '.join(updated)}")
+                    self.logger.debug(f"✅ [{source_name}] Enriched article with: {', '.join(updated)}")
                     return True
                 else:
                     self.logger.debug(f"⚠️  [{source_name}] Fetch succeeded but no new data found")
@@ -1201,8 +1238,63 @@ class NewsGather():
                 return False
                 
         except Exception as e:
+            error_msg = str(e)
+            # Check if it's a blocking error (403 Forbidden, 406 Not Acceptable, 410 Gone)
+            if any(code in error_msg for code in ['403', 'Forbidden', '406', 'Not Acceptable', '410', 'Gone']):
+                if source_id:
+                    # Try to extract actual error code from message
+                    error_code = 403  # default
+                    if '406' in error_msg or 'Not Acceptable' in error_msg:
+                        error_code = 406
+                    elif '410' in error_msg or 'Gone' in error_msg:
+                        error_code = 410
+                    await self._increment_blocked_count(source_id, source_name, error_code)
             self.logger.warning(f"⚠️  [{source_name}] Error fetching content: {e}")
             return False
+    
+    async def _increment_blocked_count(self, source_id, source_name='', error_code=403):
+        """
+        Increment the blocked_count for a source and mark as blocked if threshold reached.
+        Threshold: 3 consecutive HTTP errors (403/406/410) marks source as blocked.
+        
+        Args:
+            source_id: Source identifier
+            source_name: Source name for logging
+            error_code: HTTP error code (403 Forbidden, 406 Not Acceptable, 410 Gone, etc.)
+        """
+        try:
+            async with self.db_lock:
+                with self.eng.connect() as conn:
+                    # Get current count
+                    stmt = select(
+                        self.gm_sources.c.blocked_count,
+                        self.gm_sources.c.fetch_blocked
+                    ).where(self.gm_sources.c.id_source == source_id)
+                    result = conn.execute(stmt).fetchone()
+                    
+                    if result:
+                        current_count, currently_blocked = result
+                        new_count = current_count + 1
+                        
+                        # Mark as blocked if 3+ HTTP errors
+                        should_block = 1 if new_count >= 3 else 0
+                        
+                        # Update the source
+                        update_stmt = self.gm_sources.update().where(
+                            self.gm_sources.c.id_source == source_id
+                        ).values(
+                            blocked_count=new_count,
+                            fetch_blocked=should_block
+                        )
+                        conn.execute(update_stmt)
+                        conn.commit()
+                        
+                        if should_block == 1 and currently_blocked == 0:
+                            self.logger.warning(f"🚫 [{source_name}] Blocklisted after {new_count} HTTP {error_code} errors - will skip future fetches")
+                        else:
+                            self.logger.debug(f"⚠️  [{source_name}] HTTP {error_code} error #{new_count}")
+        except Exception as e:
+            self.logger.debug(f"Could not update blocked_count for {source_name}: {e}")
                      
     def getNewsSources(self):
 #        url = "https://newsapi.org/v2/sources?country=br&apiKey=" + API_KEY
@@ -1230,16 +1322,87 @@ class NewsGather():
 
 if __name__ == '__main__':
     root = logging.getLogger()
-    root.setLevel(logging.DEBUG)
+    root.setLevel(logging.INFO)
     
     handler = logging.StreamHandler(sys.stdout)
-    handler.setLevel(logging.DEBUG)
+    handler.setLevel(logging.INFO)
     formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
     handler.setFormatter(formatter)
-    root.addHandler(handler)   # register the App instance with Twisted:
-
-
-     # start the event loop:
+    root.addHandler(handler)
+    
+    # Create event loop
     loop = asyncio.get_event_loop()
     app = NewsGather(loop)
-    loop.run_until_complete(app.async_getALLNews())
+    
+    # Track collector tasks for graceful cancellation
+    collector_tasks = []
+    
+    # Setup async signal handler for graceful shutdown
+    def handle_shutdown_signal():
+        """Handle shutdown signals by cancelling all collector tasks"""
+        app.logger.info("\n🛑 Received shutdown signal. Cancelling collectors...")
+        app.shutdown_flag = True
+        
+        # Cancel all collector tasks
+        for task in collector_tasks:
+            if not task.done():
+                task.cancel()
+        
+        app.logger.info("✅ Shutdown signal processed")
+    
+    # Register signal handlers (asyncio-compatible)
+    loop.add_signal_handler(signal.SIGINT, handle_shutdown_signal)   # Ctrl+C
+    loop.add_signal_handler(signal.SIGTERM, handle_shutdown_signal)  # systemd stop
+    
+    # Run all three collectors in parallel
+    async def run_all_collectors():
+        app.logger.info("🚀 Starting all news collectors in parallel...")
+        app.logger.info(f"   • NewsAPI: every {NEWSAPI_CYCLE_INTERVAL}s ({NEWSAPI_CYCLE_INTERVAL//60} min)")
+        app.logger.info(f"   • RSS Feeds: every {RSS_CYCLE_INTERVAL}s ({RSS_CYCLE_INTERVAL//60} min)")
+        app.logger.info(f"   • MediaStack: every {MEDIASTACK_CYCLE_INTERVAL}s ({MEDIASTACK_CYCLE_INTERVAL//60} min)")
+        
+        # Create tasks for all collectors
+        tasks = [
+            loop.create_task(app.collect_newsapi()),
+            loop.create_task(app.collect_rss_feeds()),
+            loop.create_task(app.collect_mediastack())
+        ]
+        
+        # Store tasks globally for signal handler access
+        collector_tasks.extend(tasks)
+        
+        try:
+            # Wait for all tasks to complete (or be cancelled)
+            await asyncio.gather(*tasks, return_exceptions=True)
+        except asyncio.CancelledError:
+            app.logger.info("🏁 Collectors cancelled")
+        except Exception as e:
+            app.logger.error(f"Error in collectors: {e}", exc_info=True)
+        finally:
+            # Cancel any remaining tasks
+            for task in tasks:
+                if not task.done():
+                    task.cancel()
+            
+            # Wait for all tasks to finish cancellation
+            await asyncio.gather(*tasks, return_exceptions=True)
+            app.logger.info("🏁 All collectors stopped")
+    
+    try:
+        loop.run_until_complete(run_all_collectors())
+    except KeyboardInterrupt:
+        app.logger.info("🛑 Interrupted by user")
+    finally:
+        # Close database and cleanup resources
+        app.shutdown()
+        
+        # Clean up pending tasks
+        pending = asyncio.all_tasks(loop)
+        for task in pending:
+            task.cancel()
+        
+        # Wait for all tasks to complete cancellation
+        loop.run_until_complete(asyncio.gather(*pending, return_exceptions=True))
+        
+        loop.close()
+        app.logger.info("👋 wxAsyncNewsGather shutdown complete")
