@@ -397,18 +397,22 @@ class NewsGather():
         # Add fetch_blocked columns if they don't exist (migration)
         try:
             with eng.connect() as conn:
-                # Check if columns exist by trying to select them
-                try:
-                    conn.execute(select(gm_sources.c.fetch_blocked).limit(1))
-                except Exception:
+                # Check if columns exist by querying SQLite schema
+                result = conn.execute(text("PRAGMA table_info(gm_sources)")).fetchall()
+                column_names = [row[1] for row in result]  # row[1] is column name
+                
+                if 'fetch_blocked' in column_names:
+                    self.logger.debug("Blocklist columns already exist")
+                else:
                     # Columns don't exist, add them
                     self.logger.info("Adding fetch_blocked and blocked_count columns to gm_sources")
                     conn.execute(text('ALTER TABLE gm_sources ADD COLUMN fetch_blocked INTEGER DEFAULT 0'))
                     conn.execute(text('ALTER TABLE gm_sources ADD COLUMN blocked_count INTEGER DEFAULT 0'))
                     conn.commit()
-                    self.logger.info("Blocklist columns added successfully")
+                    self.logger.info("✅ Blocklist columns added successfully")
         except Exception as e:
-            self.logger.warning(f"Could not add blocklist columns (may already exist): {e}")
+            # Log at DEBUG level to avoid noise
+            self.logger.debug(f"Error with blocklist columns: {e}")
         
         self.logger.info("Database initialization complete")
         return eng
@@ -1199,8 +1203,8 @@ class NewsGather():
                 ENRICH_TIMEOUT
             )
             
-            # Check for blocking error codes (403 Forbidden, 406 Not Acceptable, 410 Gone)
-            if result and result.get('error_code') in [403, 406, 410]:
+            # Check for blocking error codes (402 Payment Required, 403 Forbidden, 406 Not Acceptable, 410 Gone)
+            if result and result.get('error_code') in [402, 403, 406, 410]:
                 if source_id:
                     await self._increment_blocked_count(source_id, source_name, result.get('error_code'))
             
@@ -1239,12 +1243,14 @@ class NewsGather():
                 
         except Exception as e:
             error_msg = str(e)
-            # Check if it's a blocking error (403 Forbidden, 406 Not Acceptable, 410 Gone)
-            if any(code in error_msg for code in ['403', 'Forbidden', '406', 'Not Acceptable', '410', 'Gone']):
+            # Check if it's a blocking error (402 Payment Required, 403 Forbidden, 406 Not Acceptable, 410 Gone)
+            if any(code in error_msg for code in ['402', 'Payment Required', '403', 'Forbidden', '406', 'Not Acceptable', '410', 'Gone']):
                 if source_id:
                     # Try to extract actual error code from message
                     error_code = 403  # default
-                    if '406' in error_msg or 'Not Acceptable' in error_msg:
+                    if '402' in error_msg or 'Payment Required' in error_msg:
+                        error_code = 402
+                    elif '406' in error_msg or 'Not Acceptable' in error_msg:
                         error_code = 406
                     elif '410' in error_msg or 'Gone' in error_msg:
                         error_code = 410
@@ -1255,12 +1261,12 @@ class NewsGather():
     async def _increment_blocked_count(self, source_id, source_name='', error_code=403):
         """
         Increment the blocked_count for a source and mark as blocked if threshold reached.
-        Threshold: 3 consecutive HTTP errors (403/406/410) marks source as blocked.
+        Threshold: 3 consecutive HTTP errors (402/403/406/410) marks source as blocked.
         
         Args:
             source_id: Source identifier
             source_name: Source name for logging
-            error_code: HTTP error code (403 Forbidden, 406 Not Acceptable, 410 Gone, etc.)
+            error_code: HTTP error code (402 Payment Required, 403 Forbidden, 406 Not Acceptable, 410 Gone, etc.)
         """
         try:
             async with self.db_lock:
