@@ -223,6 +223,10 @@ backfill_full.log
 *.csv
 *.tsv
 *.json.gz
+rssfeeds_test*
+rsstest/rssfeeds_test*
+async/htmlpages/
+pyTwitter/
 data/
 downloads/
 *.odb

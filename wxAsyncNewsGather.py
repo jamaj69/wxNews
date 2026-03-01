@@ -11,6 +11,9 @@ from __future__ import print_function
 import logging
 import sys
 from multiprocessing import Queue
+import re
+import subprocess
+import tempfile
 
 import urllib.request 
 import json
@@ -55,6 +58,18 @@ MEDIASTACK_RATE_DELAY = 20  # Delay between requests (seconds) - 3 requests/minu
 ENRICH_MISSING_CONTENT = config('ENRICH_MISSING_CONTENT', default='true').lower() == 'true'
 ENRICH_TIMEOUT = int(config('ENRICH_TIMEOUT', default=10))
 
+# Basic browser-like headers improve compatibility with feeds/CDNs
+BROWSER_USER_AGENT = (
+    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/145.0.0.0 Safari/537.36"
+)
+BASIC_HTTP_HEADERS = {
+    "User-Agent": BROWSER_USER_AGENT,
+    "Accept": "application/rss+xml, application/xml;q=0.9, text/xml;q=0.8, */*;q=0.7",
+    "Accept-Language": "en-US,en;q=0.9",
+    "Cache-Control": "max-age=0",
+}
+
 
 def url_encode(url):
     return base64.urlsafe_b64encode(zlib.compress(url.encode('utf-8')))[15:31]
@@ -97,6 +112,123 @@ class NewsGather():
         self.logger.info("Starting news update cycle")
 #        self.loop.call_later(1, self.UpdateNews)
         self.UpdateNews()
+
+    def _build_http_headers(self, url: str) -> dict:
+        headers = dict(BASIC_HTTP_HEADERS)
+        parsed = urlparse(url)
+        if parsed.scheme and parsed.netloc:
+            if parsed.netloc.endswith("indianexpress.com"):
+                headers["Referer"] = "https://indianexpress.com/rss/"
+            else:
+                headers["Referer"] = f"{parsed.scheme}://{parsed.netloc}/"
+        return headers
+
+    def _looks_like_feed_content_type(self, content_type: str) -> bool:
+        ct = (content_type or "").lower()
+        if not ct:
+            return False
+        allowed_markers = (
+            "application/rss+xml",
+            "application/atom+xml",
+            "application/xml",
+            "text/xml",
+            "application/rdf+xml",
+        )
+        return any(marker in ct for marker in allowed_markers)
+
+    def _looks_like_feed_body(self, text: str) -> bool:
+        sample = (text or "")[:2000].lower()
+        return any(tag in sample for tag in ("<?xml", "<rss", "<feed", "<rdf:rdf"))
+
+    def _fetch_rss_with_curl(self, url: str, timeout_seconds: int):
+        headers = self._build_http_headers(url)
+        with tempfile.NamedTemporaryFile(delete=False) as hdr_tmp:
+            hdr_path = hdr_tmp.name
+        with tempfile.NamedTemporaryFile(delete=False) as body_tmp:
+            body_path = body_tmp.name
+        try:
+            cmd = [
+                "curl",
+                "-sS",
+                "-L",
+                "--compressed",
+                "--max-time",
+                str(timeout_seconds),
+                "-D",
+                hdr_path,
+                "-o",
+                body_path,
+                url,
+            ]
+            for key, value in headers.items():
+                cmd.extend(["-H", f"{key}: {value}"])
+
+            proc = subprocess.run(
+                cmd,
+                check=False,
+                capture_output=True,
+                text=True,
+                timeout=timeout_seconds + 5,
+            )
+            if proc.returncode != 0:
+                raise RuntimeError((proc.stderr or proc.stdout or "curl failed").strip())
+
+            header_text = open(hdr_path, "r", encoding="latin-1", errors="replace").read()
+            body_bytes = open(body_path, "rb").read()
+
+            status = 0
+            content_type = ""
+            blocks = [b for b in re.split(r"\r?\n\r?\n", header_text) if b.strip()]
+            for block in blocks:
+                lines = [ln.strip() for ln in block.splitlines() if ln.strip()]
+                if not lines or not lines[0].startswith("HTTP/"):
+                    continue
+                first = lines[0].split()
+                if len(first) >= 2 and first[1].isdigit():
+                    status = int(first[1])
+                for line in lines[1:]:
+                    if line.lower().startswith("content-type:"):
+                        content_type = line.split(":", 1)[1].strip()
+
+            charset = "utf-8"
+            m = re.search(r"charset=([A-Za-z0-9._-]+)", content_type or "", flags=re.I)
+            if m:
+                charset = m.group(1)
+            try:
+                text = body_bytes.decode(charset, errors="replace")
+            except Exception:
+                text = body_bytes.decode("utf-8", errors="replace")
+
+            return status, content_type, text
+        finally:
+            try:
+                os.unlink(hdr_path)
+            except Exception:
+                pass
+            try:
+                os.unlink(body_path)
+            except Exception:
+                pass
+
+    async def _fetch_rss_content(self, session, rss_url, timeout_seconds):
+        timeout = aiohttp.ClientTimeout(total=timeout_seconds)
+        async with session.get(
+            rss_url,
+            timeout=timeout,
+            headers=self._build_http_headers(rss_url),
+        ) as response:
+            status = response.status
+            content_type = response.headers.get("Content-Type", "")
+            text = await response.text()
+
+        if status == 403:
+            try:
+                status, content_type, text = await asyncio.to_thread(
+                    self._fetch_rss_with_curl, rss_url, timeout_seconds
+                )
+            except Exception as exc:
+                self.logger.debug(f"Curl fallback failed for {rss_url}: {exc}")
+        return status, content_type, text
     
     def InitArticles(self, eng, meta, gm_sources, gm_articles):
         self.logger.debug("InitArticles: Loading sources and articles from database")
@@ -348,7 +480,7 @@ class NewsGather():
                     self.logger.info(f"Fetching news for language: {lang}")
                     self.logger.debug(f"URL: {url[:80]}...")
                     try:
-                        async with session.get(url) as response:
+                        async with session.get(url, headers=self._build_http_headers(url)) as response:
                             if response.status != 200:
                                 self.logger.warning(f"HTTP {response.status} for {lang}")
                                 continue
@@ -526,14 +658,14 @@ class NewsGather():
         
         for rss_url in common_patterns:
             try:
-                async with session.get(rss_url, timeout=aiohttp.ClientTimeout(total=10)) as response:
-                    if response.status == 200:
-                        content = await response.text()
-                        # Verify it's actually an RSS/Atom feed
-                        if any(tag in content[:1000] for tag in ['<rss', '<feed', '<channel']):
-                            self.logger.info(f"📡 Discovered RSS for {source_name}: {rss_url}")
-                            return rss_url
-            except:
+                status, content_type, content = await self._fetch_rss_content(session, rss_url, 10)
+                if status == 200 and (
+                    self._looks_like_feed_content_type(content_type) or self._looks_like_feed_body(content)
+                ):
+                    if any(tag in content[:1000] for tag in ['<rss', '<feed', '<channel']):
+                        self.logger.info(f"📡 Discovered RSS for {source_name}: {rss_url}")
+                        return rss_url
+            except Exception:
                 continue
         
         return None
@@ -544,21 +676,19 @@ class NewsGather():
         Used when source name is empty/missing.
         """
         try:
-            async with session.get(rss_url, timeout=aiohttp.ClientTimeout(total=10)) as response:
-                if response.status != 200:
-                    return None
-                
-                content = await response.text()
-                feed = feedparser.parse(content)
-                
-                # Try to get feed title
-                if hasattr(feed, 'feed') and hasattr(feed.feed, 'title'):
-                    title = feed.feed.title.strip()
-                    if title:
-                        self.logger.debug(f"Extracted feed name: {title}")
-                        return title
-                
+            status, content_type, content = await self._fetch_rss_content(session, rss_url, 10)
+            if status != 200:
                 return None
+            if not self._looks_like_feed_content_type(content_type) and not self._looks_like_feed_body(content):
+                return None
+
+            feed = feedparser.parse(content)
+            if hasattr(feed, 'feed') and hasattr(feed.feed, 'title'):
+                title = feed.feed.title.strip()
+                if title:
+                    self.logger.debug(f"Extracted feed name: {title}")
+                    return title
+            return None
         except Exception as e:
             self.logger.debug(f"Failed to extract feed name from {rss_url}: {e}")
             return None
@@ -679,24 +809,25 @@ class NewsGather():
         rss_url = source['url']
         
         try:
-            async with session.get(rss_url, timeout=aiohttp.ClientTimeout(total=RSS_TIMEOUT)) as response:
-                if response.status != 200:
-                    self.logger.warning(f"❌ [{source_name}] HTTP {response.status}")
-                    return
-                
-                content = await response.text()
-                feed = feedparser.parse(content)
-                
-                if not feed.entries:
-                    self.logger.debug(f"⚠️  [{source_name}] No entries found")
-                    return
-                
-                self.logger.debug(f"📥 [{source_name}] Received {len(feed.entries)} entries")
-                
-                articles_inserted = 0
-                articles_skipped = 0
-                
-                for entry in feed.entries:
+            status, content_type, content = await self._fetch_rss_content(session, rss_url, RSS_TIMEOUT)
+            if status != 200:
+                self.logger.warning(f"❌ [{source_name}] HTTP {status}")
+                return
+            if not self._looks_like_feed_content_type(content_type) and not self._looks_like_feed_body(content):
+                self.logger.warning(f"❌ [{source_name}] Invalid content type: {content_type}")
+                return
+
+            feed = feedparser.parse(content)
+            if not feed.entries:
+                self.logger.debug(f"⚠️  [{source_name}] No entries found")
+                return
+            
+            self.logger.debug(f"📥 [{source_name}] Received {len(feed.entries)} entries")
+            
+            articles_inserted = 0
+            articles_skipped = 0
+            
+            for entry in feed.entries:
                     # Extract article data
                     title = entry.get('title', '')
                     # Clean title: normalize whitespace
@@ -748,10 +879,10 @@ class NewsGather():
                                 self.logger.error(f"Failed to insert RSS article: {e}")
                                 conn.rollback()
                 
-                if articles_inserted > 0:
-                    self.logger.info(f"✅ [{source_name}] {articles_inserted} new, {articles_skipped} existing")
-                else:
-                    self.logger.debug(f"⏭️  [{source_name}] All {articles_skipped} articles already exist")
+            if articles_inserted > 0:
+                self.logger.info(f"✅ [{source_name}] {articles_inserted} new, {articles_skipped} existing")
+            else:
+                self.logger.debug(f"⏭️  [{source_name}] All {articles_skipped} articles already exist")
                     
         except asyncio.TimeoutError:
             self.logger.warning(f"⏱️  [{source_name}] Timeout after {RSS_TIMEOUT}s")
@@ -793,6 +924,7 @@ class NewsGather():
                     async with session.get(
                         MEDIASTACK_BASE_URL, 
                         params=params, 
+                        headers=self._build_http_headers(MEDIASTACK_BASE_URL),
                         timeout=aiohttp.ClientTimeout(total=30)
                     ) as response:
                         if response.status == 200:
@@ -1078,7 +1210,8 @@ class NewsGather():
         print('getNewsSource url:',url)
         sources = []
 
-        with urllib.request.urlopen(url) as response:
+        req = urllib.request.Request(url, headers=self._build_http_headers(url))
+        with urllib.request.urlopen(req) as response:
             response_text = response.read()   
             encoding = response.info().get_content_charset('utf-8')
             JSON_object = json.loads(response_text.decode(encoding))                        
