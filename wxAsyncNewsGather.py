@@ -365,7 +365,12 @@ class NewsGather():
         return status, content_type, text
     
     def InitArticles(self, eng, meta, gm_sources, gm_articles):
-        self.logger.debug("InitArticles: Loading sources and articles from database")
+        """
+        Load only sources from database (not articles).
+        Article deduplication is handled by SQLite on_conflict_do_nothing().
+        Loading all articles wastes RAM and slows initialization.
+        """
+        self.logger.debug("InitArticles: Loading sources from database")
         sources = dict()
         
         with eng.connect() as con:
@@ -375,26 +380,9 @@ class NewsGather():
             for source in rs.fetchall():
                 source_id = source[0]
                 source_count += 1
-                self.logger.debug(f"Loading source: {source_id}")
-                stm1 = select(gm_articles).where(gm_articles.c.id_source == source_id)
-                articles_qry = con.execute(stm1)
-                articles = dict()
-                article_count = 0
-                for article in articles_qry.fetchall():
-                    article_key = article[0]
-                    article_count += 1
-                    articles[article_key] = {
-                                        'id_article' : article_key ,
-                                        'id_source' : article[1] ,
-                                        'author' : article[2],
-                                        'title' : article[3],
-                                        'description' : article[4],
-                                        'url' : article[5],
-                                        'urlToImage' : article[6],
-                                        'publishedAt' : article[7],
-                                        'content' : article[8] 
-                            }
-
+                
+                # Only load source metadata, not individual articles
+                # Articles are managed by SQLite with on_conflict_do_nothing()
                 sources[source_id] = { 
                         'id_source': source_id,
                         'name': source[1],
@@ -403,14 +391,10 @@ class NewsGather():
                         'category': source[4],
                         'language': source[5],
                         'country': source[6],
-                        'articles': articles
+                        'articles': {}  # Empty dict - articles checked via SQLite, not memory
                      }
-                
-                if article_count > 0:
-                    self.logger.debug(f"  Loaded {article_count} articles for {source_id}")
 
-            self.logger.info(f"InitArticles: Loaded {source_count} sources with articles")
-#        print(sources)
+            self.logger.info(f"InitArticles: Loaded {source_count} sources (articles managed by SQLite)")
         return sources
 
     # ========================================================================
@@ -823,7 +807,7 @@ class NewsGather():
                                                     articles_skipped += 1
                                                     self.logger.debug(f"⏭️  [{source_name}] Already exists: {article_title[:40]}...")
                                                 
-                                                self.sources[source_id]['articles'][article_key] = new_article
+                                                # No need to cache articles in memory - SQLite handles deduplication
                                             except Exception as e:
                                                 self.logger.error(f"Failed to insert article '{article_title[:40]}...': {e}")
                                                 conn.rollback()
