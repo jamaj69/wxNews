@@ -225,7 +225,7 @@ backfill_full.log
 *.json.gz
 rssfeeds_test*
 rsstest/rssfeeds_test*
-async/htmlpages/
+async/
 pyTwitter/
 data/
 downloads/
@@ -302,6 +302,9 @@ backups/
 old/
 archive/
 
+async/
+
+
 # ============================================
 # Deprecated Files (Keep for now)
 # ============================================
@@ -309,3 +312,4 @@ archive/
 # twitterasync.py
 # wxAsyncNewsReaderv[1-4].py
 # wxAsyncNewsGather1.py
+async
