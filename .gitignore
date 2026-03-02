@@ -311,3 +311,9 @@ archive/
 # wxAsyncNewsGather1.py
 *.db-shm
 *.db-wal
+
+# ============================================
+# Timezone Backfill Scripts (temporary/testing)
+# ============================================
+scripts/timezone/
+
