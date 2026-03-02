@@ -45,8 +45,8 @@ from article_fetcher import fetch_article_content
 import signal
 
 # NewsAPI Configuration
-API_KEY1 = config('NEWS_API_KEY_1', cast=str)
-API_KEY2 = config('NEWS_API_KEY_2', cast=str)
+API_KEY1 = str(config('NEWS_API_KEY_1', cast=str))
+API_KEY2 = str(config('NEWS_API_KEY_2', cast=str))
 NEWSAPI_CYCLE_INTERVAL = int(config('NEWSAPI_CYCLE_INTERVAL', default=600))  # 10 minutes
 
 # RSS Configuration
@@ -56,12 +56,12 @@ RSS_BATCH_SIZE = int(config('RSS_BATCH_SIZE', default=20))
 RSS_CYCLE_INTERVAL = int(config('RSS_CYCLE_INTERVAL', default=900))  # 15 minutes
 
 # MediaStack Configuration
-MEDIASTACK_API_KEY = config('MEDIASTACK_API_KEY', cast=str)
-MEDIASTACK_BASE_URL = config(
+MEDIASTACK_API_KEY = str(config('MEDIASTACK_API_KEY', cast=str))
+MEDIASTACK_BASE_URL = str(config(
     'MEDIASTACK_BASE_URL',
     default='https://api.mediastack.com/v1/news',
     cast=str,
-)
+))
 MEDIASTACK_RATE_DELAY = 20  # Delay between requests (seconds) - 3 requests/minute
 MEDIASTACK_CYCLE_INTERVAL = int(config('MEDIASTACK_CYCLE_INTERVAL', default=3600))  # 60 minutes
 
@@ -96,7 +96,7 @@ def url_encode(url):
 
 def dbCredentials():
     """Return SQLite database path"""
-    db_path = config('DB_PATH', default='predator_news.db', cast=str)
+    db_path = str(config('DB_PATH', default='predator_news.db', cast=str))
     # Make path absolute if relative
     if not os.path.isabs(db_path):
         script_dir = os.path.dirname(os.path.abspath(__file__))
@@ -997,7 +997,7 @@ class NewsGather():
                                     
                                     # Create normalized UTC version (article timezone has priority over source timezone)
                                     # Use source timezone only if use_timezone flag is enabled
-                                    use_tz = source.get('use_timezone', 0)
+                                    use_tz = self.sources.get(source_id, {}).get('use_timezone', 0)
                                     article_publishedAt_gmt, detected_tz = normalize_timestamp_to_utc(article_publishedAt, source_tz, use_source_timezone=(use_tz == 1))
                                     
                                     # Update source timezone if detected from article and different from configured
@@ -1475,7 +1475,7 @@ class NewsGather():
             
             # Create normalized UTC version (article timezone has priority over source timezone)
             # Use source timezone only if use_timezone flag is enabled
-            use_tz = source.get('use_timezone', 0)
+            use_tz = self.sources.get(source_id, {}).get('use_timezone', 0)
             published_at_gmt, detected_tz = normalize_timestamp_to_utc(published_at, source_tz, use_source_timezone=(use_tz == 1))
             
             # Update source timezone if detected from article and different from configured

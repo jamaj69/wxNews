@@ -28,7 +28,7 @@ from decouple import config
 
 def dbCredentials():
     """Return SQLite database path"""
-    db_path = config('DB_PATH', default='predator_news.db')
+    db_path = str(config('DB_PATH', default='predator_news.db'))
     if not os.path.isabs(db_path):
         script_dir = os.path.dirname(os.path.abspath(__file__))
         db_path = os.path.join(script_dir, db_path)
@@ -170,7 +170,7 @@ class NewsPanel(wx.Panel):
                 stm_count = select(func.count()).select_from(gm_articles).where(
                     gm_articles.c.id_source == source_id
                 )
-                article_count = con.execute(stm_count).scalar()
+                article_count = con.execute(stm_count).scalar() or 0
                 
                 if article_count >= MIN_ARTICLES and source_name.strip():
                     source_list.append({
@@ -847,6 +847,6 @@ if __name__ == '__main__':
     print("Starting News Reader v6")
     print("=" * 60)
     
-    app = NewsGatherApp(0)
+    app = NewsGatherApp(False)
     loop = get_event_loop()
     loop.run_until_complete(app.MainLoop())
