@@ -33,7 +33,7 @@ from sqlalchemy.dialects.sqlite import insert
 import os
 from urllib.parse import urlparse
 import feedparser
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from dateutil import parser as dateutil_parser
 import pytz
 
@@ -138,23 +138,24 @@ COUNTRY_TIMEZONES = {
 }
 
 
-def normalize_timestamp_to_utc(timestamp_str, source_timezone=None):
+def normalize_timestamp_to_utc(timestamp_str, source_timezone=None, use_source_timezone=False):
     """
     Normalize a timestamp string to UTC (GMT+0).
     
     PRIORITY ORDER:
-    1. Use timezone from article timestamp (if present) - ALWAYS PREFERRED
-    2. Use source timezone (if article has no timezone) - FALLBACK ONLY
-    3. Assume UTC (if neither timestamp nor source has timezone)
+    1. Use timezone from article timestamp (if present) - HIGHEST PRIORITY
+    2. Detect GMT/UTC in text (if mentioned explicitly)
+    3. Use source_timezone if use_source_timezone=True (for confirmed sources)
+    4. Return None (if no timezone info available)
     
     Args:
         timestamp_str: Timestamp string with timezone info (ISO, RFC 2822, etc.)
-        source_timezone: Optional timezone offset string (e.g., 'UTC+05:30', 'UTC-03:00')
-                         Used ONLY when timestamp has no timezone info
+        source_timezone: Optional timezone offset string (e.g., 'UTC+05:30')
+        use_source_timezone: If True, apply source_timezone when article has no timezone
     
     Returns:
         Tuple: (utc_timestamp_str, detected_timezone_str)
-        - utc_timestamp_str: ISO format UTC timestamp
+        - utc_timestamp_str: ISO format UTC timestamp, or None if no timezone available
         - detected_timezone_str: Detected timezone offset (e.g., 'UTC+05:30') or None
     """
     if not timestamp_str or timestamp_str.strip() == '':
@@ -189,6 +190,23 @@ def normalize_timestamp_to_utc(timestamp_str, source_timezone=None):
         'NZDT': 13 * 3600,   # New Zealand Daylight Time (UTC+13)
     }
     
+    # Pre-process: Fix truncated timezone offsets (3 digits instead of 4)
+    # Some RSS feeds send +000, +010, +053 instead of +0000, +0100, +0530
+    # Example: "Sun, 01 Mar 2026 22:44:21 +000" → "Sun, 01 Mar 2026 22:44:21 +0000"
+    import re
+    truncated_tz_pattern = r'([+-])(\d)(\d)(\d)(?!\d)'  # Match +NNN or -NNN (3 digits, not followed by another digit)
+    match = re.search(truncated_tz_pattern, timestamp_str)
+    if match:
+        # Expand truncated timezone: +010 → +0100, +053 → +0530
+        sign = match.group(1)
+        digit1 = match.group(2)
+        digit2 = match.group(3)
+        digit3 = match.group(4)
+        
+        # Reconstruct as HHMM format
+        expanded_tz = f"{sign}{digit1}{digit2}{digit3}0"
+        timestamp_str = timestamp_str[:match.start()] + expanded_tz + timestamp_str[match.end():]
+    
     try:
         # Parse the timestamp with dateutil (handles most formats and extracts timezone)
         parsed_dt = dateutil_parser.parse(timestamp_str, tzinfos=tzinfos)
@@ -199,7 +217,7 @@ def normalize_timestamp_to_utc(timestamp_str, source_timezone=None):
             # Article has timezone - USE IT (highest priority)
             # Extract detected timezone as UTC offset string
             offset = parsed_dt.utcoffset()
-            if offset:
+            if offset is not None:  # Changed from 'if offset:' to handle UTC+00:00 correctly
                 total_seconds = int(offset.total_seconds())
                 hours, remainder = divmod(abs(total_seconds), 3600)
                 minutes = remainder // 60
@@ -212,28 +230,28 @@ def normalize_timestamp_to_utc(timestamp_str, source_timezone=None):
                 # Timestamp claims to be GMT/UTC, treat as such
                 parsed_dt = parsed_dt.replace(tzinfo=timezone.utc)
                 detected_tz = 'UTC+00:00'
-            # PRIORITY 3: Use source timezone as fallback (ONLY when article has no timezone)
-            elif source_timezone:
-                # Parse source timezone offset (e.g., 'UTC+05:30', 'UTC-03:00')
-                try:
-                    if source_timezone.startswith('UTC'):
-                        offset_str = source_timezone[3:]  # Remove 'UTC' prefix
-                        # Parse +HH:MM or -HH:MM
-                        sign = 1 if offset_str[0] == '+' else -1
-                        parts = offset_str[1:].split(':')
-                        hours = int(parts[0])
-                        minutes = int(parts[1]) if len(parts) > 1 else 0
-                        total_seconds = sign * (hours * 3600 + minutes * 60)
-                        tz = timezone(timedelta(seconds=total_seconds))
-                        parsed_dt = parsed_dt.replace(tzinfo=tz)
-                        # Note: We used source timezone as fallback, no detected_tz
-                except Exception as tz_parse_err:
-                    logging.debug(f"Failed to parse source timezone '{source_timezone}': {tz_parse_err}")
-                    # If parsing source timezone fails, assume UTC
-                    parsed_dt = parsed_dt.replace(tzinfo=timezone.utc)
+            # PRIORITY 3: Use source timezone if permitted
+            elif use_source_timezone and source_timezone:
+                # Source timezone can be used (confirmed source)
+                from dateutil.tz import tzoffset
+                import re
+                
+                # Parse timezone offset from string like 'UTC+05:30'
+                tz_match = re.search(r'([+-])?(\d{2}):(\d{2})', source_timezone)
+                if tz_match:
+                    sign = -1 if tz_match.group(1) == '-' else 1
+                    hours = int(tz_match.group(2))
+                    minutes = int(tz_match.group(3))
+                    total_seconds = sign * (hours * 3600 + minutes * 60)
+                    tz_offset = tzoffset('', total_seconds)
+                    parsed_dt = parsed_dt.replace(tzinfo=tz_offset)
+                    detected_tz = source_timezone
+                else:
+                    # Invalid source timezone format
+                    return None, None
             else:
-                # PRIORITY 4: No timezone anywhere, assume UTC
-                parsed_dt = parsed_dt.replace(tzinfo=timezone.utc)
+                # PRIORITY 4: No timezone available - CANNOT CONVERT
+                return None, None
         
         # Convert to UTC
         utc_dt = parsed_dt.astimezone(timezone.utc)
@@ -448,6 +466,8 @@ class NewsGather():
                         'category': source[4],
                         'language': source[5],
                         'country': source[6],
+                        'timezone': source[9] if len(source) > 9 else None,  # Timezone offset (UTC+XX:XX)
+                        'use_timezone': source[10] if len(source) > 10 else 0,  # Whether to apply source timezone
                         'articles': {}  # Empty dict - articles checked via SQLite, not memory
                      }
 
@@ -482,6 +502,7 @@ class NewsGather():
                             'language': source[5],
                             'country': source[6],
                             'timezone': source[9] if len(source) > 9 else None,  # Timezone offset (UTC+XX:XX)
+                            'use_timezone': source[10] if len(source) > 10 else 0,  # Whether to apply source timezone
                             'articles': {}
                         }
                     
@@ -808,6 +829,96 @@ class NewsGather():
         except Exception as e:
             self.logger.debug(f"Error updating source timezone for {source_id}: {e}")
     
+    async def backfill_missing_gmt_for_source(self, source_id, detected_timezone):
+        """
+        Backfill published_at_gmt for articles from this source that are missing it.
+        Called after updating source timezone to correct historical articles.
+        
+        Args:
+            source_id: Source ID to backfill
+            detected_timezone: Timezone to apply (e.g., 'UTC+05:30')
+        """
+        try:
+            source_name = self.sources[source_id].get('name', source_id)
+            
+            # Parse timezone offset from string like 'UTC+05:30' to tzoffset
+            from dateutil.tz import tzoffset
+            
+            # Extract offset string (+05:30 or -05:30)
+            tz_match = re.search(r'([+-])(\d{2}):(\d{2})', detected_timezone)
+            if not tz_match:
+                self.logger.warning(f"⚠️  [{source_name}] Invalid timezone format: {detected_timezone}")
+                return
+            
+            sign = 1 if tz_match.group(1) == '+' else -1
+            hours = int(tz_match.group(2))
+            minutes = int(tz_match.group(3))
+            total_seconds = sign * (hours * 3600 + minutes * 60)
+            tz_offset = tzoffset('', total_seconds)
+            
+            # Query articles without GMT for this source
+            async with self.db_lock:
+                with self.eng.connect() as conn:
+                    try:
+                        # Find articles without GMT
+                        query = text("""
+                            SELECT id_article, publishedAt
+                            FROM gm_articles
+                            WHERE id_source = :source_id
+                            AND published_at_gmt IS NULL
+                            AND publishedAt IS NOT NULL
+                        """)
+                        result = conn.execute(query, {'source_id': source_id})
+                        articles_to_fix = result.fetchall()
+                        
+                        if not articles_to_fix:
+                            return
+                        
+                        self.logger.info(f"🔄 [{source_name}] Backfilling {len(articles_to_fix)} articles with timezone {detected_timezone}")
+                        
+                        # Process conversions
+                        updates = []
+                        failed = 0
+                        
+                        for article_id, timestamp_str in articles_to_fix:
+                            try:
+                                # Parse timestamp (assume it's naive)
+                                dt_naive = dateutil_parser.parse(timestamp_str)
+                                
+                                # Apply timezone
+                                dt_with_tz = dt_naive.replace(tzinfo=tz_offset)
+                                
+                                # Convert to UTC
+                                dt_utc = dt_with_tz.astimezone(pytz.UTC)
+                                gmt_timestamp = dt_utc.replace(microsecond=0).isoformat()
+                                
+                                updates.append({
+                                    'article_id': article_id,
+                                    'gmt_timestamp': gmt_timestamp
+                                })
+                            except Exception as e:
+                                failed += 1
+                                self.logger.debug(f"Failed to convert timestamp for article {article_id}: {e}")
+                        
+                        # Batch update
+                        if updates:
+                            update_stmt = text("""
+                                UPDATE gm_articles
+                                SET published_at_gmt = :gmt_timestamp
+                                WHERE id_article = :article_id
+                            """)
+                            conn.execute(update_stmt, updates)
+                            conn.commit()
+                            
+                            success = len(updates)
+                            self.logger.info(f"✅ [{source_name}] Backfilled {success} articles ({failed} failed)")
+                        
+                    except Exception as e:
+                        self.logger.error(f"Failed to backfill GMT for {source_id}: {e}")
+                        conn.rollback()
+        except Exception as e:
+            self.logger.debug(f"Error during GMT backfill for {source_id}: {e}")
+    
     async def collect_newsapi(self):
         """
         Collect articles from NewsAPI in continuous loop with API key rotation.
@@ -885,7 +996,9 @@ class NewsGather():
                                     source_tz = self.sources.get(source_id, {}).get('timezone')
                                     
                                     # Create normalized UTC version (article timezone has priority over source timezone)
-                                    article_publishedAt_gmt, detected_tz = normalize_timestamp_to_utc(article_publishedAt, source_tz)
+                                    # Use source timezone only if use_timezone flag is enabled
+                                    use_tz = source.get('use_timezone', 0)
+                                    article_publishedAt_gmt, detected_tz = normalize_timestamp_to_utc(article_publishedAt, source_tz, use_source_timezone=(use_tz == 1))
                                     
                                     # Update source timezone if detected from article and different from configured
                                     if detected_tz and source_tz != detected_tz:
@@ -1117,7 +1230,9 @@ class NewsGather():
                     
                     # Create normalized UTC version (article timezone has priority over source timezone)
                     source_tz = source.get('timezone')
-                    published_gmt, detected_tz = normalize_timestamp_to_utc(published, source_tz)
+                    # Use source timezone only if use_timezone flag is enabled
+                    use_tz = source.get('use_timezone', 0)
+                    published_gmt, detected_tz = normalize_timestamp_to_utc(published, source_tz, use_source_timezone=(use_tz == 1))
                     
                     # Track detected timezone for consistency check
                     if detected_tz:
@@ -1169,16 +1284,26 @@ class NewsGather():
             
             # Check if all articles in the feed have the same timezone
             # If yes, and it's different from source timezone, update it
+            # Only do automatic backfill if use_timezone is enabled for this source
             if detected_timezones:
                 unique_timezones = set(detected_timezones)
                 if len(unique_timezones) == 1:
                     # All articles have the same timezone
                     consistent_tz = detected_timezones[0]
                     source_tz = source.get('timezone')
+                    use_tz = source.get('use_timezone', 0)
+                    
                     if source_tz != consistent_tz:
                         # Update source timezone with the consistent value from articles
                         self.logger.info(f"🕐 [{source_name}] All {len(detected_timezones)} articles have timezone {consistent_tz}, updating source")
                         await self.update_source_timezone(source_id, consistent_tz)
+                        
+                        # Only backfill if use_timezone is enabled (manually confirmed sources)
+                        if use_tz == 1:
+                            self.logger.info(f"🔄 [{source_name}] use_timezone=1, backfilling historical articles")
+                            await self.backfill_missing_gmt_for_source(source_id, consistent_tz)
+                        else:
+                            self.logger.info(f"⏸️  [{source_name}] use_timezone=0, skipping automatic backfill (needs manual confirmation)")
                 elif len(unique_timezones) > 1:
                     # Multiple different timezones detected - log for debugging
                     self.logger.debug(f"⚠️  [{source_name}] Multiple timezones in feed: {unique_timezones}")
@@ -1349,7 +1474,9 @@ class NewsGather():
             source_tz = self.sources.get(source_id, {}).get('timezone')
             
             # Create normalized UTC version (article timezone has priority over source timezone)
-            published_at_gmt, detected_tz = normalize_timestamp_to_utc(published_at, source_tz)
+            # Use source timezone only if use_timezone flag is enabled
+            use_tz = source.get('use_timezone', 0)
+            published_at_gmt, detected_tz = normalize_timestamp_to_utc(published_at, source_tz, use_source_timezone=(use_tz == 1))
             
             # Update source timezone if detected from article and different from configured
             if detected_tz and source_tz != detected_tz:

@@ -18,11 +18,12 @@ class ArticleContentFetcher:
     
     def __init__(self, timeout=10):
         self.timeout = timeout
-        self.headers = {
+        # Don't explicitly set Accept-Encoding - let requests handle it automatically
+        # with gzip/deflate which works reliably. Explicit br/zstd can cause issues.
+        self.default_headers = {
             'User-Agent': 'Mozilla/5.0 (X11; Linux x86_64; rv:140.0) Gecko/20100101 Firefox/140.0',
             'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
             'Accept-Language': 'pt-BR,pt;q=0.8,en-US;q=0.5,en;q=0.3',
-            'Accept-Encoding': 'gzip, deflate, br, zstd',
             'Connection': 'keep-alive',
             'Upgrade-Insecure-Requests': '1',
             'Sec-Fetch-Dest': 'document',
@@ -32,6 +33,21 @@ class ArticleContentFetcher:
             'Sec-GPC': '1',
             'TE': 'trailers',
         }
+    
+    def _get_headers_for_url(self, url):
+        """Get appropriate headers for the given URL based on domain."""
+        # NDTV Profit requires special User-Agent to avoid 403 errors
+        if 'ndtvprofit.com' in url.lower():
+            return {
+                'User-Agent': 'FeedReader/1.0 (Linux)',
+                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+                'Accept-Language': 'en-US,en;q=0.5',
+                'Referer': 'https://www.ndtvprofit.com/',
+                'Connection': 'keep-alive',
+            }
+        
+        # Default headers for all other sites
+        return self.default_headers.copy()
     
     def fetch(self, url):
         """
@@ -56,10 +72,25 @@ class ArticleContentFetcher:
         
         try:
             logger.debug(f"Fetching content from: {url}")
-            response = requests.get(url, headers=self.headers, timeout=self.timeout)
+            headers = self._get_headers_for_url(url)
+            response = requests.get(url, headers=headers, timeout=self.timeout)
             response.raise_for_status()
             
-            soup = BeautifulSoup(response.text, 'html.parser')
+            # Try lxml parser first (faster and more robust for most sites)
+            # Fall back to html.parser if lxml fails
+            soup = None
+            for parser in ['lxml', 'html.parser']:
+                try:
+                    soup = BeautifulSoup(response.text, parser)
+                    break
+                except Exception as e:
+                    if parser == 'html.parser':
+                        # Both parsers failed, re-raise the exception
+                        raise
+                    logger.debug(f"Parser {parser} failed for {url}, trying next parser")
+            
+            if soup is None:
+                raise Exception("All parsers failed")
             
             # Extract author
             result['author'] = self._extract_author(soup)
