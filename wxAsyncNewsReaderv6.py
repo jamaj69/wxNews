@@ -186,13 +186,150 @@ def clean_text(text):
     return text
 
 
-def sanitize_html_content(html_content):
-    """Sanitize HTML content: keep structure and images, but remove classes, styles, and unwanted tags
+class HTMLContentSanitizer(HTMLParser):
+    """Parse HTML and extract only body content, removing unwanted tags and attributes"""
     
-    This function preserves the HTML structure (paragraphs, images, etc.) but removes:
-    - <html>, <head>, <body> wrapper tags
-    - class and style attributes
-    - script and style tags
+    # Tags to completely skip (including their content)
+    SKIP_TAGS = {'script', 'style', 'head', 'meta', 'link', 'noscript'}
+    
+    # Tags to ignore but keep their content
+    WRAPPER_TAGS = {'html', 'body'}
+    
+    # Attributes to remove from all tags
+    REMOVE_ATTRS = {'class', 'id', 'style', 'onclick', 'onload', 'onerror'}
+    
+    # Attributes to keep only for specific tags
+    KEEP_ATTRS = {
+        'img': {'src', 'alt', 'title'},
+        'a': {'href', 'title'},
+        'iframe': {'src', 'width', 'height'},
+    }
+    
+    def __init__(self):
+        super().__init__()
+        self.output = []
+        self.skip_depth = 0  # Track depth of skipped tags
+        
+    def handle_starttag(self, tag, attrs):
+        tag_lower = tag.lower()
+        
+        # Skip unwanted tags
+        if tag_lower in self.SKIP_TAGS:
+            self.skip_depth += 1
+            return
+        
+        # If we're inside a skipped tag, don't output anything
+        if self.skip_depth > 0:
+            return
+        
+        # Wrapper tags - don't output the tag itself
+        if tag_lower in self.WRAPPER_TAGS:
+            return
+        
+        # Filter attributes
+        filtered_attrs = []
+        keep_attrs = self.KEEP_ATTRS.get(tag_lower, set())
+        
+        for attr_name, attr_value in attrs:
+            attr_lower = attr_name.lower()
+            # Keep specific attributes for specific tags
+            if attr_lower in keep_attrs:
+                filtered_attrs.append((attr_name, attr_value))
+            # Keep all attributes not in the remove list if no specific rules
+            elif not keep_attrs and attr_lower not in self.REMOVE_ATTRS:
+                filtered_attrs.append((attr_name, attr_value))
+        
+        # Add responsive style to images
+        if tag_lower == 'img':
+            filtered_attrs.append(('style', 'max-width: 100%; height: auto; display: block; margin: 10px 0;'))
+        
+        # Build tag with filtered attributes
+        if filtered_attrs:
+            attrs_str = ' '.join(f'{name}="{value}"' for name, value in filtered_attrs)
+            self.output.append(f'<{tag} {attrs_str}>')
+        else:
+            self.output.append(f'<{tag}>')
+    
+    def handle_endtag(self, tag):
+        tag_lower = tag.lower()
+        
+        # Handle skipped tags
+        if tag_lower in self.SKIP_TAGS:
+            self.skip_depth = max(0, self.skip_depth - 1)
+            return
+        
+        # If we're inside a skipped tag, don't output anything
+        if self.skip_depth > 0:
+            return
+        
+        # Wrapper tags - don't output the tag itself
+        if tag_lower in self.WRAPPER_TAGS:
+            return
+        
+        self.output.append(f'</{tag}>')
+    
+    def handle_data(self, data):
+        # If we're inside a skipped tag, don't output the data
+        if self.skip_depth > 0:
+            return
+        
+        # Add text data
+        if data.strip():
+            self.output.append(data)
+    
+    def handle_startendtag(self, tag, attrs):
+        """Handle self-closing tags like <img /> or <br />"""
+        tag_lower = tag.lower()
+        
+        # Skip unwanted tags
+        if tag_lower in self.SKIP_TAGS or self.skip_depth > 0:
+            return
+        
+        # Wrapper tags - don't output
+        if tag_lower in self.WRAPPER_TAGS:
+            return
+        
+        # Filter attributes
+        filtered_attrs = []
+        keep_attrs = self.KEEP_ATTRS.get(tag_lower, set())
+        
+        for attr_name, attr_value in attrs:
+            attr_lower = attr_name.lower()
+            if attr_lower in keep_attrs:
+                filtered_attrs.append((attr_name, attr_value))
+            elif not keep_attrs and attr_lower not in self.REMOVE_ATTRS:
+                filtered_attrs.append((attr_name, attr_value))
+        
+        # Add responsive style to images
+        if tag_lower == 'img':
+            filtered_attrs.append(('style', 'max-width: 100%; height: auto; display: block; margin: 10px 0;'))
+        
+        # Build self-closing tag
+        if filtered_attrs:
+            attrs_str = ' '.join(f'{name}="{value}"' for name, value in filtered_attrs)
+            self.output.append(f'<{tag} {attrs_str}>')
+        else:
+            self.output.append(f'<{tag}>')
+    
+    def get_content(self):
+        """Return the sanitized HTML content"""
+        result = ''.join(self.output)
+        # Clean up extra whitespace
+        result = re.sub(r'\s+', ' ', result)
+        result = re.sub(r'>\s+<', '><', result)
+        return result.strip()
+
+
+def sanitize_html_content(html_content):
+    """Sanitize HTML content using proper HTML parsing
+    
+    This function:
+    - Parses HTML as a tree structure
+    - Removes <html>, <head>, <body> wrapper tags
+    - Removes <script>, <style> tags completely
+    - Removes class, id, style attributes
+    - Keeps content tags like <p>, <h1>, <img>, <a>
+    - Preserves src/href/alt/title attributes where appropriate
     
     Returns clean HTML ready to be inserted into a <div>
     """
@@ -207,40 +344,25 @@ def sanitize_html_content(html_content):
         # Plain text - wrap in paragraph
         return f"<p>{html_content}</p>"
     
-    # Remove script and style tags completely
-    html_content = re.sub(r'<script[^>]*>.*?</script>', '', html_content, flags=re.DOTALL | re.IGNORECASE)
-    html_content = re.sub(r'<style[^>]*>.*?</style>', '', html_content, flags=re.DOTALL | re.IGNORECASE)
-    
-    # Remove <html>, <head>, <body> wrapper tags (but keep their content)
-    html_content = re.sub(r'<html[^>]*>', '', html_content, flags=re.IGNORECASE)
-    html_content = re.sub(r'</html>', '', html_content, flags=re.IGNORECASE)
-    html_content = re.sub(r'<head[^>]*>.*?</head>', '', html_content, flags=re.DOTALL | re.IGNORECASE)
-    html_content = re.sub(r'<body[^>]*>', '', html_content, flags=re.IGNORECASE)
-    html_content = re.sub(r'</body>', '', html_content, flags=re.IGNORECASE)
-    
-    # Remove class attributes from all tags
-    html_content = re.sub(r'\sclass=["\'][^"\']*["\']', '', html_content, flags=re.IGNORECASE)
-    html_content = re.sub(r'\sclass=[^\s>]+', '', html_content, flags=re.IGNORECASE)
-    
-    # Remove style attributes from all tags
-    html_content = re.sub(r'\sstyle=["\'][^"\']*["\']', '', html_content, flags=re.IGNORECASE)
-    html_content = re.sub(r'\sstyle=[^\s>]+', '', html_content, flags=re.IGNORECASE)
-    
-    # Remove align attributes (deprecated HTML)
-    html_content = re.sub(r'\salign=["\']?[^"\'\s>]*["\']?', '', html_content, flags=re.IGNORECASE)
-    
-    # Fix img tags: ensure they have basic styling for responsive display
-    html_content = re.sub(
-        r'<img\s+([^>]*)>',
-        r'<img \1 style="max-width: 100%; height: auto; display: block; margin: 10px 0;">',
-        html_content,
-        flags=re.IGNORECASE
-    )
-    
-    # Clean up whitespace
-    html_content = re.sub(r'\s+', ' ', html_content).strip()
-    
-    return html_content
+    # Parse HTML with custom parser
+    parser = HTMLContentSanitizer()
+    try:
+        parser.feed(html_content)
+        result = parser.get_content()
+        
+        # If result is empty or too short, return original as plain text
+        if not result or len(result) < 3:
+            return f"<p>{html_content}</p>"
+        
+        return result
+    except Exception as e:
+        # If parsing fails, return plain text
+        print(f"HTML parsing error: {e}")
+        # Strip all tags and return as paragraph
+        text = re.sub(r'<[^>]+>', '', html_content)
+        text = html.unescape(text)
+        text = re.sub(r'\s+', ' ', text).strip()
+        return f"<p>{text}</p>" if text else ""
 
 
 class NewsPanel(wx.Panel):
