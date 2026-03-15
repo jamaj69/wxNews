@@ -93,6 +93,209 @@ def url_encode(url):
     return base64.urlsafe_b64encode(zlib.compress(url.encode('utf-8')))[15:31]
 
 
+# ============================================================================
+# HTML Sanitization Functions for Clean Storage
+# ============================================================================
+
+import html
+from html.parser import HTMLParser
+
+
+class HTMLContentSanitizer(HTMLParser):
+    """Parse HTML and extract only body content, removing unwanted tags and attributes"""
+    
+    # Tags to completely skip (including their content)
+    SKIP_TAGS = {'script', 'style', 'head', 'meta', 'link', 'noscript'}
+    
+    # Tags to ignore but keep their content
+    WRAPPER_TAGS = {'html', 'body', 'div', 'span', 'section', 'article'}
+    
+    # Attributes to remove from all tags
+    REMOVE_ATTRS = {'class', 'id', 'style', 'onclick', 'onload', 'onerror', 
+                    'align', 'width', 'height'}
+    
+    # Tags we want to keep in output
+    KEEP_TAGS = {'p', 'br', 'img', 'a', 'b', 'i', 'strong', 'em', 'u'}
+    
+    # Attributes to keep for specific tags
+    KEEP_ATTRS = {
+        'img': {'src', 'alt'},
+        'a': {'href'},
+    }
+    
+    def __init__(self):
+        super().__init__()
+        self.content = []
+        self.skip_level = 0
+    
+    def handle_starttag(self, tag, attrs):
+        if tag in self.SKIP_TAGS:
+            self.skip_level += 1
+            return
+        
+        if self.skip_level > 0:
+            return
+        
+        if tag in self.WRAPPER_TAGS:
+            return
+        
+        if tag not in self.KEEP_TAGS:
+            return
+        
+        # Filter attributes
+        allowed_attrs = self.KEEP_ATTRS.get(tag, set())
+        filtered_attrs = []
+        
+        for attr, value in attrs:
+            if attr not in self.REMOVE_ATTRS and (not allowed_attrs or attr in allowed_attrs):
+                # Filter out overly long alt attributes
+                if attr == 'alt' and len(value) > 100:
+                    continue
+                filtered_attrs.append((attr, value))
+        
+        if filtered_attrs:
+            attrs_str = ' '.join(f'{attr}="{value}"' for attr, value in filtered_attrs)
+            self.content.append(f'<{tag} {attrs_str}>')
+        else:
+            self.content.append(f'<{tag}>')
+    
+    def handle_endtag(self, tag):
+        if tag in self.SKIP_TAGS:
+            self.skip_level = max(0, self.skip_level - 1)
+            return
+        
+        if self.skip_level > 0:
+            return
+        
+        if tag in self.WRAPPER_TAGS:
+            return
+        
+        if tag not in self.KEEP_TAGS:
+            return
+        
+        self.content.append(f'</{tag}>')
+    
+    def handle_data(self, data):
+        if self.skip_level == 0:
+            self.content.append(data)
+    
+    def handle_startendtag(self, tag, attrs):
+        if tag in self.SKIP_TAGS or self.skip_level > 0:
+            return
+        
+        if tag in self.WRAPPER_TAGS:
+            return
+        
+        if tag not in self.KEEP_TAGS:
+            return
+        
+        # Filter attributes
+        allowed_attrs = self.KEEP_ATTRS.get(tag, set())
+        filtered_attrs = []
+        
+        for attr, value in attrs:
+            if attr not in self.REMOVE_ATTRS and (not allowed_attrs or attr in allowed_attrs):
+                if attr == 'alt' and len(value) > 100:
+                    continue
+                filtered_attrs.append((attr, value))
+        
+        if filtered_attrs:
+            attrs_str = ' '.join(f'{attr}="{value}"' for attr, value in filtered_attrs)
+            self.content.append(f'<{tag} {attrs_str} />')
+        else:
+            self.content.append(f'<{tag} />')
+    
+    def get_content(self):
+        return ''.join(self.content)
+
+
+def sanitize_html_content(html_content):
+    """Sanitize HTML content during collection
+    
+    Removes:
+    - <script>, <style> tags
+    - class, id, style attributes
+    - wrapper tags like <html>, <body>, <div>
+    
+    Keeps:
+    - <p>, <img>, <a>, <b>, <i>, <strong>, <em>, <u>
+    - src/href attributes
+    - alt attributes (if < 100 chars)
+    """
+    if not html_content:
+        return ""
+    
+    # Unescape HTML entities
+    html_content = html.unescape(html_content)
+    
+    # Check if content has HTML tags
+    if '<' not in html_content or '>' not in html_content:
+        # Plain text - wrap in paragraph
+        return f"<p>{html_content}</p>"
+    
+    # Parse HTML with custom parser
+    parser = HTMLContentSanitizer()
+    try:
+        parser.feed(html_content)
+        parser.close()  # Force parser to finish
+        result = parser.get_content()
+        
+        # If result is empty, fallback to plain text
+        if not result or len(result.strip()) < 3:
+            plain = re.sub(r'<[^>]*>', '', html_content)
+            plain = re.sub(r'\s+', ' ', plain).strip()
+            return f"<p>{plain}</p>" if plain else ""
+        
+        return result.strip()
+    except Exception as e:
+        # If parsing fails, return plain text
+        plain = re.sub(r'<[^>]*>', '', html_content)
+        plain = re.sub(r'\s+', ' ', plain).strip()
+        return f"<p>{plain}</p>" if plain else ""
+
+
+def extract_first_image_url(html_content):
+    """Extract the first image URL from HTML content"""
+    if not html_content:
+        return None
+    
+    try:
+        # Try to find img tag with src
+        img_match = re.search(r'<img[^>]+src=["\']([^"\']+)["\']', html_content, re.IGNORECASE)
+        if img_match:
+            url = img_match.group(1)
+            # Only return if it's a valid HTTP(S) URL
+            if url.startswith(('http://', 'https://')):
+                return url
+    except Exception as e:
+        pass
+    
+    return None
+
+
+def extract_and_remove_first_image(html_content):
+    """
+    Extract the first image URL from HTML and remove that image tag.
+    Returns tuple: (image_url, cleaned_html)
+    """
+    if not html_content:
+        return None, html_content
+    
+    try:
+        # Try to find first img tag with src
+        img_match = re.search(r'<img[^>]+src=["\']([^"\']+)["\'][^>]*>', html_content, re.IGNORECASE)
+        if img_match:
+            url = img_match.group(1)
+            # Only process if it's a valid HTTP(S) URL
+            if url.startswith(('http://', 'https://')):
+                # Remove the first img tag from HTML
+                cleaned_html = html_content[:img_match.start()] + html_content[img_match.end():]
+                return url, cleaned_html
+    except Exception as e:
+        pass
+    
+    return None, html_content
+
 
 def dbCredentials():
     """Return SQLite database path"""
@@ -992,17 +1195,21 @@ class NewsGather():
                                     article_publishedAt = article['publishedAt']  # Keep original with timezone
                                     article_content = article['content']
                                     
+                                    # Sanitize HTML in description and content
+                                    if article_description:
+                                        article_description = sanitize_html_content(article_description)
+                                    
+                                    if article_content:
+                                        article_content = sanitize_html_content(article_content)
+                                    
+                                    # Extract first image from description if urlToImage is missing
+                                    # Also remove the image from HTML to avoid displaying twice
+                                    if not article_urlToImage and article_description:
+                                        article_urlToImage, article_description = extract_and_remove_first_image(article_description)
+                                        article_urlToImage = article_urlToImage or ''
+                                    
                                     # Get source timezone if available
                                     source_tz = self.sources.get(source_id, {}).get('timezone')
-                                    
-                                    # Create normalized UTC version (article timezone has priority over source timezone)
-                                    # Use source timezone only if use_timezone flag is enabled
-                                    use_tz = self.sources.get(source_id, {}).get('use_timezone', 0)
-                                    article_publishedAt_gmt, detected_tz = normalize_timestamp_to_utc(article_publishedAt, source_tz, use_source_timezone=(use_tz == 1))
-                                    
-                                    # Update source timezone if detected from article and different from configured
-                                    if detected_tz and source_tz != detected_tz:
-                                        self.loop.create_task(self.update_source_timezone(source_id, detected_tz))
                                     
                                     article_key = url_encode(article_title + article_url + article_publishedAt)
                                     
@@ -1241,15 +1448,21 @@ class NewsGather():
                     # Generate article key with original timestamp
                     article_key = url_encode(title + url + published)
                     
+                    # Sanitize HTML description
+                    clean_description = sanitize_html_content(description) if description else ''
+                    
+                    # Extract first image from description and remove it from HTML to avoid duplicates
+                    extracted_image_url, clean_description = extract_and_remove_first_image(clean_description) if clean_description else (None, clean_description)
+                    
                     # Create article object
                     new_article = {
                         'id_article': article_key,
                         'id_source': source_id,
                         'author': author,
                         'title': title,
-                        'description': description[:500] if description else '',
+                        'description': clean_description,
                         'url': url,
-                        'urlToImage': '',
+                        'urlToImage': extracted_image_url or '',
                         'publishedAt': published,  # Original with timezone
                         'published_at_gmt': published_gmt,  # Normalized UTC
                         'content': ''
@@ -1498,14 +1711,23 @@ class NewsGather():
                 )
             
             # Create article object
+            # Sanitize HTML in description
+            clean_description = sanitize_html_content(description) if description else ''
+            
+            # Extract first image from description if image field is empty
+            # Also remove image from HTML to avoid duplicates
+            extracted_image = None
+            if not image and clean_description:
+                extracted_image, clean_description = extract_and_remove_first_image(clean_description)
+            
             new_article = {
                 'id_article': article_id,
                 'id_source': source_id,
                 'author': author[:200] if author else '',
                 'title': title[:500] if title else '',
-                'description': description[:1000] if description else '',
+                'description': clean_description if clean_description else '',
                 'url': url[:500] if url else '',
-                'urlToImage': image[:500] if image else '',
+                'urlToImage': (extracted_image or image or '')[:500],
                 'publishedAt': published_at,  # Original with timezone
                 'published_at_gmt': published_at_gmt,  # Normalized UTC
                 'content': ''
@@ -1650,15 +1872,26 @@ class NewsGather():
                     article_dict['author'] = result['author'][:200]
                     updated.append('author')
                 
-                # Update description if missing
+                # Update description if missing (sanitize HTML)
                 if not has_description and result.get('description'):
-                    article_dict['description'] = result['description'][:1000]
+                    clean_desc = sanitize_html_content(result['description'])
+                    article_dict['description'] = clean_desc if clean_desc else ''
                     updated.append('description')
                 
-                # Update content if missing
+                # Update content if missing (sanitize HTML)
                 if not has_content and result.get('content'):
-                    article_dict['content'] = result['content'][:2000]  # Store first 2000 chars
+                    clean_content = sanitize_html_content(result['content'])
+                    article_dict['content'] = clean_content if clean_content else ''
                     updated.append('content')
+                
+                # Extract image from description if urlToImage is still empty
+                # Also remove image from HTML to avoid duplicates
+                if not article_dict.get('urlToImage') and article_dict.get('description'):
+                    img_url, clean_desc = extract_and_remove_first_image(article_dict['description'])
+                    if img_url:
+                        article_dict['urlToImage'] = img_url
+                        article_dict['description'] = clean_desc  # Update with cleaned HTML
+                        updated.append('urlToImage')
                 
                 # Update published time if missing and fetched
                 if not article_dict.get('publishedAt') and result.get('published_time'):

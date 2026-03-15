@@ -234,6 +234,14 @@ class HTMLContentSanitizer(HTMLParser):
             attr_lower = attr_name.lower()
             # Keep specific attributes for specific tags
             if attr_lower in keep_attrs:
+                # For images: truncate overly long alt/title text (usually photo credits)
+                if tag_lower == 'img' and attr_lower in ('alt', 'title'):
+                    # Remove alt/title if longer than 100 chars (likely a caption/credit)
+                    if len(attr_value) > 100:
+                        continue  # Skip this attribute
+                    # Otherwise truncate to 80 chars if needed
+                    if len(attr_value) > 80:
+                        attr_value = attr_value[:77] + '...'
                 filtered_attrs.append((attr_name, attr_value))
             # Keep all attributes not in the remove list if no specific rules
             elif not keep_attrs and attr_lower not in self.REMOVE_ATTRS:
@@ -296,6 +304,14 @@ class HTMLContentSanitizer(HTMLParser):
         for attr_name, attr_value in attrs:
             attr_lower = attr_name.lower()
             if attr_lower in keep_attrs:
+                # For images: truncate overly long alt/title text (usually photo credits)
+                if tag_lower == 'img' and attr_lower in ('alt', 'title'):
+                    # Remove alt/title if longer than 100 chars (likely a caption/credit)
+                    if len(attr_value) > 100:
+                        continue  # Skip this attribute
+                    # Otherwise truncate to 80 chars if needed
+                    if len(attr_value) > 80:
+                        attr_value = attr_value[:77] + '...'
                 filtered_attrs.append((attr_name, attr_value))
             elif not keep_attrs and attr_lower not in self.REMOVE_ATTRS:
                 filtered_attrs.append((attr_name, attr_value))
@@ -348,11 +364,15 @@ def sanitize_html_content(html_content):
     parser = HTMLContentSanitizer()
     try:
         parser.feed(html_content)
+        parser.close()  # Force parser to finish, handles incomplete HTML
         result = parser.get_content()
         
-        # If result is empty or too short, return original as plain text
-        if not result or len(result) < 3:
-            return f"<p>{html_content}</p>"
+        # If result is empty or too short, fallback to plain text
+        if not result or len(result.strip()) < 3:
+            # Strip all HTML tags and return as plain text
+            plain = re.sub(r'<[^>]*>', '', html_content)
+            plain = re.sub(r'\s+', ' ', plain).strip()
+            return f"<p>{plain}</p>" if plain else ""
         
         return result
     except Exception as e:
