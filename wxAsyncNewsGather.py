@@ -1211,6 +1211,15 @@ class NewsGather():
                                     # Get source timezone if available
                                     source_tz = self.sources.get(source_id, {}).get('timezone')
                                     
+                                    # Create normalized UTC version (article timezone has priority over source timezone)
+                                    # Use source timezone only if use_timezone flag is enabled
+                                    use_tz = self.sources.get(source_id, {}).get('use_timezone', 0)
+                                    article_publishedAt_gmt, detected_tz = normalize_timestamp_to_utc(article_publishedAt, source_tz, use_source_timezone=(use_tz == 1))
+                                    
+                                    # Update source timezone if detected from article and different from configured
+                                    if detected_tz and source_tz != detected_tz:
+                                        self.loop.create_task(self.update_source_timezone(source_id, detected_tz))
+                                    
                                     article_key = url_encode(article_title + article_url + article_publishedAt)
                                     
                                     # Try to extract source URL from article URL
