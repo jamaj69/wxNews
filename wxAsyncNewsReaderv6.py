@@ -12,6 +12,7 @@ import logging
 import sys
 import wx 
 import wx.html2
+import wx.lib.agw.aui as aui
 import webbrowser
 import re
 import html
@@ -238,18 +239,24 @@ class NewsPanel(wx.Panel):
         main_sizer.SetItemMinSize(sidebar_panel, 280, -1)
         
         # === RIGHT SIDE: Notebook with tabs ===
-        self.notebook = wx.Notebook(self, style=wx.NB_TOP)
+        # Use AuiNotebook to allow closing tabs
+        self.notebook = aui.AuiNotebook(self, 
+            style=aui.AUI_NB_TOP | 
+                  aui.AUI_NB_TAB_SPLIT | 
+                  aui.AUI_NB_TAB_MOVE | 
+                  aui.AUI_NB_CLOSE_ON_ACTIVE_TAB |
+                  aui.AUI_NB_WINDOWLIST_BUTTON)
         
-        # Tab 1: HTML Viewer
+        # Tab 1: News List (cannot be closed)
         html_panel = wx.Panel(self.notebook)
         html_sizer = wx.BoxSizer(wx.VERTICAL)
         
-        # HTML Viewer
+        # HTML Viewer for news list
         self.html_viewer = wx.html2.WebView.New(html_panel)
         html_sizer.Add(self.html_viewer, 1, wx.EXPAND | wx.ALL, 5)
         
         html_panel.SetSizer(html_sizer)
-        self.notebook.AddPage(html_panel, "News Viewer")
+        self.notebook.AddPage(html_panel, "📰 News Feed", select=True)
         
         main_sizer.Add(self.notebook, 1, wx.EXPAND | wx.ALL, 0)
         
@@ -261,6 +268,12 @@ class NewsPanel(wx.Panel):
         self.load_checked_btn.Bind(wx.EVT_BUTTON, self.OnLoadChecked)
         self.sources_checklist.Bind(wx.EVT_CHECKLISTBOX, self.OnSourceChecked)
         self.sources_checklist.Bind(wx.EVT_LISTBOX, self.OnSourceSelected)
+        
+        # Bind navigation event to intercept link clicks
+        self.html_viewer.Bind(wx.html2.EVT_WEBVIEW_NAVIGATING, self.OnNavigating)
+        
+        # Bind notebook events
+        self.notebook.Bind(aui.EVT_AUINOTEBOOK_PAGE_CLOSE, self.OnPageClose)
         
         # Load data
         wx.CallAfter(self.LoadSources)
@@ -460,6 +473,89 @@ class NewsPanel(wx.Panel):
         
         self.status_text.SetLabel("0 sources selected")
         print("Deselected all sources")
+    
+    def OnNavigating(self, event):
+        """Handle navigation event - intercept article link clicks"""
+        url = event.GetURL()
+        
+        # Allow about:blank and file:// (local HTML)
+        if url.startswith('about:') or url.startswith('file://'):
+            return
+        
+        # If it's an external URL (http/https), open in new tab
+        if url.startswith('http://') or url.startswith('https://'):
+            # Prevent default navigation in news list viewer
+            event.Veto()
+            # Open in new tab
+            self.OpenArticleTab(url)
+            print(f"Opening article in new tab: {url}")
+    
+    def OnPageClose(self, event):
+        """Handle tab close event - prevent closing the main tab"""
+        # Get the page being closed
+        page_idx = event.GetSelection()
+        
+        # Prevent closing the first tab (News Feed)
+        if page_idx == 0:
+            event.Veto()
+            wx.MessageBox("Cannot close the main News Feed tab", 
+                         "Info", wx.OK | wx.ICON_INFORMATION)
+            print("Prevented closing main tab")
+        else:
+            print(f"Closing tab at index {page_idx}")
+    
+    def OpenArticleTab(self, url):
+        """Open a news article in a new tab"""
+        # Create new panel for the article
+        article_panel = wx.Panel(self.notebook)
+        article_sizer = wx.BoxSizer(wx.VERTICAL)
+        
+        # Add close button bar
+        button_bar = wx.Panel(article_panel)
+        button_bar.SetBackgroundColour(wx.Colour(240, 240, 240))
+        button_sizer = wx.BoxSizer(wx.HORIZONTAL)
+        
+        back_btn = wx.Button(button_bar, label="← Back to Feed", size=(120, 28))
+        back_btn.Bind(wx.EVT_BUTTON, lambda evt: self.CloseArticleTab(article_panel))
+        button_sizer.Add(back_btn, 0, wx.ALL, 5)
+        
+        url_text = wx.StaticText(button_bar, label=url)
+        url_text.SetForegroundColour(wx.Colour(100, 100, 100))
+        button_sizer.Add(url_text, 1, wx.ALL | wx.ALIGN_CENTER_VERTICAL, 5)
+        
+        button_bar.SetSizer(button_sizer)
+        article_sizer.Add(button_bar, 0, wx.EXPAND)
+        
+        # Create WebView for the article
+        article_viewer = wx.html2.WebView.New(article_panel)
+        article_viewer.LoadURL(url)
+        article_sizer.Add(article_viewer, 1, wx.EXPAND)
+        
+        article_panel.SetSizer(article_sizer)
+        
+        # Extract title from URL for tab label
+        try:
+            from urllib.parse import urlparse
+            parsed = urlparse(url)
+            tab_title = parsed.netloc.replace('www.', '')[:20]
+        except:
+            tab_title = "Article"
+        
+        # Add the new tab
+        self.notebook.AddPage(article_panel, f"📄 {tab_title}", select=True)
+        print(f"Opened new tab: {tab_title}")
+    
+    def CloseArticleTab(self, panel):
+        """Close an article tab"""
+        # Find the page index
+        for i in range(self.notebook.GetPageCount()):
+            if self.notebook.GetPage(i) == panel:
+                if i > 0:  # Don't close main tab
+                    self.notebook.DeletePage(i)
+                    # Return to main tab
+                    self.notebook.SetSelection(0)
+                    print(f"Closed article tab at index {i}")
+                break
     
     def OnSourceChecked(self, event):
         """Handle checkbox state change"""
@@ -779,7 +875,7 @@ class NewsPanel(wx.Panel):
             
             # Build article card - simple and explicit
             html += '<div class="article">'
-            html += f'<div class="article-title"><a href="{url}" target="_blank">{title}</a></div>'
+            html += f'<div class="article-title"><a href="{url}">{title}</a></div>'
             html += f'<div class="article-meta">'
             html += f'<span class="article-source">🔖 {source_name}</span>'
             if author:
@@ -962,7 +1058,7 @@ class NewsPanel(wx.Panel):
             
             # Build article card - simple and explicit
             html += '<div class="article">'
-            html += f'<div class="article-title"><a href="{url}" target="_blank">{title}</a></div>'
+            html += f'<div class="article-title"><a href="{url}">{title}</a></div>'
             html += f'<div class="article-meta">'
             if author:
                 html += f'<span class="article-author">✍️ {author}</span>'
