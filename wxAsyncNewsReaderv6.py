@@ -120,8 +120,10 @@ def parse_html_description(html_content):
     try:
         parser.feed(html_content)
         text, images = parser.get_content()
-        # If we got text, return it
+        # If we got text, make sure no img tags remain
         if text:
+            # Extra safety: remove any remaining img tags from text
+            text = re.sub(r'<img[^>]*>', '', text, flags=re.IGNORECASE)
             return text, images
     except Exception as e:
         # Log error and continue to fallback
@@ -133,10 +135,21 @@ def parse_html_description(html_content):
         text = re.sub(r'<script[^>]*>.*?</script>', '', html_content, flags=re.DOTALL | re.IGNORECASE)
         text = re.sub(r'<style[^>]*>.*?</style>', '', text, flags=re.DOTALL | re.IGNORECASE)
         
-        # Extract images before removing tags
-        images = re.findall(r'<img[^>]+src=["\']([^"\']+)["\']', html_content, re.IGNORECASE)
+        # Extract ALL images before removing tags (with all variations)
+        images = []
+        # Pattern 1: Standard img tags
+        images.extend(re.findall(r'<img[^>]+src=["\']([^"\']+)["\']', html_content, re.IGNORECASE))
+        # Pattern 2: img tags with src as first attribute (no quotes sometimes)
+        images.extend(re.findall(r'<img[^>]+src=([^\s>]+)', html_content, re.IGNORECASE))
         
-        # Remove all HTML tags
+        # Remove duplicate images
+        images = list(dict.fromkeys(images))  # Preserve order while removing duplicates
+        
+        # Remove ALL img tags from text (with all variations)
+        text = re.sub(r'<img[^>]*>', '', text, flags=re.IGNORECASE)
+        text = re.sub(r'<img[^>]*', '', text, flags=re.IGNORECASE)  # Even incomplete tags
+        
+        # Remove all other HTML tags
         text = re.sub(r'<[^>]+>', '', text)
         
         # Decode HTML entities (again, in case some remain)
@@ -171,6 +184,63 @@ def clean_text(text):
     text = re.sub(r'\s+', ' ', text).strip()
     
     return text
+
+
+def sanitize_html_content(html_content):
+    """Sanitize HTML content: keep structure and images, but remove classes, styles, and unwanted tags
+    
+    This function preserves the HTML structure (paragraphs, images, etc.) but removes:
+    - <html>, <head>, <body> wrapper tags
+    - class and style attributes
+    - script and style tags
+    
+    Returns clean HTML ready to be inserted into a <div>
+    """
+    if not html_content:
+        return ""
+    
+    # Unescape HTML entities (in case content is stored escaped in DB)
+    html_content = html.unescape(html_content)
+    
+    # Check if content has HTML tags
+    if '<' not in html_content or '>' not in html_content:
+        # Plain text - wrap in paragraph
+        return f"<p>{html_content}</p>"
+    
+    # Remove script and style tags completely
+    html_content = re.sub(r'<script[^>]*>.*?</script>', '', html_content, flags=re.DOTALL | re.IGNORECASE)
+    html_content = re.sub(r'<style[^>]*>.*?</style>', '', html_content, flags=re.DOTALL | re.IGNORECASE)
+    
+    # Remove <html>, <head>, <body> wrapper tags (but keep their content)
+    html_content = re.sub(r'<html[^>]*>', '', html_content, flags=re.IGNORECASE)
+    html_content = re.sub(r'</html>', '', html_content, flags=re.IGNORECASE)
+    html_content = re.sub(r'<head[^>]*>.*?</head>', '', html_content, flags=re.DOTALL | re.IGNORECASE)
+    html_content = re.sub(r'<body[^>]*>', '', html_content, flags=re.IGNORECASE)
+    html_content = re.sub(r'</body>', '', html_content, flags=re.IGNORECASE)
+    
+    # Remove class attributes from all tags
+    html_content = re.sub(r'\sclass=["\'][^"\']*["\']', '', html_content, flags=re.IGNORECASE)
+    html_content = re.sub(r'\sclass=[^\s>]+', '', html_content, flags=re.IGNORECASE)
+    
+    # Remove style attributes from all tags
+    html_content = re.sub(r'\sstyle=["\'][^"\']*["\']', '', html_content, flags=re.IGNORECASE)
+    html_content = re.sub(r'\sstyle=[^\s>]+', '', html_content, flags=re.IGNORECASE)
+    
+    # Remove align attributes (deprecated HTML)
+    html_content = re.sub(r'\salign=["\']?[^"\'\s>]*["\']?', '', html_content, flags=re.IGNORECASE)
+    
+    # Fix img tags: ensure they have basic styling for responsive display
+    html_content = re.sub(
+        r'<img\s+([^>]*)>',
+        r'<img \1 style="max-width: 100%; height: auto; display: block; margin: 10px 0;">',
+        html_content,
+        flags=re.IGNORECASE
+    )
+    
+    # Clean up whitespace
+    html_content = re.sub(r'\s+', ' ', html_content).strip()
+    
+    return html_content
 
 
 class NewsPanel(wx.Panel):
@@ -852,28 +922,24 @@ class NewsPanel(wx.Panel):
             if not date_str:
                 date_str = "Date unknown"
             
-            # Clean and escape title, author, and source name
-            # First remove CDATA, HTML tags, decode entities
+            # Clean title, author, and source name (remove CDATA, HTML tags)
             title = clean_text(title)
             if author:
                 author = clean_text(author)
             source_name = clean_text(source_name)
             
-            # Then escape for safe HTML display
+            # Escape title, author, and source for safe HTML display
             title = title.replace('<', '&lt;').replace('>', '&gt;').replace('\"', '&quot;')
             if author:
                 author = author.replace('<', '&lt;').replace('>', '&gt;')
             source_name = source_name.replace('<', '&lt;').replace('>', '&gt;')
             
-            # Parse HTML description to extract text and images
-            description_text = ""
-            description_images = []
+            # Sanitize HTML description (keep images and structure, remove classes/styles)
+            description_html = ""
             if description:
-                description_text, description_images = parse_html_description(description)
-                # Escape the extracted text
-                description_text = description_text.replace('<', '&lt;').replace('>', '&gt;')
+                description_html = sanitize_html_content(description)
             
-            # Build article card - simple and explicit
+            # Build article card
             html += '<div class="article">'
             html += f'<div class="article-title"><a href="{url}">{title}</a></div>'
             html += f'<div class="article-meta">'
@@ -883,17 +949,13 @@ class NewsPanel(wx.Panel):
             html += f'<span class="article-date">📅 {date_str}</span>'
             html += '</div>'
             
-            # Show main article image if available - with error handling
+            # Show main article image if available (from urlToImage field)
             if url_to_image and url_to_image.startswith(('http://', 'https://')):
                 html += f'<img src="{url_to_image}" alt="Article image" onerror="this.style.display=\'none\'" style="max-width: 100%; width: 100%; height: auto; display: block; margin: 10px 0; border-radius: 4px; clear: both;">'
             
-            # Show images from description HTML - with validation
-            for img_url in description_images:
-                if img_url and img_url.strip() and img_url.startswith(('http://', 'https://')):
-                    html += f'<img src="{img_url}" alt="Description image" onerror="this.style.display=\'none\'" style="max-width: 100%; width: 100%; height: auto; display: block; margin: 10px 0; border-radius: 4px; clear: both;">'
-            
-            if description_text:
-                html += f'<div class="article-description">{description_text}</div>'
+            # Show sanitized description HTML (includes images and content structure)
+            if description_html:
+                html += f'<div class="article-content">{description_html}</div>'
             
             html += '</div>'  # Close article div
         
@@ -1037,26 +1099,22 @@ class NewsPanel(wx.Panel):
             if not date_str:
                 date_str = "Date unknown"
             
-            # Clean and escape title and author
-            # First remove CDATA, HTML tags, decode entities
+            # Clean title and author (remove CDATA, HTML tags)
             title = clean_text(title)
             if author:
                 author = clean_text(author)
             
-            # Then escape for safe HTML display
+            # Escape title and author for safe HTML display
             title = title.replace('<', '&lt;').replace('>', '&gt;').replace('\"', '&quot;')
             if author:
                 author = author.replace('<', '&lt;').replace('>', '&gt;')
             
-            # Parse HTML description to extract text and images
-            description_text = ""
-            description_images = []
+            # Sanitize HTML description (keep images and structure, remove classes/styles)
+            description_html = ""
             if description:
-                description_text, description_images = parse_html_description(description)
-                # Escape the extracted text
-                description_text = description_text.replace('<', '&lt;').replace('>', '&gt;')
+                description_html = sanitize_html_content(description)
             
-            # Build article card - simple and explicit
+            # Build article card
             html += '<div class="article">'
             html += f'<div class="article-title"><a href="{url}">{title}</a></div>'
             html += f'<div class="article-meta">'
@@ -1065,17 +1123,13 @@ class NewsPanel(wx.Panel):
             html += f'<span class="article-date">📅 {date_str}</span>'
             html += '</div>'
             
-            # Show main article image if available - with error handling
+            # Show main article image if available (from urlToImage field)
             if url_to_image and url_to_image.startswith(('http://', 'https://')):
                 html += f'<img src="{url_to_image}" alt="Article image" onerror="this.style.display=\'none\'" style="max-width: 100%; width: 100%; height: auto; display: block; margin: 10px 0; border-radius: 4px; clear: both;">'
             
-            # Show images from description HTML - with validation
-            for img_url in description_images:
-                if img_url and img_url.strip() and img_url.startswith(('http://', 'https://')):
-                    html += f'<img src="{img_url}" alt="Description image" onerror="this.style.display=\'none\'" style="max-width: 100%; width: 100%; height: auto; display: block; margin: 10px 0; border-radius: 4px; clear: both;">'
-            
-            if description_text:
-                html += f'<div class="article-description">{description_text}</div>'
+            # Show sanitized description HTML (includes images and content structure)
+            if description_html:
+                html += f'<div class="article-content">{description_html}</div>'
             
             html += '</div>'  # Close article div
         
