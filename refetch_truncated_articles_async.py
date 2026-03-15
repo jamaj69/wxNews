@@ -257,7 +257,27 @@ async def fetch_article_content_async(session: aiohttp.ClientSession, url: str, 
                 result['error'] = f"HTTP {response.status}"
                 return result
             
-            html_content = await response.text()
+            # Try to read content with proper encoding handling
+            try:
+                # First try with response's declared encoding
+                html_content = await response.text()
+            except UnicodeDecodeError:
+                # If that fails, try reading as bytes and decode with fallback encodings
+                try:
+                    content_bytes = await response.read()
+                    # Try common encodings
+                    for encoding in ['utf-8', 'latin-1', 'iso-8859-1', 'cp1252']:
+                        try:
+                            html_content = content_bytes.decode(encoding)
+                            break
+                        except (UnicodeDecodeError, LookupError):
+                            continue
+                    else:
+                        # If all fail, use utf-8 with error handling
+                        html_content = content_bytes.decode('utf-8', errors='ignore')
+                except Exception as e:
+                    result['error'] = f"Encoding error: {str(e)[:30]}"
+                    return result
             
             # Try to extract content using BeautifulSoup
             try:

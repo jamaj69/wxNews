@@ -76,12 +76,28 @@ class ArticleContentFetcher:
             response = requests.get(url, headers=headers, timeout=self.timeout)
             response.raise_for_status()
             
+            # Try to get text with proper encoding handling
+            try:
+                html_text = response.text
+            except (UnicodeDecodeError, LookupError) as e:
+                # If encoding detection fails, try common encodings
+                logger.debug(f"Encoding error, trying fallback encodings: {e}")
+                for encoding in ['utf-8', 'latin-1', 'iso-8859-1', 'cp1252']:
+                    try:
+                        html_text = response.content.decode(encoding)
+                        break
+                    except (UnicodeDecodeError, LookupError):
+                        continue
+                else:
+                    # Last resort: decode with error handling
+                    html_text = response.content.decode('utf-8', errors='ignore')
+            
             # Try lxml parser first (faster and more robust for most sites)
             # Fall back to html.parser if lxml fails
             soup = None
             for parser in ['lxml', 'html.parser']:
                 try:
-                    soup = BeautifulSoup(response.text, parser)
+                    soup = BeautifulSoup(html_text, parser)
                     break
                 except Exception as e:
                     if parser == 'html.parser':
