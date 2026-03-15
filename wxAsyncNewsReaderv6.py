@@ -152,6 +152,26 @@ def parse_html_description(html_content):
         return text, []
 
 
+def clean_text(text):
+    """Clean text by removing CDATA, HTML tags, and decoding entities"""
+    if not text:
+        return text
+    
+    # Remove CDATA wrappers
+    text = re.sub(r'<!\[CDATA\[(.*?)\]\]>', r'\1', text, flags=re.DOTALL)
+    
+    # Unescape HTML entities first
+    text = html.unescape(text)
+    
+    # Remove HTML tags
+    text = re.sub(r'<[^>]+>', '', text)
+    
+    # Clean up whitespace
+    text = re.sub(r'\s+', ' ', text).strip()
+    
+    return text
+
+
 class NewsPanel(wx.Panel):
     """Main panel with checkbox source list and notebook with HTML viewer"""
 
@@ -736,7 +756,14 @@ class NewsPanel(wx.Panel):
             if not date_str:
                 date_str = "Date unknown"
             
-            # Escape HTML for title, author, and source name
+            # Clean and escape title, author, and source name
+            # First remove CDATA, HTML tags, decode entities
+            title = clean_text(title)
+            if author:
+                author = clean_text(author)
+            source_name = clean_text(source_name)
+            
+            # Then escape for safe HTML display
             title = title.replace('<', '&lt;').replace('>', '&gt;').replace('\"', '&quot;')
             if author:
                 author = author.replace('<', '&lt;').replace('>', '&gt;')
@@ -914,7 +941,13 @@ class NewsPanel(wx.Panel):
             if not date_str:
                 date_str = "Date unknown"
             
-            # Escape HTML for title and author
+            # Clean and escape title and author
+            # First remove CDATA, HTML tags, decode entities
+            title = clean_text(title)
+            if author:
+                author = clean_text(author)
+            
+            # Then escape for safe HTML display
             title = title.replace('<', '&lt;').replace('>', '&gt;').replace('\"', '&quot;')
             if author:
                 author = author.replace('<', '&lt;').replace('>', '&gt;')
