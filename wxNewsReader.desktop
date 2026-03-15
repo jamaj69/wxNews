@@ -2,11 +2,12 @@
 Version=1.0
 Type=Application
 Name=wxNewsReader
-Comment=wxNewsReader
+Comment=Leitor de notícias RSS e agregador de feeds
 TryExec=/home/jamaj/src/python/pyTweeter/wxnews.sh
 Exec=/home/jamaj/src/python/pyTweeter/wxnews.sh
-Icon=/home/jamaj/Downloads/finanx-12c-0.2.8/icon.png
+Icon=news-feed
 Terminal=false
 Path=/home/jamaj/src/python/pyTweeter/
-GenericName=wxNewsReader
-StartupNotify=false
+Categories=Network;News;
+GenericName=Leitor de Notícias
+StartupNotify=true
