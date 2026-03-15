@@ -562,12 +562,19 @@ class NewsPanel(wx.Panel):
                 }}
                 .article-content {{
                     margin-top: 10px;
-                }}
-                .article-content img {{
+                    clear: both;
+                    display: block;
+                    width: 100%;
+                }
+                .article-content img {
                     max-width: 100%;
+                    width: 100%;
                     height: auto;
                     border-radius: 4px;
                     margin: 10px 0;
+                    display: block;
+                    float: none !important;
+                    clear: both;
                 }}
                 .article-source {{
                     color: #667eea;
@@ -742,15 +749,23 @@ class NewsPanel(wx.Panel):
                     color: #555;
                     line-height: 1.6;
                     margin-top: 10px;
+                    clear: both;
                 }}
                 .article-content {{
                     margin-top: 10px;
+                    clear: both;
+                    display: block;
+                    width: 100%;
                 }}
                 .article-content img {{
                     max-width: 100%;
+                    width: 100%;
                     height: auto;
                     border-radius: 4px;
                     margin: 10px 0;
+                    display: block;
+                    float: none !important;
+                    clear: both;
                 }}
                 .article-author {{
                     color: #764ba2;
