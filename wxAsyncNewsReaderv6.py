@@ -14,6 +14,7 @@ import wx
 import wx.html2
 import webbrowser
 import re
+import html
 from html.parser import HTMLParser
 from datetime import datetime
 
@@ -105,6 +106,10 @@ def parse_html_description(html_content):
     if not html_content:
         return "", []
     
+    # IMPORTANT: Unescape HTML entities first (in case description is stored escaped in DB)
+    # This converts &lt; back to <, &gt; to >, etc.
+    html_content = html.unescape(html_content)
+    
     # Check if content has HTML tags
     if '<' not in html_content or '>' not in html_content:
         return html_content, []
@@ -133,14 +138,8 @@ def parse_html_description(html_content):
         # Remove all HTML tags
         text = re.sub(r'<[^>]+>', '', text)
         
-        # Decode HTML entities
-        text = text.replace('&nbsp;', ' ')
-        text = text.replace('&amp;', '&')
-        text = text.replace('&lt;', '<')
-        text = text.replace('&gt;', '>')
-        text = text.replace('&quot;', '"')
-        text = text.replace('&#39;', "'")
-        text = text.replace('&apos;', "'")
+        # Decode HTML entities (again, in case some remain)
+        text = html.unescape(text)
         
         # Clean up whitespace
         text = re.sub(r'\s+', ' ', text).strip()
@@ -148,8 +147,9 @@ def parse_html_description(html_content):
         return text, images
     except Exception as e:
         print(f"Regex fallback error: {e}")
-        # Last resort: return original text without HTML
-        return html_content, []
+        # Last resort: return text without tags
+        text = re.sub(r'<[^>]+>', '', html_content)
+        return text, []
 
 
 class NewsPanel(wx.Panel):
