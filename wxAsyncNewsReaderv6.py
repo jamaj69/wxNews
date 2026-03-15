@@ -235,7 +235,7 @@ class HTMLContentSanitizer(HTMLParser):
             # Keep specific attributes for specific tags
             if attr_lower in keep_attrs:
                 # For images: truncate overly long alt/title text (usually photo credits)
-                if tag_lower == 'img' and attr_lower in ('alt', 'title'):
+                if tag_lower == 'img' and attr_lower in ('alt', 'title') and attr_value:
                     # Remove alt/title if longer than 100 chars (likely a caption/credit)
                     if len(attr_value) > 100:
                         continue  # Skip this attribute
@@ -305,7 +305,7 @@ class HTMLContentSanitizer(HTMLParser):
             attr_lower = attr_name.lower()
             if attr_lower in keep_attrs:
                 # For images: truncate overly long alt/title text (usually photo credits)
-                if tag_lower == 'img' and attr_lower in ('alt', 'title'):
+                if tag_lower == 'img' and attr_lower in ('alt', 'title') and attr_value:
                     # Remove alt/title if longer than 100 chars (likely a caption/credit)
                     if len(attr_value) > 100:
                         continue  # Skip this attribute
