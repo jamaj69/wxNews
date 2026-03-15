@@ -217,8 +217,16 @@ class NewsPanel(wx.Panel):
             # Update status
             self.status_text.SetLabel(f"{len(source_list)} sources loaded")
             
-            # Show welcome message
-            self.ShowWelcomeMessage()
+            # Select all sources by default
+            for i in range(self.sources_checklist.GetCount()):
+                self.sources_checklist.Check(i, True)
+            
+            checked_count = self.sources_checklist.GetCount()
+            self.status_text.SetLabel(f"{checked_count} sources selected")
+            print(f"✓ Auto-selected all {checked_count} sources")
+            
+            # Auto-load checked sources
+            wx.CallAfter(self.LoadCheckedSources)
             
             print(f"✓ Loaded {len(source_list)} sources")
             
@@ -552,6 +560,15 @@ class NewsPanel(wx.Panel):
                     line-height: 1.6;
                     margin-top: 10px;
                 }}
+                .article-content {{
+                    margin-top: 10px;
+                }}
+                .article-content img {{
+                    max-width: 100%;
+                    height: auto;
+                    border-radius: 4px;
+                    margin: 10px 0;
+                }}
                 .article-source {{
                     color: #667eea;
                     font-weight: 600;
@@ -580,8 +597,9 @@ class NewsPanel(wx.Panel):
             title = article[3] if article[3] and article[3].strip() else "Untitled Article"
             description = article[4] if article[4] and article[4].strip() else None
             url = article[5] if article[5] and article[5].strip() else "#"
-            published_at_gmt = article[9] if len(article) > 9 and article[9] else None
+            url_to_image = article[6] if len(article) > 6 and article[6] and article[6].strip() else None
             published_at = article[7] if article[7] else None
+            published_at_gmt = article[9] if len(article) > 9 and article[9] else None
             
             # Get source name
             source_name = self.sources.get(source_id, {}).get('name', source_id)
@@ -605,15 +623,22 @@ class NewsPanel(wx.Panel):
             if not date_str:
                 date_str = "Date unknown"
             
-            # Escape HTML
-            title = title.replace('<', '&lt;').replace('>', '&gt;').replace('"', '&quot;')
-            if description:
-                description = description.replace('<', '&lt;').replace('>', '&gt;')
+            # Escape HTML for title, author, and source name
+            title = title.replace('<', '&lt;').replace('>', '&gt;').replace('\"', '&quot;')
             if author:
                 author = author.replace('<', '&lt;').replace('>', '&gt;')
             source_name = source_name.replace('<', '&lt;').replace('>', '&gt;')
             
-            html += f"""
+            # Check if description contains HTML
+            description_is_html = False
+            if description:
+                description_is_html = '<' in description and '>' in description
+                if not description_is_html:
+                    # Only escape if not HTML
+                    description = description.replace('<', '&lt;').replace('>', '&gt;')
+            
+            # Build article card
+            article_html = f"""
             <div class="article">
                 <div class="article-title">
                     <a href="{url}" target="_blank">{title}</a>
@@ -623,9 +648,24 @@ class NewsPanel(wx.Panel):
                     {f'<span class="article-author">✍️ {author}</span>' if author else ''}
                     <span class="article-date">📅 {date_str}</span>
                 </div>
-                {f'<div class="article-description">{description}</div>' if description else ''}
-            </div>
             """
+            
+            # Add image and description (in div if HTML)
+            if url_to_image or description:
+                if description_is_html:
+                    article_html += '<div class="article-content">'
+                
+                if url_to_image:
+                    article_html += f'<img src="{url_to_image}" alt="Article image" style="max-width: 100%; height: auto; margin: 10px 0; border-radius: 4px;">'
+                
+                if description:
+                    article_html += f'<div class="article-description">{description}</div>'
+                
+                if description_is_html:
+                    article_html += '</div>'
+            
+            article_html += '</div>'
+            html += article_html
         
         html += """
         </body>
@@ -705,6 +745,15 @@ class NewsPanel(wx.Panel):
                     line-height: 1.6;
                     margin-top: 10px;
                 }}
+                .article-content {{
+                    margin-top: 10px;
+                }}
+                .article-content img {{
+                    max-width: 100%;
+                    height: auto;
+                    border-radius: 4px;
+                    margin: 10px 0;
+                }}
                 .article-author {{
                     color: #764ba2;
                     font-weight: 500;
@@ -727,8 +776,9 @@ class NewsPanel(wx.Panel):
             title = article[3] if article[3] and article[3].strip() else "Untitled Article"
             description = article[4] if article[4] and article[4].strip() else None
             url = article[5] if article[5] and article[5].strip() else "#"
-            published_at_gmt = article[9] if len(article) > 9 and article[9] else None
+            url_to_image = article[6] if len(article) > 6 and article[6] and article[6].strip() else None
             published_at = article[7] if article[7] else None
+            published_at_gmt = article[9] if len(article) > 9 and article[9] else None
             
             # Format date - prefer GMT time
             date_str = None
@@ -749,14 +799,21 @@ class NewsPanel(wx.Panel):
             if not date_str:
                 date_str = "Date unknown"
             
-            # Escape HTML
-            title = title.replace('<', '&lt;').replace('>', '&gt;').replace('"', '&quot;')
-            if description:
-                description = description.replace('<', '&lt;').replace('>', '&gt;')
+            # Escape HTML for title and author
+            title = title.replace('<', '&lt;').replace('>', '&gt;').replace('\"', '&quot;')
             if author:
                 author = author.replace('<', '&lt;').replace('>', '&gt;')
             
-            html += f"""
+            # Check if description contains HTML
+            description_is_html = False
+            if description:
+                description_is_html = '<' in description and '>' in description
+                if not description_is_html:
+                    # Only escape if not HTML
+                    description = description.replace('<', '&lt;').replace('>', '&gt;')
+            
+            # Build article card
+            article_html = f"""
             <div class="article">
                 <div class="article-title">
                     <a href="{url}" target="_blank">{title}</a>
@@ -765,9 +822,24 @@ class NewsPanel(wx.Panel):
                     {f'<span class="article-author">✍️ {author}</span>' if author else ''}
                     <span class="article-date">📅 {date_str}</span>
                 </div>
-                {f'<div class="article-description">{description}</div>' if description else ''}
-            </div>
             """
+            
+            # Add image and description (in div if HTML)
+            if url_to_image or description:
+                if description_is_html:
+                    article_html += '<div class="article-content">'
+                
+                if url_to_image:
+                    article_html += f'<img src="{url_to_image}" alt="Article image" style="max-width: 100%; height: auto; margin: 10px 0; border-radius: 4px;">'
+                
+                if description:
+                    article_html += f'<div class="article-description">{description}</div>'
+                
+                if description_is_html:
+                    article_html += '</div>'
+            
+            article_html += '</div>'
+            html += article_html
         
         html += """
         </body>
