@@ -13,6 +13,7 @@ import sys
 import wx 
 import wx.html2
 import webbrowser
+import re
 from datetime import datetime
 
 from wxasync import WxAsyncApp
@@ -44,6 +45,25 @@ def dbOpen():
         pool_pre_ping=True
     )
     return eng
+
+
+def strip_html_tags(text):
+    """Remove all HTML tags from text and decode HTML entities"""
+    if not text:
+        return text
+    # Remove HTML tags
+    text = re.sub(r'<[^>]+>', '', text)
+    # Replace common HTML entities
+    text = text.replace('&nbsp;', ' ')
+    text = text.replace('&amp;', '&')
+    text = text.replace('&lt;', '<')
+    text = text.replace('&gt;', '>')
+    text = text.replace('&quot;', '"')
+    text = text.replace('&#39;', "'")
+    text = text.replace('&apos;', "'")
+    # Remove extra whitespace
+    text = re.sub(r'\s+', ' ', text).strip()
+    return text
 
 
 class NewsPanel(wx.Panel):
@@ -636,36 +656,29 @@ class NewsPanel(wx.Panel):
                 author = author.replace('<', '&lt;').replace('>', '&gt;')
             source_name = source_name.replace('<', '&lt;').replace('>', '&gt;')
             
-            # Check if description contains HTML
-            description_is_html = False
+            # Strip HTML tags from description to prevent structure breaking
             if description:
-                description_is_html = '<' in description and '>' in description
-                if not description_is_html:
-                    # Only escape if not HTML
-                    description = description.replace('<', '&lt;').replace('>', '&gt;')
+                description = strip_html_tags(description)
+                # Escape any remaining special chars
+                description = description.replace('<', '&lt;').replace('>', '&gt;')
             
-            # Build article card
-            article_html = f"""
-            <div class="article">
-                <div class="article-title">
-                    <a href="{url}" target="_blank">{title}</a>
-                </div>
-                <div class="article-meta">
-                    <span class="article-source">🔖 {source_name}</span>
-                    {f'<span class="article-author">✍️ {author}</span>' if author else ''}
-                    <span class="article-date">📅 {date_str}</span>
-                </div>
-            """
+            # Build article card - simple and explicit
+            html += '<div class="article">'
+            html += f'<div class="article-title"><a href="{url}" target="_blank">{title}</a></div>'
+            html += f'<div class="article-meta">'
+            html += f'<span class="article-source">🔖 {source_name}</span>'
+            if author:
+                html += f'<span class="article-author">✍️ {author}</span>'
+            html += f'<span class="article-date">📅 {date_str}</span>'
+            html += '</div>'
             
-            # Add image and description directly (no nested divs)
             if url_to_image:
-                article_html += f'<img src="{url_to_image}" alt="Article image" style="max-width: 100%; width: 100%; height: auto; display: block; margin: 10px 0; border-radius: 4px; clear: both;">'
+                html += f'<img src="{url_to_image}" alt="Article image" style="max-width: 100%; width: 100%; height: auto; display: block; margin: 10px 0; border-radius: 4px; clear: both;">'
             
             if description:
-                article_html += f'<div class="article-description">{description}</div>'
+                html += f'<div class="article-description">{description}</div>'
             
-            article_html += '</div>'
-            html += article_html
+            html += '</div>'  # Close article div
         
         html += """
         </body>
@@ -812,35 +825,28 @@ class NewsPanel(wx.Panel):
             if author:
                 author = author.replace('<', '&lt;').replace('>', '&gt;')
             
-            # Check if description contains HTML
-            description_is_html = False
+            # Strip HTML tags from description to prevent structure breaking
             if description:
-                description_is_html = '<' in description and '>' in description
-                if not description_is_html:
-                    # Only escape if not HTML
-                    description = description.replace('<', '&lt;').replace('>', '&gt;')
+                description = strip_html_tags(description)
+                # Escape any remaining special chars
+                description = description.replace('<', '&lt;').replace('>', '&gt;')
             
-            # Build article card
-            article_html = f"""
-            <div class="article">
-                <div class="article-title">
-                    <a href="{url}" target="_blank">{title}</a>
-                </div>
-                <div class="article-meta">
-                    {f'<span class="article-author">✍️ {author}</span>' if author else ''}
-                    <span class="article-date">📅 {date_str}</span>
-                </div>
-            """
+            # Build article card - simple and explicit
+            html += '<div class="article">'
+            html += f'<div class="article-title"><a href="{url}" target="_blank">{title}</a></div>'
+            html += f'<div class="article-meta">'
+            if author:
+                html += f'<span class="article-author">✍️ {author}</span>'
+            html += f'<span class="article-date">📅 {date_str}</span>'
+            html += '</div>'
             
-            # Add image and description directly (no nested divs)
             if url_to_image:
-                article_html += f'<img src="{url_to_image}" alt="Article image" style="max-width: 100%; width: 100%; height: auto; display: block; margin: 10px 0; border-radius: 4px; clear: both;">'
+                html += f'<img src="{url_to_image}" alt="Article image" style="max-width: 100%; width: 100%; height: auto; display: block; margin: 10px 0; border-radius: 4px; clear: both;">'
             
             if description:
-                article_html += f'<div class="article-description">{description}</div>'
+                html += f'<div class="article-description">{description}</div>'
             
-            article_html += '</div>'
-            html += article_html
+            html += '</div>'  # Close article div
         
         html += """
         </body>
