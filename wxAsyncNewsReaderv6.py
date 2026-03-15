@@ -14,6 +14,7 @@ import wx
 import wx.html2
 import webbrowser
 import re
+from html.parser import HTMLParser
 from datetime import datetime
 
 from wxasync import WxAsyncApp
@@ -47,23 +48,76 @@ def dbOpen():
     return eng
 
 
-def strip_html_tags(text):
-    """Remove all HTML tags from text and decode HTML entities"""
-    if not text:
-        return text
-    # Remove HTML tags
-    text = re.sub(r'<[^>]+>', '', text)
-    # Replace common HTML entities
-    text = text.replace('&nbsp;', ' ')
-    text = text.replace('&amp;', '&')
-    text = text.replace('&lt;', '<')
-    text = text.replace('&gt;', '>')
-    text = text.replace('&quot;', '"')
-    text = text.replace('&#39;', "'")
-    text = text.replace('&apos;', "'")
-    # Remove extra whitespace
-    text = re.sub(r'\s+', ' ', text).strip()
-    return text
+class HTMLContentExtractor(HTMLParser):
+    """Parse HTML descriptions from RSS feeds and extract text and images"""
+    
+    def __init__(self):
+        super().__init__()
+        self.text_parts = []
+        self.images = []
+        self.in_script = False
+        self.in_style = False
+        
+    def handle_starttag(self, tag, attrs):
+        if tag == 'script':
+            self.in_script = True
+        elif tag == 'style':
+            self.in_style = True
+        elif tag == 'img':
+            # Extract image src
+            for attr_name, attr_value in attrs:
+                if attr_name == 'src' and attr_value:
+                    self.images.append(attr_value)
+        elif tag == 'br':
+            self.text_parts.append(' ')
+        elif tag in ['p', 'div', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6']:
+            # Add space before block elements
+            if self.text_parts and self.text_parts[-1] != ' ':
+                self.text_parts.append(' ')
+    
+    def handle_endtag(self, tag):
+        if tag == 'script':
+            self.in_script = False
+        elif tag == 'style':
+            self.in_style = False
+        elif tag in ['p', 'div', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6']:
+            # Add space after block elements
+            if self.text_parts and self.text_parts[-1] != ' ':
+                self.text_parts.append(' ')
+    
+    def handle_data(self, data):
+        if not self.in_script and not self.in_style:
+            # Add text content
+            text = data.strip()
+            if text:
+                self.text_parts.append(text)
+    
+    def get_content(self):
+        """Return extracted text and images"""
+        # Join text parts and clean up whitespace
+        text = ' '.join(self.text_parts)
+        text = re.sub(r'\s+', ' ', text).strip()
+        return text, self.images
+
+
+def parse_html_description(html_content):
+    """Parse HTML description and extract text and images"""
+    if not html_content:
+        return "", []
+    
+    # Check if content has HTML tags
+    if '<' not in html_content or '>' not in html_content:
+        return html_content, []
+    
+    parser = HTMLContentExtractor()
+    try:
+        parser.feed(html_content)
+        return parser.get_content()
+    except:
+        # If parsing fails, strip tags and return
+        text = re.sub(r'<[^>]+>', '', html_content)
+        text = re.sub(r'\s+', ' ', text).strip()
+        return text, []
 
 
 class NewsPanel(wx.Panel):
@@ -656,11 +710,13 @@ class NewsPanel(wx.Panel):
                 author = author.replace('<', '&lt;').replace('>', '&gt;')
             source_name = source_name.replace('<', '&lt;').replace('>', '&gt;')
             
-            # Strip HTML tags from description to prevent structure breaking
+            # Parse HTML description to extract text and images
+            description_text = ""
+            description_images = []
             if description:
-                description = strip_html_tags(description)
-                # Escape any remaining special chars
-                description = description.replace('<', '&lt;').replace('>', '&gt;')
+                description_text, description_images = parse_html_description(description)
+                # Escape the extracted text
+                description_text = description_text.replace('<', '&lt;').replace('>', '&gt;')
             
             # Build article card - simple and explicit
             html += '<div class="article">'
@@ -672,11 +728,16 @@ class NewsPanel(wx.Panel):
             html += f'<span class="article-date">📅 {date_str}</span>'
             html += '</div>'
             
+            # Show main article image if available
             if url_to_image:
                 html += f'<img src="{url_to_image}" alt="Article image" style="max-width: 100%; width: 100%; height: auto; display: block; margin: 10px 0; border-radius: 4px; clear: both;">'
             
-            if description:
-                html += f'<div class="article-description">{description}</div>'
+            # Show images from description HTML
+            for img_url in description_images:
+                html += f'<img src="{img_url}" alt="Description image" style="max-width: 100%; width: 100%; height: auto; display: block; margin: 10px 0; border-radius: 4px; clear: both;">'
+            
+            if description_text:
+                html += f'<div class="article-description">{description_text}</div>'
             
             html += '</div>'  # Close article div
         
@@ -825,11 +886,13 @@ class NewsPanel(wx.Panel):
             if author:
                 author = author.replace('<', '&lt;').replace('>', '&gt;')
             
-            # Strip HTML tags from description to prevent structure breaking
+            # Parse HTML description to extract text and images
+            description_text = ""
+            description_images = []
             if description:
-                description = strip_html_tags(description)
-                # Escape any remaining special chars
-                description = description.replace('<', '&lt;').replace('>', '&gt;')
+                description_text, description_images = parse_html_description(description)
+                # Escape the extracted text
+                description_text = description_text.replace('<', '&lt;').replace('>', '&gt;')
             
             # Build article card - simple and explicit
             html += '<div class="article">'
@@ -840,11 +903,16 @@ class NewsPanel(wx.Panel):
             html += f'<span class="article-date">📅 {date_str}</span>'
             html += '</div>'
             
+            # Show main article image if available
             if url_to_image:
                 html += f'<img src="{url_to_image}" alt="Article image" style="max-width: 100%; width: 100%; height: auto; display: block; margin: 10px 0; border-radius: 4px; clear: both;">'
             
-            if description:
-                html += f'<div class="article-description">{description}</div>'
+            # Show images from description HTML
+            for img_url in description_images:
+                html += f'<img src="{img_url}" alt="Description image" style="max-width: 100%; width: 100%; height: auto; display: block; margin: 10px 0; border-radius: 4px; clear: both;">'
+            
+            if description_text:
+                html += f'<div class="article-description">{description_text}</div>'
             
             html += '</div>'  # Close article div
         
