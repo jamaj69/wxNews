@@ -9,6 +9,7 @@ import aiohttp
 import aiosqlite
 import sys
 import html
+import argparse
 from html.parser import HTMLParser
 from decouple import config
 import logging
@@ -502,6 +503,12 @@ async def process_batch(
 async def main():
     """Main async function."""
     
+    # Parse command-line arguments
+    parser = argparse.ArgumentParser(description='Re-fetch truncated articles from URLs')
+    parser.add_argument('-y', '--yes', action='store_true',
+                        help='Skip confirmation prompt and start immediately')
+    args = parser.parse_args()
+    
     print(f"📊 Connecting to database: {DB_PATH}\n")
     
     # Find truncated articles
@@ -515,11 +522,12 @@ async def main():
         print("✅ No truncated articles found!")
         return 0
     
-    # Ask for confirmation
-    response = input(f"Re-fetch and update these {total} articles? [y/N]: ").strip().lower()
-    if response != 'y':
-        print("❌ Cancelled")
-        return 1
+    # Ask for confirmation unless --yes flag is provided
+    if not args.yes:
+        response = input(f"Re-fetch and update these {total} articles? [y/N]: ").strip().lower()
+        if response != 'y':
+            print("❌ Cancelled")
+            return 1
     
     print(f"\n🚀 Starting async re-fetch process...")
     print(f"⚙️  Settings: {CONCURRENT_REQUESTS} concurrent requests, {REQUEST_TIMEOUT}s timeout per request\n")
