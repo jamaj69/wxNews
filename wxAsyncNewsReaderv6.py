@@ -657,17 +657,12 @@ class NewsPanel(wx.Panel):
                 </div>
             """
             
-            # Add image and description (always inside a content div)
-            if url_to_image or description:
-                article_html += '<div class="article-content">'
-                
-                if url_to_image:
-                    article_html += f'<img src="{url_to_image}" alt="Article image" style="max-width: 100%; height: auto; display: block; margin: 10px 0; border-radius: 4px;">'
-                
-                if description:
-                    article_html += f'<div class="article-description">{description}</div>'
-                
-                article_html += '</div>'
+            # Add image and description directly (no nested divs)
+            if url_to_image:
+                article_html += f'<img src="{url_to_image}" alt="Article image" style="max-width: 100%; width: 100%; height: auto; display: block; margin: 10px 0; border-radius: 4px; clear: both;">'
+            
+            if description:
+                article_html += f'<div class="article-description">{description}</div>'
             
             article_html += '</div>'
             html += article_html
@@ -837,17 +832,12 @@ class NewsPanel(wx.Panel):
                 </div>
             """
             
-            # Add image and description (always inside a content div)
-            if url_to_image or description:
-                article_html += '<div class="article-content">'
-                
-                if url_to_image:
-                    article_html += f'<img src="{url_to_image}" alt="Article image" style="max-width: 100%; height: auto; display: block; margin: 10px 0; border-radius: 4px;">'
-                
-                if description:
-                    article_html += f'<div class="article-description">{description}</div>'
-                
-                article_html += '</div>'
+            # Add image and description directly (no nested divs)
+            if url_to_image:
+                article_html += f'<img src="{url_to_image}" alt="Article image" style="max-width: 100%; width: 100%; height: auto; display: block; margin: 10px 0; border-radius: 4px; clear: both;">'
+            
+            if description:
+                article_html += f'<div class="article-description">{description}</div>'
             
             article_html += '</div>'
             html += article_html
