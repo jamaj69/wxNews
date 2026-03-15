@@ -109,15 +109,47 @@ def parse_html_description(html_content):
     if '<' not in html_content or '>' not in html_content:
         return html_content, []
     
+    # Try parsing with HTMLParser
     parser = HTMLContentExtractor()
     try:
         parser.feed(html_content)
-        return parser.get_content()
-    except:
-        # If parsing fails, strip tags and return
-        text = re.sub(r'<[^>]+>', '', html_content)
+        text, images = parser.get_content()
+        # If we got text, return it
+        if text:
+            return text, images
+    except Exception as e:
+        # Log error and continue to fallback
+        print(f"HTML parsing error: {e}")
+    
+    # Fallback: strip tags with regex
+    try:
+        # Remove script and style elements completely
+        text = re.sub(r'<script[^>]*>.*?</script>', '', html_content, flags=re.DOTALL | re.IGNORECASE)
+        text = re.sub(r'<style[^>]*>.*?</style>', '', text, flags=re.DOTALL | re.IGNORECASE)
+        
+        # Extract images before removing tags
+        images = re.findall(r'<img[^>]+src=["\']([^"\']+)["\']', html_content, re.IGNORECASE)
+        
+        # Remove all HTML tags
+        text = re.sub(r'<[^>]+>', '', text)
+        
+        # Decode HTML entities
+        text = text.replace('&nbsp;', ' ')
+        text = text.replace('&amp;', '&')
+        text = text.replace('&lt;', '<')
+        text = text.replace('&gt;', '>')
+        text = text.replace('&quot;', '"')
+        text = text.replace('&#39;', "'")
+        text = text.replace('&apos;', "'")
+        
+        # Clean up whitespace
         text = re.sub(r'\s+', ' ', text).strip()
-        return text, []
+        
+        return text, images
+    except Exception as e:
+        print(f"Regex fallback error: {e}")
+        # Last resort: return original text without HTML
+        return html_content, []
 
 
 class NewsPanel(wx.Panel):
