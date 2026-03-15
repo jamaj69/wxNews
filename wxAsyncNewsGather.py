@@ -149,7 +149,7 @@ class HTMLContentSanitizer(HTMLParser):
         for attr, value in attrs:
             if attr not in self.REMOVE_ATTRS and (not allowed_attrs or attr in allowed_attrs):
                 # Filter out overly long alt attributes
-                if attr == 'alt' and len(value) > 100:
+                if attr == 'alt' and value and len(value) > 100:
                     continue
                 filtered_attrs.append((attr, value))
         
@@ -195,7 +195,7 @@ class HTMLContentSanitizer(HTMLParser):
         
         for attr, value in attrs:
             if attr not in self.REMOVE_ATTRS and (not allowed_attrs or attr in allowed_attrs):
-                if attr == 'alt' and len(value) > 100:
+                if attr == 'alt' and value and len(value) > 100:
                     continue
                 filtered_attrs.append((attr, value))
         

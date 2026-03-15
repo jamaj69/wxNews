@@ -23,7 +23,7 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # Database configuration
-DB_PATH = config('DB_PATH', default='predator_news.db')
+DB_PATH = str(config('DB_PATH', default='predator_news.db'))
 
 # Concurrent processing settings
 CONCURRENT_REQUESTS = 20  # Process 20 articles at a time
@@ -95,7 +95,8 @@ class HTMLContentSanitizer(HTMLParser):
                     # Filter long alt/title texts (e.g., photo captions)
                     if attr_name in {'alt', 'title'} and attr_value and len(attr_value) > 100:
                         continue
-                    filtered_attrs.append(f'{attr_name}="{html.escape(attr_value, quote=True)}"')
+                    if attr_value is not None:
+                        filtered_attrs.append(f'{attr_name}="{html.escape(attr_value, quote=True)}"')
             
             # Build the tag
             if filtered_attrs:
@@ -487,15 +488,19 @@ async def process_batch(
         if isinstance(result, Exception):
             failed_count += 1
             logger.error(f"[{progress}/{total}] ❌ Exception: {str(result)[:50]}")
-        elif result['updated']:
-            success_count += 1
-            logger.info(f"[{progress}/{total}] ✅ {result['title']}")
-        elif result['success']:
-            logger.info(f"[{progress}/{total}] ℹ️  {result['title']} (no changes)")
+        elif isinstance(result, dict):
+            if result['updated']:
+                success_count += 1
+                logger.info(f"[{progress}/{total}] ✅ {result['title']}")
+            elif result['success']:
+                logger.info(f"[{progress}/{total}] ℹ️  {result['title']} (no changes)")
+            else:
+                failed_count += 1
+                error_msg = result.get('error', 'Unknown')
+                logger.warning(f"[{progress}/{total}] ❌ {result['title']} - {error_msg}")
         else:
             failed_count += 1
-            error_msg = result.get('error', 'Unknown')
-            logger.warning(f"[{progress}/{total}] ❌ {result['title']} - {error_msg}")
+            logger.error(f"[{progress}/{total}] ❌ Unexpected result type: {type(result)}")
     
     return success_count, failed_count
 
