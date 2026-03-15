@@ -1,3 +1,4 @@
 #!/usr/bin/env bash
-wxAsyncNewsReaderv6.py &
+cd /home/jamaj/src/python/pyTweeter
+/home/jamaj/src/python/pyTweeter/wxAsyncNewsReaderv6.py &
 
