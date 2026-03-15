@@ -565,8 +565,8 @@ class NewsPanel(wx.Panel):
                     clear: both;
                     display: block;
                     width: 100%;
-                }
-                .article-content img {
+                }}
+                .article-content img {{
                     max-width: 100%;
                     width: 100%;
                     height: auto;
