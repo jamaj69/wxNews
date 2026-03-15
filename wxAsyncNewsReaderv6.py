@@ -728,13 +728,14 @@ class NewsPanel(wx.Panel):
             html += f'<span class="article-date">📅 {date_str}</span>'
             html += '</div>'
             
-            # Show main article image if available
-            if url_to_image:
-                html += f'<img src="{url_to_image}" alt="Article image" style="max-width: 100%; width: 100%; height: auto; display: block; margin: 10px 0; border-radius: 4px; clear: both;">'
+            # Show main article image if available - with error handling
+            if url_to_image and url_to_image.startswith(('http://', 'https://')):
+                html += f'<img src="{url_to_image}" alt="Article image" onerror="this.style.display=\'none\'" style="max-width: 100%; width: 100%; height: auto; display: block; margin: 10px 0; border-radius: 4px; clear: both;">'
             
-            # Show images from description HTML
+            # Show images from description HTML - with validation
             for img_url in description_images:
-                html += f'<img src="{img_url}" alt="Description image" style="max-width: 100%; width: 100%; height: auto; display: block; margin: 10px 0; border-radius: 4px; clear: both;">'
+                if img_url and img_url.strip() and img_url.startswith(('http://', 'https://')):
+                    html += f'<img src="{img_url}" alt="Description image" onerror="this.style.display=\'none\'" style="max-width: 100%; width: 100%; height: auto; display: block; margin: 10px 0; border-radius: 4px; clear: both;">'
             
             if description_text:
                 html += f'<div class="article-description">{description_text}</div>'
@@ -903,13 +904,14 @@ class NewsPanel(wx.Panel):
             html += f'<span class="article-date">📅 {date_str}</span>'
             html += '</div>'
             
-            # Show main article image if available
-            if url_to_image:
-                html += f'<img src="{url_to_image}" alt="Article image" style="max-width: 100%; width: 100%; height: auto; display: block; margin: 10px 0; border-radius: 4px; clear: both;">'
+            # Show main article image if available - with error handling
+            if url_to_image and url_to_image.startswith(('http://', 'https://')):
+                html += f'<img src="{url_to_image}" alt="Article image" onerror="this.style.display=\'none\'" style="max-width: 100%; width: 100%; height: auto; display: block; margin: 10px 0; border-radius: 4px; clear: both;">'
             
-            # Show images from description HTML
+            # Show images from description HTML - with validation
             for img_url in description_images:
-                html += f'<img src="{img_url}" alt="Description image" style="max-width: 100%; width: 100%; height: auto; display: block; margin: 10px 0; border-radius: 4px; clear: both;">'
+                if img_url and img_url.strip() and img_url.startswith(('http://', 'https://')):
+                    html += f'<img src="{img_url}" alt="Description image" onerror="this.style.display=\'none\'" style="max-width: 100%; width: 100%; height: auto; display: block; margin: 10px 0; border-radius: 4px; clear: both;">'
             
             if description_text:
                 html += f'<div class="article-description">{description_text}</div>'
