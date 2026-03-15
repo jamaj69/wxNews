@@ -20,7 +20,9 @@ def dbOpen():
     return create_engine(f'sqlite:///{db_path}', connect_args={'timeout': 30, 'check_same_thread': False}, pool_pre_ping=True)
 
 # Load the sanitizer from the main file
-exec(open('wxAsyncNewsReaderv6.py').read().split('class NewsPanel')[0])
+_globals = {}
+exec(open('wxAsyncNewsReaderv6.py').read().split('class NewsPanel')[0], _globals)
+sanitize_html_content = _globals['sanitize_html_content']
 
 # Get a sample article
 engine = dbOpen()
