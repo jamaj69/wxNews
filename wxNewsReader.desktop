@@ -1,0 +1,12 @@
+[Desktop Entry]
+Version=1.0
+Type=Application
+Name=wxNewsReader
+Comment=wxNewsReader
+TryExec=/home/jamaj/src/python/pyTweeter/wxnews.sh
+Exec=/home/jamaj/src/python/pyTweeter/wxnews.sh
+Icon=/home/jamaj/Downloads/finanx-12c-0.2.8/icon.png
+Terminal=false
+Path=/home/jamaj/src/python/pyTweeter/
+GenericName=wxNewsReader
+StartupNotify=false
