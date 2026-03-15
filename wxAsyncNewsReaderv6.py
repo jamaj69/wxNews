@@ -826,10 +826,10 @@ class NewsPanel(wx.Panel):
             con = eng.connect()
             
             # Load articles from all checked sources
-            # Filter out articles scheduled more than 24 hours in the future
+            # Filter out articles scheduled more than 24 hours in the future (keep NULL dates)
             stm = select(gm_articles).where(
                 gm_articles.c.id_source.in_(checked_source_ids),
-                gm_articles.c.published_at_gmt <= func.datetime('now', '+1 day')
+                (gm_articles.c.published_at_gmt.is_(None)) | (gm_articles.c.published_at_gmt <= func.datetime('now', '+1 day'))
             ).order_by(gm_articles.c.published_at_gmt.desc().nullslast()).limit(200)
             
             articles = con.execute(stm).fetchall()
@@ -872,10 +872,10 @@ class NewsPanel(wx.Panel):
             con = eng.connect()
             
             # Load articles for this source, prefer published_at_gmt
-            # Filter out articles scheduled more than 24 hours in the future
+            # Filter out articles scheduled more than 24 hours in the future (keep NULL dates)
             stm = select(gm_articles).where(
                 gm_articles.c.id_source == source_id,
-                gm_articles.c.published_at_gmt <= func.datetime('now', '+1 day')
+                (gm_articles.c.published_at_gmt.is_(None)) | (gm_articles.c.published_at_gmt <= func.datetime('now', '+1 day'))
             ).order_by(gm_articles.c.published_at_gmt.desc().nullslast()).limit(50)
             
             articles = con.execute(stm).fetchall()
