@@ -23,7 +23,7 @@ from datetime import datetime
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from decouple import config
-from sqlalchemy import create_engine, MetaData, Table, select, update, func
+from sqlalchemy import create_engine, MetaData, Table, select, update, func, delete
 
 # Import sanitization from article_fetcher
 from article_fetcher import ArticleContentFetcher
@@ -57,7 +57,7 @@ def find_malformed_urls(engine, articles_table):
     ).where(
         # Double slashes in path
         articles_table.c.url.like('%://%//%')
-    )
+    ).order_by(articles_table.c.id_article)  # Process oldest first
     
     with engine.connect() as conn:
         results = conn.execute(stmt).fetchall()
@@ -67,13 +67,101 @@ def find_malformed_urls(engine, articles_table):
     return results
 
 
-def sanitize_and_update(engine, articles_table, malformed_articles, dry_run=False):
-    """Sanitize URLs and update database"""
+def find_and_remove_duplicates(engine, articles_table, malformed_articles, dry_run=False):
+    """
+    Find duplicate target URLs and remove duplicates.
+    Checks against ALL existing URLs in database, not just current batch.
+    
+    Returns: Set of article IDs that are safe to update.
+    """
+    from collections import defaultdict
+    
+    logger.info("🔍 Detecting duplicate target URLs...")
+    
+    # First, get ALL existing URLs from database
+    logger.info("  Loading existing URLs from database...")
+    existing_urls = {}  # url -> id_article (for already cleaned URLs)
+    with engine.connect() as conn:
+        stmt = select(articles_table.c.id_article, articles_table.c.url)
+        results = conn.execute(stmt).fetchall()
+        for row in results:
+            existing_urls[row.url] = row.id_article
+    
+    logger.info(f"  Loaded {len(existing_urls)} existing URLs")
+    
+    # Now check which sanitized URLs would conflict
+    fetcher = ArticleContentFetcher()
+    conflicts = []  # Articles that would create duplicates
+    safe_ids = set()
+    
+    for article in malformed_articles:
+        id_article = article.id_article
+        original_url = article.url
+        sanitized = fetcher.sanitize_url(original_url)
+        
+        # Check if sanitized URL already exists in database
+        if sanitized in existing_urls and existing_urls[sanitized] != id_article:
+            # This sanitized URL already exists (from previous run)
+            # Mark this article for deletion
+            conflicts.append((id_article, original_url, sanitized, existing_urls[sanitized]))
+        else:
+            # Safe to update
+            safe_ids.add(id_article)
+            # Add to existing URLs to prevent duplicates within this batch
+            existing_urls[sanitized] = id_article
+    
+    # Report findings
+    if conflicts:
+        logger.info("")
+        logger.info("=" * 60)
+        logger.info(f"🔍 DUPLICATE DETECTION")
+        logger.info("=" * 60)
+        logger.info(f"  Found: {len(conflicts)} articles with URLs that already exist")
+        logger.info(f"  Safe to update: {len(safe_ids)} articles")
+        logger.info("")
+        
+        # Show examples
+        for i, (dup_id, orig_url, target_url, existing_id) in enumerate(conflicts[:3]):
+            logger.info(f"  Example #{i+1}:")
+            logger.info(f"    Duplicate ID: {dup_id}")
+            logger.info(f"    Existing ID:  {existing_id}")
+            logger.info(f"    Target URL:   {target_url[:70]}...")
+        
+        if len(conflicts) > 3:
+            logger.info(f"  ... and {len(conflicts) - 3} more")
+        
+        logger.info("")
+        logger.info(f"  Action: {'WOULD DELETE' if dry_run else 'DELETING'} duplicate articles")
+        logger.info("=" * 60)
+        logger.info("")
+        
+        # Delete duplicate articles
+        if not dry_run:
+            duplicate_ids = [conf[0] for conf in conflicts]
+            stmt = delete(articles_table).where(
+                articles_table.c.id_article.in_(duplicate_ids)
+            )
+            
+            with engine.connect() as conn:
+                result = conn.execute(stmt)
+                conn.commit()
+                logger.info(f"✅ Deleted {result.rowcount} duplicate articles")
+                logger.info("")
+    else:
+        logger.info("✅ No duplicates found")
+        logger.info("")
+    
+    return safe_ids
+
+
+def sanitize_and_update(engine, articles_table, malformed_articles, safe_ids, dry_run=False):
+    """Sanitize URLs and update database (only safe IDs without duplicates)"""
     logger.info("🧹 Starting URL sanitization...")
     
     updated_count = 0
     unchanged_count = 0
     error_count = 0
+    skipped_count = 0
     
     fetcher = ArticleContentFetcher()
     
@@ -81,6 +169,11 @@ def sanitize_and_update(engine, articles_table, malformed_articles, dry_run=Fals
         id_article = article.id_article
         original_url = article.url
         title = article.title
+        
+        # Skip if this was marked as duplicate
+        if id_article not in safe_ids:
+            skipped_count += 1
+            continue
         
         try:
             # Sanitize URL
@@ -108,7 +201,7 @@ def sanitize_and_update(engine, articles_table, malformed_articles, dry_run=Fals
             logger.error(f"  ❌ Error processing article {id_article}: {e}")
             error_count += 1
     
-    return updated_count, unchanged_count, error_count
+    return updated_count, unchanged_count, error_count, skipped_count
 
 
 def main():
@@ -150,22 +243,29 @@ def main():
         malformed_articles = malformed_articles[:args.limit]
         logger.info(f"📋 Processing first {args.limit} articles (limit applied)")
     
+    # Find and remove duplicates
+    safe_ids = find_and_remove_duplicates(engine, articles_table, malformed_articles, args.dry_run)
+    
     # Sanitize and update
     if args.dry_run:
         logger.info("🔍 DRY RUN MODE - No changes will be made")
     
-    updated, unchanged, errors = sanitize_and_update(
+    updated, unchanged, errors, skipped = sanitize_and_update(
         engine, 
         articles_table, 
         malformed_articles,
+        safe_ids,
         dry_run=args.dry_run
     )
     
     # Report
+    logger.info("")
     logger.info("=" * 60)
     logger.info("📈 SANITIZATION REPORT")
     logger.info("=" * 60)
     logger.info(f"  Total scanned: {len(malformed_articles)}")
+    if skipped > 0:
+        logger.info(f"  🗑️  Duplicates removed: {skipped}")
     logger.info(f"  ✅ Updated: {updated}")
     logger.info(f"  ⏭️  Unchanged: {unchanged}")
     logger.info(f"  ❌ Errors: {errors}")
