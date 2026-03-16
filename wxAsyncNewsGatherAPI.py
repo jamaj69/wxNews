@@ -12,7 +12,7 @@ import sys
 import os
 import time
 from contextlib import asynccontextmanager
-from typing import Optional, List
+from typing import Optional, List, cast
 
 from fastapi import FastAPI, Query, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
@@ -194,6 +194,10 @@ async def get_articles(
     if db_engine is None or gm_articles is None:
         raise HTTPException(status_code=503, detail="Database not initialized")
     
+    # Type narrowing with local variables
+    engine = cast(Engine, db_engine)
+    articles_table = cast(Table, gm_articles)
+    
     try:
         # Get current time for filtering future timestamps
         import time
@@ -201,36 +205,36 @@ async def get_articles(
         
         # Build query
         query = select(
-            gm_articles.c.id_article,
-            gm_articles.c.id_source,
-            gm_articles.c.author,
-            gm_articles.c.title,
-            gm_articles.c.description,
-            gm_articles.c.url,
-            gm_articles.c.urlToImage,
-            gm_articles.c.publishedAt,
-            gm_articles.c.published_at_gmt,
-            gm_articles.c.inserted_at_ms
+            articles_table.c.id_article,
+            articles_table.c.id_source,
+            articles_table.c.author,
+            articles_table.c.title,
+            articles_table.c.description,
+            articles_table.c.url,
+            articles_table.c.urlToImage,
+            articles_table.c.publishedAt,
+            articles_table.c.published_at_gmt,
+            articles_table.c.inserted_at_ms
         ).where(
-            gm_articles.c.inserted_at_ms > since
+            articles_table.c.inserted_at_ms > since
         ).where(
             # Filter future inserted_at_ms timestamps (data integrity protection)
-            gm_articles.c.inserted_at_ms <= current_time_ms
+            articles_table.c.inserted_at_ms <= current_time_ms
         ).where(
-            (gm_articles.c.published_at_gmt.is_(None)) | 
-            (gm_articles.c.published_at_gmt <= func.datetime('now', '+1 day'))
+            (articles_table.c.published_at_gmt.is_(None)) | 
+            (articles_table.c.published_at_gmt <= func.datetime('now', '+1 day'))
         )
         
         # Add source filter if provided
         if sources:
             source_list = [s.strip() for s in sources.split(',') if s.strip()]
             if source_list:
-                query = query.where(gm_articles.c.id_source.in_(source_list))
+                query = query.where(articles_table.c.id_source.in_(source_list))
         
-        query = query.order_by(gm_articles.c.inserted_at_ms.desc()).limit(limit)
+        query = query.order_by(articles_table.c.inserted_at_ms.desc()).limit(limit)
         
         # Execute query
-        with db_engine.connect() as conn:
+        with engine.connect() as conn:
             result = conn.execute(query)
             rows = result.fetchall()
         
@@ -272,15 +276,27 @@ async def get_latest_timestamp():
     if db_engine is None or gm_articles is None:
         raise HTTPException(status_code=503, detail="Database not initialized")
     
+    # Type narrowing with local variables
+    engine = cast(Engine, db_engine)
+    articles_table = cast(Table, gm_articles)
+    
     try:
-        with db_engine.connect() as conn:
+        with engine.connect() as conn:
             result = conn.execute(
                 select(
-                    func.max(gm_articles.c.inserted_at_ms).label('latest_ts'),
+                    func.max(articles_table.c.inserted_at_ms).label('latest_ts'),
                     func.count().label('total')
-                ).where(gm_articles.c.inserted_at_ms.isnot(None))
+                ).where(articles_table.c.inserted_at_ms.isnot(None))
             )
             row = result.fetchone()
+        
+        if row is None:
+            return {
+                'success': True,
+                'latest_timestamp': 0,
+                'total_articles': 0,
+                'timestamp': int(time.time() * 1000)
+            }
         
         return {
             'success': True,
@@ -298,27 +314,32 @@ async def get_sources():
     if db_engine is None or gm_articles is None or gm_sources is None:
         raise HTTPException(status_code=503, detail="Database not initialized")
     
+    # Type narrowing with local variables
+    engine = cast(Engine, db_engine)
+    articles_table = cast(Table, gm_articles)
+    sources_table = cast(Table, gm_sources)
+    
     try:
         query = select(
-            gm_sources.c.id_source,
-            gm_sources.c.name,
-            gm_sources.c.category,
-            gm_sources.c.language,
-            func.count(gm_articles.c.id_article).label('article_count')
+            sources_table.c.id_source,
+            sources_table.c.name,
+            sources_table.c.category,
+            sources_table.c.language,
+            func.count(articles_table.c.id_article).label('article_count')
         ).select_from(
-            gm_sources.outerjoin(
-                gm_articles,
-                gm_sources.c.id_source == gm_articles.c.id_source
+            sources_table.outerjoin(
+                articles_table,
+                sources_table.c.id_source == articles_table.c.id_source
             )
         ).group_by(
-            gm_sources.c.id_source
+            sources_table.c.id_source
         ).having(
-            func.count(gm_articles.c.id_article) > 0
+            func.count(articles_table.c.id_article) > 0
         ).order_by(
-            gm_sources.c.name
+            sources_table.c.name
         )
         
-        with db_engine.connect() as conn:
+        with engine.connect() as conn:
             result = conn.execute(query)
             rows = result.fetchall()
         
@@ -344,19 +365,27 @@ async def get_sources():
 @app.get("/api/stats")
 async def get_stats():
     """Get collection statistics"""
+    if db_engine is None or gm_articles is None or gm_sources is None:
+        raise HTTPException(status_code=503, detail="Database not initialized")
+    
+    # Type narrowing with local variables
+    engine = cast(Engine, db_engine)
+    articles_table = cast(Table, gm_articles)
+    sources_table = cast(Table, gm_sources)
+    
     try:
-        with db_engine.connect() as conn:
+        with engine.connect() as conn:
             # Total articles
             total_result = conn.execute(
-                select(func.count()).select_from(gm_articles)
+                select(func.count()).select_from(articles_table)
             )
             total_articles = total_result.scalar()
             
             # Articles in last 24 hours
             yesterday_ts = int((time.time() - 86400) * 1000)
             recent_result = conn.execute(
-                select(func.count()).select_from(gm_articles).where(
-                    gm_articles.c.inserted_at_ms > yesterday_ts
+                select(func.count()).select_from(articles_table).where(
+                    articles_table.c.inserted_at_ms > yesterday_ts
                 )
             )
             articles_24h = recent_result.scalar()
@@ -364,33 +393,33 @@ async def get_stats():
             # Articles in last hour
             hour_ago_ts = int((time.time() - 3600) * 1000)
             hour_result = conn.execute(
-                select(func.count()).select_from(gm_articles).where(
-                    gm_articles.c.inserted_at_ms > hour_ago_ts
+                select(func.count()).select_from(articles_table).where(
+                    articles_table.c.inserted_at_ms > hour_ago_ts
                 )
             )
             articles_1h = hour_result.scalar()
             
             # Total sources
             sources_result = conn.execute(
-                select(func.count()).select_from(gm_sources)
+                select(func.count()).select_from(sources_table)
             )
             total_sources = sources_result.scalar()
             
             # Top sources by article count (last 24h)
             top_sources_result = conn.execute(
                 select(
-                    gm_articles.c.id_source,
-                    gm_sources.c.name,
+                    articles_table.c.id_source,
+                    sources_table.c.name,
                     func.count().label('count')
                 ).select_from(
-                    gm_articles.join(
-                        gm_sources,
-                        gm_articles.c.id_source == gm_sources.c.id_source
+                    articles_table.join(
+                        sources_table,
+                        articles_table.c.id_source == sources_table.c.id_source
                     )
                 ).where(
-                    gm_articles.c.inserted_at_ms > yesterday_ts
+                    articles_table.c.inserted_at_ms > yesterday_ts
                 ).group_by(
-                    gm_articles.c.id_source
+                    articles_table.c.id_source
                 ).order_by(
                     text('count DESC')
                 ).limit(10)
