@@ -18,6 +18,10 @@ import re
 import html
 from html.parser import HTMLParser
 from datetime import datetime
+import requests
+import json
+import time
+from threading import Thread
 
 from wxasync import WxAsyncApp
 from asyncio.events import get_event_loop
@@ -28,6 +32,10 @@ from sqlalchemy import (create_engine, Table, Column, Integer,
 
 # Load credentials from environment
 from decouple import config
+
+# API Configuration
+API_URL = config('NEWS_API_URL', default='http://localhost:8765')
+POLL_INTERVAL_MS = int(config('NEWS_POLL_INTERVAL_MS', default=30000))  # 30 seconds
 
 
 def dbCredentials():
@@ -48,6 +56,67 @@ def dbOpen():
         pool_pre_ping=True
     )
     return eng
+
+
+class NewsAPIClient:
+    """Client for polling new articles from FastAPI server"""
+    
+    def __init__(self, api_url=API_URL):
+        self.api_url = api_url
+        self.last_timestamp = 0
+        self.enabled = False
+        
+    def get_initial_timestamp(self):
+        """Get initial sync point from API"""
+        try:
+            response = requests.get(
+                f"{self.api_url}/api/latest_timestamp",
+                timeout=5
+            )
+            if response.status_code == 200:
+                data = response.json()
+                self.last_timestamp = data.get('latest_timestamp', 0)
+                self.enabled = True
+                return self.last_timestamp
+        except Exception as e:
+            logging.warning(f"Failed to get initial timestamp: {e}")
+            self.enabled = False
+        return 0
+    
+    def poll_new_articles(self, source_ids=None, limit=50):
+        """Poll for new articles since last check"""
+        if not self.enabled or self.last_timestamp == 0:
+            return []
+        
+        try:
+            params = {
+                'since': self.last_timestamp,
+                'limit': limit
+            }
+            
+            if source_ids:
+                params['sources'] = ','.join(source_ids)
+            
+            response = requests.get(
+                f"{self.api_url}/api/articles",
+                params=params,
+                timeout=10
+            )
+            
+            if response.status_code == 200:
+                data = response.json()
+                if data.get('success'):
+                    # Update last timestamp
+                    self.last_timestamp = data.get('latest_timestamp', self.last_timestamp)
+                    return data.get('articles', [])
+        except Exception as e:
+            logging.warning(f"Failed to poll new articles: {e}")
+        
+        return []
+    
+    def is_enabled(self):
+        """Check if API polling is enabled"""
+        return self.enabled
 
 
 class HTMLContentExtractor(HTMLParser):
@@ -487,11 +556,182 @@ class NewsPanel(wx.Panel):
         # Bind notebook events
         self.notebook.Bind(aui.EVT_AUINOTEBOOK_PAGE_CLOSE, self.OnPageClose)
         
+        # Initialize API client for real-time updates
+        self.api_client = NewsAPIClient()
+        self.polling_enabled = False
+        self.current_source_ids = []  # Track currently displayed sources
+        
         # Load data
         wx.CallAfter(self.LoadSources)
+        wx.CallAfter(self.InitializeAPIPolling)
         
-        # Auto-refresh every 60 seconds
-        wx.CallLater(60000, self.RefreshNews)
+        # Setup polling timer (will start after API initialization)
+        self.poll_timer = wx.Timer(self)
+        self.Bind(wx.EVT_TIMER, self.OnPollTimer, self.poll_timer)
+    
+    def InitializeAPIPolling(self):
+        """Initialize API client and get initial timestamp"""
+        def init_in_thread():
+            try:
+                timestamp = self.api_client.get_initial_timestamp()
+                if timestamp > 0:
+                    wx.CallAfter(self.OnAPIInitialized, timestamp)
+                else:
+                    wx.CallAfter(self.OnAPIInitFailed)
+            except Exception as e:
+                logging.error(f"API initialization error: {e}")
+                wx.CallAfter(self.OnAPIInitFailed)
+        
+        Thread(target=init_in_thread, daemon=True).start()
+    
+    def OnAPIInitialized(self, timestamp):
+        """Called when API is successfully initialized"""
+        logging.info(f"✅ API initialized with timestamp: {timestamp}")
+        self.polling_enabled = True
+        # Start polling timer
+        self.poll_timer.Start(POLL_INTERVAL_MS)
+        logging.info(f"🔄 Polling enabled (every {POLL_INTERVAL_MS/1000}s)")
+    
+    def OnAPIInitFailed(self):
+        """Called when API initialization fails"""
+        logging.warning("⚠️  API not available - polling disabled")
+        self.polling_enabled = False
+    
+    def OnPollTimer(self, event):
+        """Timer event handler for polling new articles"""
+        if not self.polling_enabled or not self.current_source_ids:
+            return
+        
+        def poll_in_thread():
+            try:
+                new_articles = self.api_client.poll_new_articles(
+                    source_ids=self.current_source_ids,
+                    limit=50
+                )
+                if new_articles:
+                    wx.CallAfter(self.InsertNewArticles, new_articles)
+            except Exception as e:
+                logging.error(f"Polling error: {e}")
+        
+        Thread(target=poll_in_thread, daemon=True).start()
+    
+    def InsertNewArticles(self, articles):
+        """Insert new articles at the top of the feed using JavaScript"""
+        if not articles:
+            return
+        
+        logging.info(f"📥 Inserting {len(articles)} new articles")
+        
+        # Generate HTML for new articles
+        articles_html = ""
+        for article in articles:
+            article_html = self.GenerateArticleCardHTML(article)
+            articles_html += article_html
+        
+        # Escape for JavaScript
+        articles_html = articles_html.replace('\\', '\\\\').replace("'", "\\'").replace('\n', '\\n').replace('\r', '\\r')
+        
+        # Execute JavaScript to insert new articles
+        js_code = f"""
+        (function() {{
+            var articlesContainer = document.querySelector('.articles-container');
+            if (articlesContainer) {{
+                var tempDiv = document.createElement('div');
+                tempDiv.innerHTML = '{articles_html}';
+                
+                // Insert each article at the beginning with animation
+                var articles = tempDiv.querySelectorAll('.article');
+                for (var i = articles.length - 1; i >= 0; i--) {{
+                    var article = articles[i];
+                    article.style.opacity = '0';
+                    article.style.transform = 'translateY(-20px)';
+                    article.style.transition = 'opacity 0.5s, transform 0.5s';
+                    articlesContainer.insertBefore(article, articlesContainer.firstChild);
+                    
+                    // Trigger animation
+                    setTimeout((function(el) {{
+                        return function() {{
+                            el.style.opacity = '1';
+                            el.style.transform = 'translateY(0)';
+                        }};
+                    }})(article), 50 * (articles.length - i));
+                }}
+                
+                // Show notification
+                var notification = document.createElement('div');
+                notification.className = 'new-articles-notification';
+                notification.textContent = '{len(articles)} new article' + ({len(articles)} > 1 ? 's' : '') + ' loaded';
+                notification.style.cssText = 'position: fixed; top: 20px; right: 20px; background: #667eea; color: white; padding: 15px 25px; border-radius: 8px; box-shadow: 0 4px 12px rgba(0,0,0,0.15); z-index: 1000; animation: slideIn 0.3s ease-out;';
+                document.body.appendChild(notification);
+                
+                setTimeout(function() {{
+                    notification.style.animation = 'slideOut 0.3s ease-out';
+                    setTimeout(function() {{
+                        notification.remove();
+                    }}, 300);
+                }}, 3000);
+            }}
+        }})();
+        """
+        
+        self.html_viewer.RunScript(js_code)
+    
+    def GenerateArticleCardHTML(self, article):
+        """Generate HTML for a single article card (for dynamic insertion)"""
+        # Extract article data
+        article_id = article.get('id_article', '')
+        source_id = article.get('id_source', 'unknown')
+        author = article.get('author', None)
+        title = article.get('title', 'Untitled Article')
+        description = article.get('description', None)
+        url = article.get('url', '#')
+        url_to_image = article.get('urlToImage', None)
+        published_at_gmt = article.get('published_at_gmt', None)
+        
+        # Get source name
+        source_name = self.sources.get(source_id, {}).get('name', source_id)
+        
+        # Format date
+        date_str = "Just now"
+        if published_at_gmt:
+            try:
+                dt = datetime.fromisoformat(published_at_gmt.replace('Z', '+00:00'))
+                date_str = dt.strftime('%Y-%m-%d %H:%M GMT')
+            except:
+                pass
+        
+        # Clean and escape text
+        title = clean_text(title).replace('<', '&lt;').replace('>', '&gt;').replace('"', '&quot;')
+        if author:
+            author = clean_text(author).replace('<', '&lt;').replace('>', '&gt;')
+        source_name = clean_text(source_name).replace('<', '&lt;').replace('>', '&gt;')
+        
+        # Sanitize description HTML
+        description_html = ""
+        if description:
+            description_html = sanitize_html_content(description)
+        
+        # Build article card
+        html = '<div class="article" style="animation: fadeIn 0.5s;">'
+        html += f'<div class="article-title"><a href="{url}">{title}</a></div>'
+        html += f'<div class="article-meta">'
+        html += f'<span class="article-source">🔖 {source_name}</span>'
+        if author:
+            html += f'<span class="article-author">✍️ {author}</span>'
+        html += f'<span class="article-date">📅 {date_str}</span>'
+        html += '</div>'
+        
+        # Show main article image
+        if url_to_image and url_to_image.startswith(('http://', 'https://')):
+            html += f'<img src="{url_to_image}" alt="Article image" onerror="this.style.display=\'none\'" style="max-width: 100%; width: 100%; height: auto; display: block; margin: 10px 0; border-radius: 4px;">'
+        
+        # Show description
+        if description_html:
+            html += f'<div class="article-content">{description_html}</div>'
+        
+        html += '</div>'
+        
+        return html
     
     def LoadSources(self):
         """Load sources from database and populate CheckListBox"""
@@ -814,9 +1054,13 @@ class NewsPanel(wx.Panel):
         
         if not checked_source_ids:
             self.ShowWelcomeMessage()
+            self.current_source_ids = []
             return
         
         print(f"\n=== Loading articles from {len(checked_source_ids)} checked sources ===")
+        
+        # Update current source IDs for polling
+        self.current_source_ids = checked_source_ids
         
         try:
             eng = dbOpen()
@@ -864,6 +1108,9 @@ class NewsPanel(wx.Panel):
             if not source:
                 print(f"ERROR: Source {source_id} not found")
                 return
+            
+            # Update current source IDs for polling
+            self.current_source_ids = [source_id]
             
             eng = dbOpen()
             meta = MetaData()
@@ -960,6 +1207,9 @@ class NewsPanel(wx.Panel):
                     opacity: 0.9;
                     font-size: 16px;
                 }}
+                .articles-container {{
+                    /* Container for dynamic article insertion */
+                }}
                 .article {{
                     background: white;
                     padding: 20px;
@@ -1025,6 +1275,21 @@ class NewsPanel(wx.Panel):
                 .article-date {{
                     color: #999;
                 }}
+                @keyframes fadeIn {{
+                    from {{ opacity: 0; transform: translateY(-10px); }}
+                    to {{ opacity: 1; transform: translateY(0); }}
+                }}
+                @keyframes slideIn {{
+                    from {{ transform: translateX(100%); opacity: 0; }}
+                    to {{ transform: translateX(0); opacity: 1; }}
+                }}
+                @keyframes slideOut {{
+                    from {{ transform: translateX(0); opacity: 1; }}
+                    to {{ transform: translateX(100%); opacity: 0; }}
+                }}
+                .new-articles-notification {{
+                    animation: slideIn 0.3s ease-out;
+                }}
             </style>
         </head>
         <body>
@@ -1033,6 +1298,7 @@ class NewsPanel(wx.Panel):
                 <div class="subtitle">{article_count} articles from {source_count} sources</div>
                 <div class="subtitle" style="margin-top: 5px; font-size: 14px;">{subtitle}</div>
             </div>
+            <div class="articles-container">
         """
         
         for article in articles:
@@ -1106,6 +1372,7 @@ class NewsPanel(wx.Panel):
             html += '</div>'  # Close article div
         
         html += """
+            </div>  <!-- Close articles-container -->
         </body>
         </html>
         """
@@ -1207,6 +1474,21 @@ class NewsPanel(wx.Panel):
                 .article-date {{
                     color: #999;
                 }}
+                .articles-container {{
+                    /* Container for dynamic article insertion */
+                }}
+                @keyframes fadeIn {{
+                    from {{ opacity: 0; transform: translateY(-10px); }}
+                    to {{ opacity: 1; transform: translateY(0); }}
+                }}
+                @keyframes slideIn {{
+                    from {{ transform: translateX(100%); opacity: 0; }}
+                    to {{ transform: translateX(0); opacity: 1; }}
+                }}
+                @keyframes slideOut {{
+                    from {{ transform: translateX(0); opacity: 1; }}
+                    to {{ transform: translateX(100%); opacity: 0; }}
+                }}
             </style>
         </head>
         <body>
@@ -1214,6 +1496,7 @@ class NewsPanel(wx.Panel):
                 <h1>📰 {source_name}</h1>
                 <div class="subtitle">{article_count} recent articles</div>
             </div>
+            <div class="articles-container">
         """
         
         for article in articles:
@@ -1280,6 +1563,7 @@ class NewsPanel(wx.Panel):
             html += '</div>'  # Close article div
         
         html += """
+            </div>  <!-- Close articles-container -->
         </body>
         </html>
         """
