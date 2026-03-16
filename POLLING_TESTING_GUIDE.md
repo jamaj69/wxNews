@@ -306,7 +306,9 @@ WARNING:root:Failed to poll new articles: [error details]
 **Symptom:** wxNewsReader using too much CPU
 
 **Solutions:**
+
 1. Increase polling interval:
+
    ```bash
    # In .env file
    NEWS_POLL_INTERVAL_MS=60000  # 1 minute

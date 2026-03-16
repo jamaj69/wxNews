@@ -7,11 +7,13 @@ Rebuilt wxAsyncNewsGather to use FastAPI and run both the news collector and API
 ## New Architecture
 
 **Previous System:**
+
 - Separate Flask API server (`news_api_server.py`)
 - Separate News Collector (`wxAsyncNewsGather.py`)
 - Two systemd services
 
 **New System:**
+
 - Unified FastAPI application (`wxAsyncNewsGatherAPI.py`)
 - News collector and API server run as separate async tasks in the same process
 - Single systemd service (`wxAsyncNewsGatherAPI.service`)

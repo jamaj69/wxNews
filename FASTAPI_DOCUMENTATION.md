@@ -54,6 +54,7 @@ This is a completely rebuilt version of wxAsyncNewsGather that integrates news c
 Root endpoint with API information and endpoint list.
 
 **Response:**
+
 ```json
 {
   "name": "wxNews API",
@@ -70,6 +71,7 @@ Root endpoint with API information and endpoint list.
 Health check endpoint for monitoring.
 
 **Response:**
+
 ```json
 {
   "status": "ok",
@@ -128,6 +130,7 @@ curl "http://localhost:8765/api/articles?since=1742535000000&limit=50"
 Get the latest insertion timestamp for sync initialization.
 
 **Response:**
+
 ```json
 {
   "success": true,
@@ -142,6 +145,7 @@ Get the latest insertion timestamp for sync initialization.
 Get list of available news sources with article counts.
 
 **Response:**
+
 ```json
 {
   "success": true,
@@ -164,6 +168,7 @@ Get list of available news sources with article counts.
 Get collection statistics and top sources.
 
 **Response:**
+
 ```json
 {
   "success": true,
@@ -238,7 +243,8 @@ python3 wxAsyncNewsGatherAPI.py
 ```
 
 You should see:
-```
+
+```text
 ╔═══════════════════════════════════════════════════════════╗
 ║        wxAsyncNewsGather with FastAPI Integration         ║
 ╠═══════════════════════════════════════════════════════════╣
@@ -507,6 +513,7 @@ sudo journalctl -u wxAsyncNewsGatherAPI.service -n 50
 ### Collector Not Running
 
 Check the `collector_running` status:
+
 ```bash
 curl http://localhost:8765/api/health | jq '.collector_running'
 ```
@@ -546,6 +553,7 @@ FastAPI with uvicorn is more efficient than Flask, but if CPU is high:
 ### Benchmarks
 
 Typical performance on moderate hardware:
+
 - API latency: < 10ms for `/api/health`
 - Articles query: < 50ms for 100 articles
 - Collection rate: 50-100 articles/hour (depends on sources)
@@ -563,6 +571,7 @@ sudo ufw allow from 192.168.1.0/24 to any port 8765
 ```
 
 2. **Reverse Proxy**: Use nginx for SSL termination
+
 ```nginx
 location /api/ {
     proxy_pass http://localhost:8765/api/;
@@ -585,6 +594,7 @@ sudo systemctl stop wxAsyncNewsGather.service wxNewsAPI.service
 ```
 
 2. **Install new system**:
+
 ```bash
 pip install -r requirements-fastapi.txt
 sudo cp wxAsyncNewsGatherAPI.service /etc/systemd/system/
@@ -592,11 +602,13 @@ sudo systemctl daemon-reload
 ```
 
 3. **Start new service**:
+
 ```bash
 sudo systemctl enable --now wxAsyncNewsGatherAPI.service
 ```
 
 4. **Verify**:
+
 ```bash
 curl http://localhost:8765/api/health
 python3 test_fastapi_news.py
