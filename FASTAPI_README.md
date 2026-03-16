@@ -36,6 +36,7 @@ Rebuilt wxAsyncNewsGather to use FastAPI and run both the news collector and API
 ```
 
 This script will:
+
 - Install dependencies
 - Check database migration
 - Stop old services
@@ -74,7 +75,7 @@ All endpoints remain the same as before, plus automatic documentation:
 - **GET /docs** - Interactive API documentation (Swagger UI)
 - **GET /redoc** - Alternative documentation (ReDoc)
 - **GET /api/health** - Health check
-- **GET /api/articles?since=<ms>&limit=<n>** - Get articles since timestamp
+- **GET /api/articles?since=&lt;ms&gt;&limit=&lt;n&gt;** - Get articles since timestamp
 - **GET /api/latest_timestamp** - Get latest insertion timestamp
 - **GET /api/sources** - List available sources
 - **GET /api/stats** - Collection statistics
@@ -114,18 +115,21 @@ sudo systemctl restart wxAsyncNewsGatherAPI
 ## Key Improvements
 
 ### Performance
+
 - ✅ Single process instead of two
 - ✅ True async architecture (FastAPI + uvicorn)
 - ✅ Lower memory usage (~150MB vs ~200MB)
 - ✅ Better coordination between collector and API
 
 ### Developer Experience
+
 - ✅ Automatic OpenAPI documentation at `/docs`
 - ✅ Type validation with Pydantic
 - ✅ Better error messages
 - ✅ Built-in testing with FastAPI Test Client
 
 ### Operations
+
 - ✅ Single service to manage
 - ✅ Unified logging
 - ✅ Better resource monitoring
@@ -136,11 +140,13 @@ sudo systemctl restart wxAsyncNewsGatherAPI
 If you have the old system running:
 
 1. **Run migration script:**
+
    ```bash
    ./migrate_to_fastapi.sh
    ```
 
 2. **Or manually:**
+
    ```bash
    # Stop old services
    sudo systemctl stop wxAsyncNewsGather wxNewsAPI
@@ -153,6 +159,7 @@ If you have the old system running:
    ```
 
 3. **Update wxNewsReader** (if needed):
+
    - API endpoints are the same
    - No code changes required
    - Just verify it's pointing to the right port (8765)
@@ -179,6 +186,7 @@ sudo journalctl -u wxAsyncNewsGatherAPI -p err -n 50
 ## Troubleshooting
 
 ### API not responding
+
 ```bash
 # Check if running
 sudo systemctl status wxAsyncNewsGatherAPI
@@ -191,6 +199,7 @@ sudo journalctl -u wxAsyncNewsGatherAPI -n 100
 ```
 
 ### Collector not collecting
+
 ```bash
 # Check collector status
 curl http://localhost:8765/api/health | jq '.collector_running'
@@ -203,11 +212,13 @@ curl http://localhost:8765/api/stats | jq '.articles_last_hour'
 ```
 
 ### Dependencies missing
+
 ```bash
 pip install -r requirements-fastapi.txt
 ```
 
 ### Database issues
+
 ```bash
 # Check database
 sqlite3 predator_news.db "SELECT COUNT(*) FROM gm_articles"
@@ -242,19 +253,23 @@ MEDIASTACK_CYCLE_INTERVAL=900
 ## Next Steps
 
 1. **Test the API:**
+
    ```bash
    python3 test_fastapi_news.py
    ```
 
 2. **Check interactive docs:**
-   Open http://localhost:8765/docs in your browser
+
+   Open <http://localhost:8765/docs> in your browser
 
 3. **Monitor collection:**
+
    ```bash
    watch -n 5 'curl -s http://localhost:8765/api/stats | jq'
    ```
 
 4. **Update wxNewsReader:**
+
    - Verify API endpoint configuration
    - Test article polling
    - Monitor for any issues
@@ -262,12 +277,13 @@ MEDIASTACK_CYCLE_INTERVAL=900
 ## Documentation
 
 - **Complete Guide:** [FASTAPI_DOCUMENTATION.md](FASTAPI_DOCUMENTATION.md)
-- **API Docs:** http://localhost:8765/docs (when running)
+- **API Docs:** <http://localhost:8765/docs> (when running)
 - **Code:** [wxAsyncNewsGatherAPI.py](wxAsyncNewsGatherAPI.py)
 
 ## Support
 
 For issues:
+
 1. Check logs: `sudo journalctl -u wxAsyncNewsGatherAPI -f`
 2. Run tests: `python3 test_fastapi_news.py`
 3. Check API: `curl http://localhost:8765/api/health`

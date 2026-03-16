@@ -6,7 +6,7 @@ The wxNewsReader now supports real-time article updates by polling the FastAPI s
 
 ## Architecture
 
-```
+```text
 ┌─────────────────────────────────────────────────────────────┐
 │                    wxNewsReader (GUI)                       │
 ├─────────────────────────────────────────────────────────────┤
@@ -47,23 +47,27 @@ The wxNewsReader now supports real-time article updates by polling the FastAPI s
 ## Features
 
 ### 1. **Automatic Polling**
+
 - Polls every 30 seconds by default (configurable)
 - Only polls when articles are displayed
 - Filters by currently selected sources
 - Runs in background thread
 
 ### 2. **Dynamic Insertion**
+
 - New articles appear at the top (most recent first)
 - Smooth fade-in animation
 - No page reload required
 - Maintains scroll position
 
 ### 3. **Visual Feedback**
+
 - Notification toast shows number of new articles
 - Toast slides in from right, auto-dismisses after 3 seconds
 - New articles have fade-in animation
 
 ### 4. **Smart Filtering**
+
 - Only polls for sources currently displayed
 - Respects checked sources in sidebar
 - Filters out future-scheduled articles
@@ -96,11 +100,13 @@ sudo systemctl start wxAsyncNewsGatherAPI
 ```
 
 Verify the server is running:
+
 ```bash
 curl http://localhost:8765/api/health
 ```
 
 Expected output:
+
 ```json
 {
   "status": "ok",
@@ -125,7 +131,7 @@ gtk-launch wxNewsReader.desktop
 
 In the terminal where wxNewsReader is running, you should see:
 
-```
+```text
 === Loading Sources ===
 Found 150 sources with >= 10 articles
 ✅ API initialized with timestamp: 1742535600000
@@ -133,21 +139,24 @@ Found 150 sources with >= 10 articles
 ```
 
 If API is not available:
-```
+
+```text
 ⚠️  API not available - polling disabled
 ```
 
 ### 4. Test Polling
 
-**Method 1: Wait for Natural Updates**
+#### Method 1: Wait for Natural Updates
+
 1. Select some news sources
 2. Click "Load Checked"
 3. Wait 30 seconds for new articles to be collected
 4. Watch for notification toast and new articles appearing
 
-**Method 2: Force New Articles (Testing)**
+#### Method 2: Force New Articles (Testing)
 
 Add some test articles manually:
+
 ```bash
 sqlite3 predator_news.db
 ```
@@ -180,28 +189,32 @@ When new articles arrive:
 
 Look for these messages:
 
-```
+```text
 📥 Inserting 3 new articles
 ```
 
 If polling fails:
-```
+
+```text
 WARNING:root:Failed to poll new articles: [error details]
 ```
 
 ### 7. Test Edge Cases
 
 **No new articles:**
+
 - Polling continues silently
 - No notification shown
 - No UI changes
 
 **API unavailable:**
+
 - Polling stops automatically
 - Warning logged once
 - Reader still works with manual refresh
 
 **Network error during poll:**
+
 - Error logged
 - Next poll continues normally
 - No UI disruption
@@ -213,22 +226,27 @@ WARNING:root:Failed to poll new articles: [error details]
 **Symptom:** Log shows "API not available - polling disabled"
 
 **Solutions:**
+
 1. Check if FastAPI server is running:
+
    ```bash
    curl http://localhost:8765/api/health
    ```
 
 2. Check the server logs:
+
    ```bash
    sudo journalctl -u wxAsyncNewsGatherAPI -f
    ```
 
 3. Verify database has timestamp column:
+
    ```bash
    sqlite3 predator_news.db "PRAGMA table_info(gm_articles)" | grep inserted_at_ms
    ```
 
 4. Check firewall:
+
    ```bash
    sudo ufw status
    ```
@@ -238,22 +256,27 @@ WARNING:root:Failed to poll new articles: [error details]
 **Symptom:** Polling enabled but no articles inserted
 
 **Solutions:**
+
 1. Check if collector is running:
+
    ```bash
    curl http://localhost:8765/api/health | jq '.collector_running'
    ```
 
 2. Check collection stats:
+
    ```bash
    curl http://localhost:8765/api/stats | jq '.articles_last_hour'
    ```
 
 3. Monitor API logs for errors:
+
    ```bash
    sudo journalctl -u wxAsyncNewsGatherAPI | grep ERROR
    ```
 
 4. Manually test API endpoint:
+
    ```bash
    TIMESTAMP=$(date -d '1 hour ago' +%s)000
    curl "http://localhost:8765/api/articles?since=$TIMESTAMP&limit=10" | jq
@@ -264,8 +287,10 @@ WARNING:root:Failed to poll new articles: [error details]
 **Symptom:** Articles don't appear dynamically
 
 **Solutions:**
+
 1. Check WebView console (if available)
 2. Verify HTML has `articles-container` div:
+
    ```bash
    # Look for the container in generated HTML
    grep -o "articles-container" wxAsyncNewsReaderv6.py

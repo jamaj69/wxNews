@@ -6,7 +6,7 @@ This is a completely rebuilt version of wxAsyncNewsGather that integrates news c
 
 ## Architecture
 
-```
+```text
 ┌─────────────────────────────────────────────────────────────┐
 │         wxAsyncNewsGatherAPI.py (Main Process)              │
 ├─────────────────────────────────────────────────────────────┤
@@ -50,6 +50,7 @@ This is a completely rebuilt version of wxAsyncNewsGather that integrates news c
 ## API Endpoints
 
 ### 1. GET `/`
+
 Root endpoint with API information and endpoint list.
 
 **Response:**
@@ -65,6 +66,7 @@ Root endpoint with API information and endpoint list.
 ```
 
 ### 2. GET `/api/health`
+
 Health check endpoint for monitoring.
 
 **Response:**
@@ -79,19 +81,23 @@ Health check endpoint for monitoring.
 ```
 
 ### 3. GET `/api/articles`
+
 Get articles inserted after a specific timestamp.
 
 **Parameters:**
+
 - `since` (required): Timestamp in milliseconds
 - `limit` (optional): Max articles to return (default: 100, max: 200)
 - `sources` (optional): Comma-separated source IDs
 
 **Example:**
+
 ```bash
 curl "http://localhost:8765/api/articles?since=1742535000000&limit=50"
 ```
 
 **Response:**
+
 ```json
 {
   "success": true,
@@ -118,6 +124,7 @@ curl "http://localhost:8765/api/articles?since=1742535000000&limit=50"
 ```
 
 ### 4. GET `/api/latest_timestamp`
+
 Get the latest insertion timestamp for sync initialization.
 
 **Response:**
@@ -131,6 +138,7 @@ Get the latest insertion timestamp for sync initialization.
 ```
 
 ### 5. GET `/api/sources`
+
 Get list of available news sources with article counts.
 
 **Response:**
@@ -152,6 +160,7 @@ Get list of available news sources with article counts.
 ```
 
 ### 6. GET `/api/stats`
+
 Get collection statistics and top sources.
 
 **Response:**
@@ -297,6 +306,7 @@ python3 test_fastapi_news.py
 ```
 
 The test suite will:
+
 1. Check health endpoint
 2. Get latest timestamp
 3. List sources
@@ -325,8 +335,8 @@ curl http://localhost:8765/api/stats
 
 FastAPI provides automatic interactive documentation:
 
-- **Swagger UI**: http://localhost:8765/docs
-- **ReDoc**: http://localhost:8765/redoc
+- **Swagger UI**: <http://localhost:8765/docs>
+- **ReDoc**: <http://localhost:8765/redoc>
 
 You can test all endpoints directly from the browser!
 
@@ -508,6 +518,7 @@ If false, check logs for errors in the collector tasks.
 The unified process reduces database locking, but if you still see errors:
 
 1. Check for other processes accessing the database:
+
 ```bash
 fuser predator_news.db
 ```
@@ -546,6 +557,7 @@ Typical performance on moderate hardware:
 ### Production Considerations
 
 1. **Firewall**: Restrict access to API port
+
 ```bash
 sudo ufw allow from 192.168.1.0/24 to any port 8765
 ```
@@ -567,6 +579,7 @@ location /api/ {
 If you're migrating from the separate Flask + collector system:
 
 1. **Stop old services**:
+
 ```bash
 sudo systemctl stop wxAsyncNewsGather.service wxNewsAPI.service
 ```
@@ -594,6 +607,7 @@ python3 test_fastapi_news.py
 ## Future Enhancements
 
 Potential improvements:
+
 - WebSocket support for real-time push
 - GraphQL endpoint
 - Redis caching layer
@@ -606,7 +620,8 @@ Potential improvements:
 ## Support
 
 For issues or questions:
+
 1. Check logs: `sudo journalctl -u wxAsyncNewsGatherAPI.service -f`
 2. Run tests: `python3 test_fastapi_news.py`
-3. Check API docs: http://localhost:8765/docs
+3. Check API docs: <http://localhost:8765/docs>
 4. Verify database: `sqlite3 predator_news.db "SELECT COUNT(*) FROM gm_articles"`
