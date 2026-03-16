@@ -1278,7 +1278,8 @@ class NewsGather():
                                         'urlToImage': article_urlToImage,
                                         'publishedAt': article_publishedAt,  # Original with timezone
                                         'published_at_gmt': article_publishedAt_gmt,  # Normalized UTC
-                                        'content': article_content
+                                        'content': article_content,
+                                        'inserted_at_ms': int(time.time() * 1000)  # Insertion timestamp in ms
                                     }
                                     
                                     # Try to enrich with missing content
@@ -1474,7 +1475,8 @@ class NewsGather():
                         'urlToImage': extracted_image_url or '',
                         'publishedAt': published,  # Original with timezone
                         'published_at_gmt': published_gmt,  # Normalized UTC
-                        'content': ''
+                        'content': '',
+                        'inserted_at_ms': int(time.time() * 1000)  # Insertion timestamp in ms
                     }
                     
                     # Try to enrich with missing content from URL
@@ -1739,7 +1741,8 @@ class NewsGather():
                 'urlToImage': (extracted_image or image or '')[:500],
                 'publishedAt': published_at,  # Original with timezone
                 'published_at_gmt': published_at_gmt,  # Normalized UTC
-                'content': ''
+                'content': '',
+                'inserted_at_ms': int(time.time() * 1000)  # Insertion timestamp in ms
             }
             
             # Try to enrich with missing content from URL

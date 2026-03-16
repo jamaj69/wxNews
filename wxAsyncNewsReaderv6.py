@@ -67,19 +67,16 @@ class NewsAPIClient:
         self.enabled = False
         
     def get_initial_timestamp(self):
-        """Get initial sync point from API"""
+        """Get initial sync point - use current time to avoid future articles"""
         try:
-            response = requests.get(
-                f"{self.api_url}/api/latest_timestamp",
-                timeout=5
-            )
-            if response.status_code == 200:
-                data = response.json()
-                self.last_timestamp = data.get('latest_timestamp', 0)
-                self.enabled = True
-                return self.last_timestamp
+            # Use current timestamp instead of MAX from database
+            # This avoids issues with articles that have future published dates
+            import time
+            self.last_timestamp = int(time.time() * 1000)
+            self.enabled = True
+            return self.last_timestamp
         except Exception as e:
-            logging.warning(f"Failed to get initial timestamp: {e}")
+            logging.warning(f"Failed to initialize timestamp: {e}")
             self.enabled = False
         return 0
     
@@ -599,19 +596,27 @@ class NewsPanel(wx.Panel):
     
     def OnPollTimer(self, event):
         """Timer event handler for polling new articles"""
-        if not self.polling_enabled or not self.current_source_ids:
+        logging.info(f"⏰ Poll timer triggered - polling_enabled: {self.polling_enabled}")
+        
+        if not self.polling_enabled:
+            logging.warning("⚠️  Polling disabled, skipping")
             return
         
         def poll_in_thread():
             try:
+                logging.info(f"🔄 Starting poll request (timestamp: {self.api_client.last_timestamp})")
+                # Poll ALL new articles regardless of currently displayed sources
                 new_articles = self.api_client.poll_new_articles(
-                    source_ids=self.current_source_ids,
+                    source_ids=None,  # Get all sources
                     limit=50
                 )
+                logging.info(f"📊 Poll completed - found {len(new_articles) if new_articles else 0} new articles")
                 if new_articles:
                     wx.CallAfter(self.InsertNewArticles, new_articles)
             except Exception as e:
-                logging.error(f"Polling error: {e}")
+                logging.error(f"❌ Polling error: {e}")
+                import traceback
+                logging.error(traceback.format_exc())
         
         Thread(target=poll_in_thread, daemon=True).start()
     
