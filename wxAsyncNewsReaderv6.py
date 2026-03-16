@@ -66,14 +66,13 @@ class NewsAPIClient:
         self.last_timestamp = 0
         self.enabled = False
         
-    def get_initial_timestamp(self):
-        """Get initial sync point - use current time to avoid future articles"""
+    def initialize_timestamp(self):
+        """Initialize timestamp with current time after loading articles"""
         try:
-            # Use current timestamp instead of MAX from database
-            # This avoids issues with articles that have future published dates
             import time
             self.last_timestamp = int(time.time() * 1000)
             self.enabled = True
+            logging.info(f"📌 Timestamp initialized: {self.last_timestamp}")
             return self.last_timestamp
         except Exception as e:
             logging.warning(f"Failed to initialize timestamp: {e}")
@@ -86,6 +85,9 @@ class NewsAPIClient:
             return []
         
         try:
+            import time
+            current_time_ms = int(time.time() * 1000)
+            
             params = {
                 'since': self.last_timestamp,
                 'limit': limit
@@ -103,9 +105,24 @@ class NewsAPIClient:
             if response.status_code == 200:
                 data = response.json()
                 if data.get('success'):
-                    # Update last timestamp
-                    self.last_timestamp = data.get('latest_timestamp', self.last_timestamp)
-                    return data.get('articles', [])
+                    articles = data.get('articles', [])
+                    
+                    # Filter out articles with future timestamps (data integrity protection)
+                    valid_articles = [
+                        a for a in articles 
+                        if a.get('inserted_at_ms', 0) <= current_time_ms
+                    ]
+                    
+                    if len(articles) != len(valid_articles):
+                        logging.warning(f"⚠️  Filtered {len(articles) - len(valid_articles)} articles with future timestamps")
+                    
+                    # Update timestamp with the LAST valid article's timestamp (most recent)
+                    if valid_articles:
+                        last_article_ts = valid_articles[0].get('inserted_at_ms', self.last_timestamp)
+                        self.last_timestamp = last_article_ts
+                        logging.info(f"📌 Updated timestamp to: {self.last_timestamp}")
+                    
+                    return valid_articles
         except Exception as e:
             logging.warning(f"Failed to poll new articles: {e}")
         
@@ -567,32 +584,20 @@ class NewsPanel(wx.Panel):
         self.Bind(wx.EVT_TIMER, self.OnPollTimer, self.poll_timer)
     
     def InitializeAPIPolling(self):
-        """Initialize API client and get initial timestamp"""
-        def init_in_thread():
-            try:
-                timestamp = self.api_client.get_initial_timestamp()
-                if timestamp > 0:
-                    wx.CallAfter(self.OnAPIInitialized, timestamp)
-                else:
-                    wx.CallAfter(self.OnAPIInitFailed)
-            except Exception as e:
-                logging.error(f"API initialization error: {e}")
-                wx.CallAfter(self.OnAPIInitFailed)
-        
-        Thread(target=init_in_thread, daemon=True).start()
+        """Enable API client (timestamp will be set after first article load)"""
+        # Just enable the client, don't set timestamp yet
+        self.api_client.enabled = True
+        logging.info("🔧 API client enabled (waiting for article load to set timestamp)")
     
-    def OnAPIInitialized(self, timestamp):
-        """Called when API is successfully initialized"""
-        logging.info(f"✅ API initialized with timestamp: {timestamp}")
-        self.polling_enabled = True
-        # Start polling timer
-        self.poll_timer.Start(POLL_INTERVAL_MS)
-        logging.info(f"🔄 Polling enabled (every {POLL_INTERVAL_MS/1000}s)")
-    
-    def OnAPIInitFailed(self):
-        """Called when API initialization fails"""
-        logging.warning("⚠️  API not available - polling disabled")
-        self.polling_enabled = False
+    def OnArticlesLoaded(self):
+        """Called after articles are loaded - initialize timestamp and start polling"""
+        timestamp = self.api_client.initialize_timestamp()
+        if timestamp > 0:
+            self.polling_enabled = True
+            self.poll_timer.Start(POLL_INTERVAL_MS)
+            logging.info(f"✅ Polling started (every {POLL_INTERVAL_MS/1000}s)")
+        else:
+            logging.warning("⚠️  Failed to initialize timestamp")
     
     def OnPollTimer(self, event):
         """Timer event handler for polling new articles"""
@@ -1099,6 +1104,10 @@ class NewsPanel(wx.Panel):
             
             print(f"✓ Loaded {len(articles)} articles from {len(checked_source_ids)} sources")
             
+            # Initialize polling timestamp after first load
+            if not self.polling_enabled:
+                wx.CallAfter(self.OnArticlesLoaded)
+            
         except Exception as e:
             print(f"ERROR loading articles: {e}")
             import traceback
@@ -1142,6 +1151,10 @@ class NewsPanel(wx.Panel):
             self.html_viewer.SetPage(html, "")
             
             print(f"✓ Loaded {len(articles)} articles")
+            
+            # Initialize polling timestamp after first load
+            if not self.polling_enabled:
+                wx.CallAfter(self.OnArticlesLoaded)
             
         except Exception as e:
             print(f"ERROR loading articles: {e}")

@@ -191,6 +191,10 @@ async def get_articles(
     - **sources**: Optional comma-separated list of source IDs
     """
     try:
+        # Get current time for filtering future timestamps
+        import time
+        current_time_ms = int(time.time() * 1000)
+        
         # Build query
         query = select(
             gm_articles.c.id_article,
@@ -205,6 +209,9 @@ async def get_articles(
             gm_articles.c.inserted_at_ms
         ).where(
             gm_articles.c.inserted_at_ms > since
+        ).where(
+            # Filter future inserted_at_ms timestamps (data integrity protection)
+            gm_articles.c.inserted_at_ms <= current_time_ms
         ).where(
             (gm_articles.c.published_at_gmt.is_(None)) | 
             (gm_articles.c.published_at_gmt <= func.datetime('now', '+1 day'))
