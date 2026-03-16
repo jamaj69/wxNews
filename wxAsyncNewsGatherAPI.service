@@ -1,0 +1,26 @@
+[Unit]
+Description=wxAsyncNewsGather with FastAPI Integration
+After=network.target
+
+[Service]
+Type=simple
+User=jamaj
+WorkingDirectory=/home/jamaj/src/python/pyTweeter
+Environment="PATH=/home/python/pyenv/bin:/usr/local/bin:/usr/bin:/bin"
+ExecStart=/home/python/pyenv/bin/python /home/jamaj/src/python/pyTweeter/wxAsyncNewsGatherAPI.py
+Restart=always
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=wxNewsGatherAPI
+
+# Resource limits
+MemoryLimit=1G
+CPUQuota=100%
+
+# Security
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target
