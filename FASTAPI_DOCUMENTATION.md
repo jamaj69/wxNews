@@ -530,7 +530,7 @@ The unified process reduces database locking, but if you still see errors:
 fuser predator_news.db
 ```
 
-2. Increase timeout in database connection (already set to 30s)
+1. Increase timeout in database connection (already set to 30s)
 
 ### High CPU Usage
 
@@ -570,7 +570,7 @@ Typical performance on moderate hardware:
 sudo ufw allow from 192.168.1.0/24 to any port 8765
 ```
 
-2. **Reverse Proxy**: Use nginx for SSL termination
+1. **Reverse Proxy**: Use nginx for SSL termination
 
 ```nginx
 location /api/ {
@@ -580,8 +580,8 @@ location /api/ {
 }
 ```
 
-3. **Rate Limiting**: Add FastAPI middleware for rate limiting
-4. **Authentication**: Add API key validation if exposing publicly
+1. **Rate Limiting**: Add FastAPI middleware for rate limiting
+1. **Authentication**: Add API key validation if exposing publicly
 
 ## Migration from Old System
 
@@ -593,7 +593,7 @@ If you're migrating from the separate Flask + collector system:
 sudo systemctl stop wxAsyncNewsGather.service wxNewsAPI.service
 ```
 
-2. **Install new system**:
+1. **Install new system**:
 
 ```bash
 pip install -r requirements-fastapi.txt
@@ -601,20 +601,20 @@ sudo cp wxAsyncNewsGatherAPI.service /etc/systemd/system/
 sudo systemctl daemon-reload
 ```
 
-3. **Start new service**:
+1. **Start new service**:
 
 ```bash
 sudo systemctl enable --now wxAsyncNewsGatherAPI.service
 ```
 
-4. **Verify**:
+1. **Verify**:
 
 ```bash
 curl http://localhost:8765/api/health
 python3 test_fastapi_news.py
 ```
 
-5. **Update wxNewsReader** to use new endpoints (same API interface)
+1. **Update wxNewsReader** to use new endpoints (same API interface)
 
 ## Future Enhancements
 
