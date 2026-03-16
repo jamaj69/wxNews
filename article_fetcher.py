@@ -109,6 +109,9 @@ class ArticleContentFetcher:
             'sanitized_url': None
         }
         
+        # Initialize sanitized_url to original URL (will be updated if sanitization changes it)
+        sanitized_url = url
+        
         try:
             # Sanitize URL to fix common issues
             sanitized_url = self.sanitize_url(url)
@@ -180,17 +183,17 @@ class ArticleContentFetcher:
             # Capture HTTP error code (403, 404, etc.)
             if e.response is not None:
                 result['error_code'] = e.response.status_code
-            logger.error(f"HTTP {result['error_code']} error for {sanitized_url if 'sanitized_url' in locals() else url}: {e}")
+            logger.error(f"HTTP {result['error_code']} error for {sanitized_url}: {e}")
         except requests.Timeout as e:
             # Connection or read timeout
             result['error_code'] = 'TIMEOUT'
-            logger.warning(f"Timeout fetching {sanitized_url if 'sanitized_url' in locals() else url}: {e}")
+            logger.warning(f"Timeout fetching {sanitized_url}: {e}")
         except requests.RequestException as e:
             result['error_code'] = 'REQUEST_ERROR'
-            logger.error(f"Request error for {sanitized_url if 'sanitized_url' in locals() else url}: {e}")
+            logger.error(f"Request error for {sanitized_url}: {e}")
         except Exception as e:
             result['error_code'] = 'PARSE_ERROR'
-            logger.error(f"Parse error for {sanitized_url if 'sanitized_url' in locals() else url}: {e}")
+            logger.error(f"Parse error for {sanitized_url}: {e}")
         
         return result
     
