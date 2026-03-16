@@ -20,7 +20,7 @@ from fastapi.responses import JSONResponse
 import uvicorn
 
 from decouple import config
-from sqlalchemy import create_engine, MetaData, Table, select, func, text
+from sqlalchemy import create_engine, MetaData, Table, select, func, text, Engine
 from sqlalchemy.dialects.sqlite import insert
 
 # Import the existing news gather class
@@ -39,10 +39,10 @@ API_HOST = config('NEWS_API_HOST', default='0.0.0.0')
 MAX_ARTICLES = 200
 
 # Global variables for sharing state
-news_gather_task = None
-db_engine = None
-gm_articles = None
-gm_sources = None
+news_gather_task: Optional[asyncio.Task] = None
+db_engine: Optional[Engine] = None
+gm_articles: Optional[Table] = None
+gm_sources: Optional[Table] = None
 
 def get_db_path():
     """Get database path"""
@@ -73,6 +73,7 @@ async def run_news_collector():
     """Run the news collection service"""
     logger.info("📰 Starting news collector service...")
     
+    gatherer = None
     try:
         # Import the news gather module
         from wxAsyncNewsGather import NewsGather
@@ -97,12 +98,12 @@ async def run_news_collector():
         
     except asyncio.CancelledError:
         logger.info("🛑 News collector tasks cancelled")
-        if 'gatherer' in locals():
+        if gatherer is not None:
             gatherer.shutdown()
         raise
     except Exception as e:
         logger.error(f"❌ News collector error: {e}", exc_info=True)
-        if 'gatherer' in locals():
+        if gatherer is not None:
             gatherer.shutdown()
         raise
 
@@ -190,6 +191,9 @@ async def get_articles(
     - **limit**: Maximum number of articles (default: 100, max: 200)
     - **sources**: Optional comma-separated list of source IDs
     """
+    if db_engine is None or gm_articles is None:
+        raise HTTPException(status_code=503, detail="Database not initialized")
+    
     try:
         # Get current time for filtering future timestamps
         import time
@@ -265,6 +269,9 @@ async def get_articles(
 @app.get("/api/latest_timestamp")
 async def get_latest_timestamp():
     """Get the latest insertion timestamp"""
+    if db_engine is None or gm_articles is None:
+        raise HTTPException(status_code=503, detail="Database not initialized")
+    
     try:
         with db_engine.connect() as conn:
             result = conn.execute(
@@ -288,6 +295,9 @@ async def get_latest_timestamp():
 @app.get("/api/sources")
 async def get_sources():
     """Get list of available news sources"""
+    if db_engine is None or gm_articles is None or gm_sources is None:
+        raise HTTPException(status_code=503, detail="Database not initialized")
+    
     try:
         query = select(
             gm_sources.c.id_source,
@@ -396,7 +406,7 @@ async def get_stats():
             'articles_last_24h': articles_24h,
             'articles_last_hour': articles_1h,
             'total_sources': total_sources,
-            'collection_rate_per_hour': round(articles_1h, 1),
+            'collection_rate_per_hour': round(articles_1h, 1) if articles_1h else 0.0,
             'top_sources_24h': top_sources,
             'timestamp': int(time.time() * 1000)
         }
@@ -431,7 +441,7 @@ def main():
     # Run uvicorn server
     uvicorn.run(
         app,
-        host=API_HOST,
+        host=str(API_HOST),
         port=API_PORT,
         log_level="info",
         access_log=True
