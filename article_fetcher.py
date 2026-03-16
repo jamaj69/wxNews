@@ -34,6 +34,43 @@ class ArticleContentFetcher:
             'TE': 'trailers',
         }
     
+    @staticmethod
+    def sanitize_url(url):
+        """
+        Sanitize and normalize URL to fix common issues.
+        
+        - Remove double slashes in path (but preserve protocol://)
+        - Remove redirect chain prefixes
+        - Strip whitespace
+        - Validate basic URL structure
+        """
+        if not url or not isinstance(url, str):
+            return url
+        
+        # Strip whitespace
+        url = url.strip()
+        
+        # Handle redirect chains (e.g., folha.com.br redirects)
+        # Pattern: http://redirect.site/*http://actual.site
+        if '*http://' in url or '*https://' in url:
+            # Extract the actual target URL after the * marker
+            if '*https://' in url:
+                url = url.split('*https://', 1)[1]
+                url = 'https://' + url
+            elif '*http://' in url:
+                url = url.split('*http://', 1)[1]
+                url = 'http://' + url
+        
+        # Fix double slashes in path (but preserve protocol://)
+        # Pattern: https://domain.com/path//with//double -> https://domain.com/path/with/double
+        if '://' in url:
+            protocol, rest = url.split('://', 1)
+            # Replace multiple consecutive slashes with single slash
+            rest = re.sub(r'/+', '/', rest)
+            url = f'{protocol}://{rest}'
+        
+        return url
+    
     def _get_headers_for_url(self, url):
         """Get appropriate headers for the given URL based on domain."""
         # NDTV Profit requires special User-Agent to avoid 403 errors
@@ -60,6 +97,7 @@ class ArticleContentFetcher:
         - content: First few paragraphs of article text
         - success: Boolean indicating if content was fetched
         - error_code: HTTP error code if request failed (403, 404, etc.)
+        - sanitized_url: The sanitized URL used for fetching (if different from input)
         """
         result = {
             'author': None,
@@ -67,13 +105,28 @@ class ArticleContentFetcher:
             'description': None,
             'content': None,
             'success': False,
-            'error_code': None
+            'error_code': None,
+            'sanitized_url': None
         }
         
         try:
-            logger.debug(f"Fetching content from: {url}")
-            headers = self._get_headers_for_url(url)
-            response = requests.get(url, headers=headers, timeout=self.timeout)
+            # Sanitize URL to fix common issues
+            sanitized_url = self.sanitize_url(url)
+            
+            # Track if URL was modified
+            if sanitized_url != url:
+                logger.info(f"URL sanitized: {url} -> {sanitized_url}")
+                result['sanitized_url'] = sanitized_url
+            
+            # Basic URL validation
+            if not sanitized_url or not sanitized_url.startswith(('http://', 'https://')):
+                logger.warning(f"Invalid URL format: {url}")
+                result['error_code'] = 'INVALID_URL'
+                return result
+            
+            logger.debug(f"Fetching content from: {sanitized_url}")
+            headers = self._get_headers_for_url(sanitized_url)
+            response = requests.get(sanitized_url, headers=headers, timeout=self.timeout)
             response.raise_for_status()
             
             # Try to get text with proper encoding handling
@@ -121,21 +174,23 @@ class ArticleContentFetcher:
             result['content'] = self._extract_content(soup)
             
             result['success'] = True
-            logger.debug(f"Successfully extracted content from {url}")
+            logger.debug(f"Successfully extracted content from {sanitized_url}")
             
         except requests.HTTPError as e:
             # Capture HTTP error code (403, 404, etc.)
             if e.response is not None:
                 result['error_code'] = e.response.status_code
-            logger.error(f"Request error for {url}: {e}")
+            logger.error(f"HTTP {result['error_code']} error for {sanitized_url if 'sanitized_url' in locals() else url}: {e}")
         except requests.Timeout as e:
             # Connection or read timeout
             result['error_code'] = 'TIMEOUT'
-            logger.error(f"Request error for {url}: {e}")
+            logger.warning(f"Timeout fetching {sanitized_url if 'sanitized_url' in locals() else url}: {e}")
         except requests.RequestException as e:
-            logger.error(f"Request error for {url}: {e}")
+            result['error_code'] = 'REQUEST_ERROR'
+            logger.error(f"Request error for {sanitized_url if 'sanitized_url' in locals() else url}: {e}")
         except Exception as e:
-            logger.error(f"Parse error for {url}: {e}")
+            result['error_code'] = 'PARSE_ERROR'
+            logger.error(f"Parse error for {sanitized_url if 'sanitized_url' in locals() else url}: {e}")
         
         return result
     
