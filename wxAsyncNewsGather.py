@@ -20,6 +20,7 @@ import json
 import webbrowser
 
 import asyncio, aiohttp
+import aiosqlite
 
 from asyncio.events import get_event_loop
 import time
@@ -345,16 +346,23 @@ def normalize_timestamp_to_utc(timestamp_str, source_timezone=None, use_source_t
     """
     Normalize a timestamp string to UTC (GMT+0).
     
-    PRIORITY ORDER:
-    1. Use timezone from article timestamp (if present) - HIGHEST PRIORITY
-    2. Detect GMT/UTC in text (if mentioned explicitly)
-    3. Use source_timezone if use_source_timezone=True (for confirmed sources)
-    4. Return None (if no timezone info available)
+    SMART TIMEZONE CORRECTION LOGIC:
+    1. Parse article timestamp with its timezone (if present)
+    2. If use_source_timezone=True and source_timezone is provided:
+       a. Convert timestamp to UTC using article's timezone (or UTC if none)
+       b. Compare with current UTC time
+       c. If timestamp is >30 minutes in the future → Apply source_timezone correction
+       d. Otherwise → Use article's timezone (it's correct)
+    3. If article has no timezone → Use source_timezone (if available)
+    4. Return None if no timezone info available
+    
+    This prevents overcorrection of sources that sometimes report correct timezones,
+    while still fixing sources that consistently lie about their timezone.
     
     Args:
         timestamp_str: Timestamp string with timezone info (ISO, RFC 2822, etc.)
         source_timezone: Optional timezone offset string (e.g., 'UTC+05:30')
-        use_source_timezone: If True, apply source_timezone when article has no timezone
+        use_source_timezone: If True, apply source_timezone only when timestamp is in future
     
     Returns:
         Tuple: (utc_timestamp_str, detected_timezone_str)
@@ -415,33 +423,61 @@ def normalize_timestamp_to_utc(timestamp_str, source_timezone=None, use_source_t
         parsed_dt = dateutil_parser.parse(timestamp_str, tzinfos=tzinfos)
         detected_tz = None
         
-        # PRIORITY 0: If use_source_timezone is True, FORCE source timezone (ignore RSS timezone)
-        # This handles sources that lie about their timezone in the RSS feed
+        # SMART TIMEZONE CORRECTION LOGIC (changed behavior)
+        # If use_source_timezone=True, we have a confirmed source timezone,
+        # but we should only apply it if the article timestamp is in the future.
+        # This prevents overcorrection of sources that sometimes report correct timezones.
         if use_source_timezone and source_timezone:
             from dateutil.tz import tzoffset
             import re
             
-            # Parse timezone offset from string like 'UTC+05:30' or 'UTC-03:00'
-            tz_match = re.search(r'([+-])?(\d{2}):(\d{2})', source_timezone)
-            if tz_match:
-                sign = -1 if tz_match.group(1) == '-' else 1
-                hours = int(tz_match.group(2))
-                minutes = int(tz_match.group(3))
-                total_seconds = sign * (hours * 3600 + minutes * 60)
-                tz_offset = tzoffset('', total_seconds)
-                
-                # CRITICAL: Remove RSS timezone and apply source timezone
-                # This is because we know the RSS feed is lying about its timezone
-                parsed_dt = parsed_dt.replace(tzinfo=None)  # Strip RSS timezone (it's wrong)
-                parsed_dt = parsed_dt.replace(tzinfo=tz_offset)  # Apply correct source timezone
-                detected_tz = source_timezone
-                
-                # Convert to UTC and return
-                utc_dt = parsed_dt.astimezone(timezone.utc)
-                return utc_dt.replace(microsecond=0).isoformat(), detected_tz
-            else:
-                # Invalid source timezone format - fall through to normal logic
-                pass
+            # First, try to convert with article's timezone (if present)
+            test_dt = parsed_dt
+            if parsed_dt.tzinfo is None:
+                # No timezone in article - try UTC first
+                test_dt = parsed_dt.replace(tzinfo=timezone.utc)
+            
+            # Convert to UTC for comparison
+            test_utc = test_dt.astimezone(timezone.utc)
+            now_utc = datetime.now(timezone.utc)
+            
+            # Check if timestamp is in the future (more than 30 minutes ahead)
+            time_diff_minutes = (test_utc - now_utc).total_seconds() / 60
+            
+            if time_diff_minutes > 30:
+                # Timestamp is in the future - article timezone is WRONG
+                # The feed incorrectly added source timezone offset to the timestamp
+                # We need to UNDO that addition by subtracting the offset
+                tz_match = re.search(r'([+-])?(\d{2}):(\d{2})', source_timezone)
+                if tz_match:
+                    # Parse source timezone offset
+                    # CRITICAL: For UTC-03:00, we want to SUBTRACT 3h (so sign should be +1)
+                    # For UTC+05:00, we want to ADD 5h (so sign should be -1, subtract negative = add)
+                    sign = 1 if tz_match.group(1) == '-' else -1  # INVERTED on purpose!
+                    hours = int(tz_match.group(2))
+                    minutes = int(tz_match.group(3))
+                    total_seconds = sign * (hours * 3600 + minutes * 60)
+                    
+                    # Log correction for debugging
+                    logging.debug(f"TIMEZONE-CORRECTION: Article timestamp is {time_diff_minutes:.1f}min in future, subtracting {total_seconds/3600:.1f}h to correct")
+                    
+                    # CRITICAL FIX: Subtract the offset from timestamp
+                    # Example: Feed reports "04:43:09 +0000" but it's Argentina (UTC-03:00)
+                    # The feed ADDED 3h incorrectly, so we SUBTRACT 3h: 04:43 - 3h = 01:43 UTC ✓
+                    # Strip any existing timezone and treat as naive
+                    parsed_dt = parsed_dt.replace(tzinfo=None)
+                    
+                    # Subtract the source timezone offset
+                    corrected_dt = parsed_dt - timedelta(seconds=total_seconds)
+                    
+                    # Now mark as UTC
+                    utc_dt = corrected_dt.replace(tzinfo=timezone.utc)
+                    detected_tz = source_timezone
+                    
+                    return utc_dt.replace(microsecond=0).isoformat(), detected_tz
+            
+            # If we reach here: timestamp is NOT in the future
+            # Continue with normal processing (use article timezone)
         
         # PRIORITY 1: Check if article timestamp has timezone info
         if parsed_dt.tzinfo is not None:
@@ -496,6 +532,108 @@ def normalize_timestamp_to_utc(timestamp_str, source_timezone=None, use_source_t
         return datetime.now(timezone.utc).isoformat(), None
 
 
+def detect_timezone_from_articles(articles_timestamps, source_name="Unknown", logger=None):
+    """
+    Analisa todos os timestamps de artigos para detectar se o fuso está incorreto.
+    
+    Estratégia:
+    1. Converte todos os timestamps para GMT usando o fuso que eles reportam
+    2. Compara cada um com o horário atual do servidor
+    3. Se a maioria está no futuro com offset similar, calcula o fuso correto
+    4. Retorna o fuso detectado ou None se tudo estiver correto
+    
+    Args:
+        articles_timestamps: Lista de timestamps strings dos artigos
+        source_name: Nome da fonte (para logging)
+        logger: Logger para mensagens
+    
+    Returns:
+        Tuple: (corrected_timezone, should_enable_use_timezone)
+        - corrected_timezone: String com fuso correto (e.g., 'UTC-03:00') ou None
+        - should_enable_use_timezone: True se deve ativar use_timezone=1
+    """
+    if not articles_timestamps or len(articles_timestamps) == 0:
+        return None, False
+    
+    if logger is None:
+        logger = logging.getLogger(__name__)
+    
+    now_utc = datetime.now(timezone.utc)
+    future_offsets = []  # Offsets em segundos de artigos no futuro
+    
+    # Analisa cada timestamp
+    for ts_str in articles_timestamps:
+        if not ts_str:
+            continue
+            
+        try:
+            # Converte para GMT usando o fuso que o artigo reporta (ou UTC se não reportar)
+            gmt_timestamp, detected_tz = normalize_timestamp_to_utc(ts_str, source_timezone=None, use_source_timezone=False)
+            
+            if not gmt_timestamp:
+                continue
+            
+            # Parse o GMT timestamp
+            parsed_gmt = datetime.fromisoformat(gmt_timestamp.replace('Z', '+00:00'))
+            
+            # Calcula diferença com horário atual
+            time_diff = (parsed_gmt - now_utc).total_seconds()
+            
+            # Se está no futuro (considerando pequena margem de 2 minutos para latência de rede)
+            if time_diff > 120:  # 2 minutos
+                future_offsets.append(time_diff)
+                
+        except Exception as e:
+            logger.debug(f"Failed to analyze timestamp '{ts_str}': {e}")
+            continue
+    
+    # Verifica se há padrão consistente de artigos no futuro
+    if len(future_offsets) == 0:
+        # Nenhum artigo no futuro - tudo correto
+        return None, False
+    
+    # Calcula offset médio e verifica consistência
+    avg_offset = sum(future_offsets) / len(future_offsets)
+    
+    # Calcula desvio padrão para verificar consistência
+    variance = sum((x - avg_offset) ** 2 for x in future_offsets) / len(future_offsets)
+    std_dev = variance ** 0.5
+    
+    # Se pelo menos 50% dos artigos estão no futuro E o desvio é pequeno (offset consistente)
+    consistency_ratio = len(future_offsets) / len(articles_timestamps)
+    
+    if consistency_ratio >= 0.5 and std_dev < 3600:  # Desvio < 1 hora
+        # Detectado padrão consistente - calcular fuso correto
+        hours_offset = int(avg_offset) // 3600
+        minutes_offset = (int(avg_offset) % 3600) // 60
+        
+        # Arredondar para incremento de 30 minutos (fusos comuns)
+        if minutes_offset > 15 and minutes_offset < 45:
+            minutes_offset = 30
+        elif minutes_offset >= 45:
+            hours_offset += 1
+            minutes_offset = 0
+        else:
+            minutes_offset = 0
+        
+        # Formato: UTC-HH:MM (negativo porque o feed reporta tempo local como UTC)
+        corrected_tz = f"UTC-{abs(hours_offset):02d}:{minutes_offset:02d}"
+        
+        logger.warning(
+            f"🔍 TIMEZONE-DETECTION: [{source_name}] {len(future_offsets)}/{len(articles_timestamps)} "
+            f"artigos estão {hours_offset}h{minutes_offset}m no futuro (consistência: {consistency_ratio*100:.1f}%). "
+            f"Feed reporta UTC mas publica hora local. Fuso correto: {corrected_tz}"
+        )
+        
+        return corrected_tz, True
+    
+    # Padrão inconsistente - pode ser problema diferente
+    logger.debug(
+        f"⚠️  [{source_name}] {len(future_offsets)}/{len(articles_timestamps)} artigos no futuro, "
+        f"mas offset inconsistente (std_dev={std_dev/3600:.2f}h). Não corrigindo automaticamente."
+    )
+    
+    return None, False
 
 
 class NewsGather():
@@ -768,6 +906,7 @@ class NewsGather():
 
     def dbOpen(self):    
         db_path = dbCredentials()
+        self.db_path = db_path  # Store for later use
         self.logger.info(f"Opening SQLite database: {db_path}")
         # SQLite connection string with WAL mode and increased timeout for concurrent writes
         eng = create_engine(
@@ -1195,6 +1334,57 @@ class NewsGather():
                                 articles = JSON_object.get("articles", [])
                                 self.logger.info(f"Processing {len(articles)} articles for {lang}")
                                 
+                                # PHASE 1: Agrupar artigos por fonte e detectar problemas de fuso
+                                articles_by_source = {}
+                                for article in articles:
+                                    article_source = article.get('source', {})
+                                    article_source_id = article_source.get('id')
+                                    article_source_name = article_source.get('name', '')
+                                    source_id = article_source_name if article_source_id is None else article_source_id
+                                    
+                                    if source_id not in articles_by_source:
+                                        articles_by_source[source_id] = {
+                                            'name': article_source_name,
+                                            'articles': [],
+                                            'timestamps': []
+                                        }
+                                    
+                                    articles_by_source[source_id]['articles'].append(article)
+                                    if article.get('publishedAt'):
+                                        articles_by_source[source_id]['timestamps'].append(article['publishedAt'])
+                                
+                                # Detectar fuso incorreto para cada fonte
+                                for source_id, source_info in articles_by_source.items():
+                                    if source_id in self.sources and self.sources[source_id].get('use_timezone', 0) == 0:
+                                        # Só detectar se não foi configurado manualmente
+                                        corrected_tz, should_enable = detect_timezone_from_articles(
+                                            source_info['timestamps'],
+                                            source_name=source_info['name'],
+                                            logger=self.logger
+                                        )
+                                        
+                                        if corrected_tz and should_enable:
+                                            # Atualizar banco de dados
+                                            try:
+                                                async with aiosqlite.connect(self.db_path) as db:
+                                                    await db.execute(
+                                                        'UPDATE gm_sources SET timezone = ?, use_timezone = 1 WHERE id_source = ?',
+                                                        (corrected_tz, source_id)
+                                                    )
+                                                    await db.commit()
+                                                
+                                                # Atualizar cache em memória
+                                                if source_id in self.sources:
+                                                    self.sources[source_id]['timezone'] = corrected_tz
+                                                    self.sources[source_id]['use_timezone'] = 1
+                                                
+                                                self.logger.info(
+                                                    f"✅ [{source_info['name']}] Fuso corrigido para {corrected_tz}, use_timezone=1"
+                                                )
+                                            except Exception as e:
+                                                self.logger.error(f"Failed to update timezone for {source_info['name']}: {e}")
+                                
+                                # PHASE 2: Processar artigos com fuso já corrigido
                                 articles_inserted = 0
                                 articles_skipped = 0
                                 sources_added = 0
@@ -1243,68 +1433,6 @@ class NewsGather():
                                     # Use source timezone only if use_timezone flag is enabled
                                     use_tz = self.sources.get(source_id, {}).get('use_timezone', 0)
                                     article_publishedAt_gmt, detected_tz = normalize_timestamp_to_utc(article_publishedAt, source_tz, use_source_timezone=(use_tz == 1))
-                                    
-                                    # AUTO-DETECTION: Check if article timestamp is impossibly far in the future
-                                    # This indicates RSS feed is lying about timezone (publishes local time as UTC)
-                                    if article_publishedAt_gmt and use_tz == 0:  # Only auto-correct if not manually configured
-                                        try:
-                                            from datetime import datetime, timedelta
-                                            parsed_gmt = datetime.fromisoformat(article_publishedAt_gmt.replace('Z', '+00:00'))
-                                            now_utc = datetime.now(timezone.utc)
-                                            time_diff = parsed_gmt - now_utc
-                                            
-                                            # If article is more than 30 minutes in the future, RSS feed is lying
-                                            if time_diff > timedelta(minutes=30):
-                                                # Calculate what the correct timezone should be
-                                                # The difference tells us the offset
-                                                total_seconds = int(time_diff.total_seconds())
-                                                hours_offset = total_seconds // 3600
-                                                minutes_offset = (total_seconds % 3600) // 60
-                                                
-                                                # Round to nearest 30-minute increment (common timezone offsets)
-                                                if minutes_offset > 15 and minutes_offset < 45:
-                                                    minutes_offset = 30
-                                                elif minutes_offset >= 45:
-                                                    hours_offset += 1
-                                                    minutes_offset = 0
-                                                else:
-                                                    minutes_offset = 0
-                                                
-                                                # Format as UTC offset (negative because RSS claims UTC but is actually local)
-                                                corrected_tz = f"UTC-{abs(hours_offset):02d}:{minutes_offset:02d}"
-                                                
-                                                self.logger.warning(
-                                                    f"🔍 AUTO-TIMEZONE-DETECT: [{source_name}] Article is {hours_offset}h{minutes_offset}m in future! "
-                                                    f"RSS claims UTC but likely publishes local time. "
-                                                    f"Setting timezone={corrected_tz}, use_timezone=1"
-                                                )
-                                                
-                                                # Update database: set corrected timezone and enable use_timezone
-                                                async with aiosqlite.connect(self.db_predator) as db:
-                                                    await db.execute(
-                                                        'UPDATE gm_sources SET timezone = ?, use_timezone = 1 WHERE id_source = ?',
-                                                        (corrected_tz, source_id)
-                                                    )
-                                                    await db.commit()
-                                                
-                                                # Update in-memory cache
-                                                if source_id in self.sources:
-                                                    self.sources[source_id]['timezone'] = corrected_tz
-                                                    self.sources[source_id]['use_timezone'] = 1
-                                                
-                                                # Recalculate timestamp with corrected timezone
-                                                article_publishedAt_gmt, detected_tz = normalize_timestamp_to_utc(
-                                                    article_publishedAt, 
-                                                    corrected_tz, 
-                                                    use_source_timezone=True
-                                                )
-                                                
-                                                self.logger.info(
-                                                    f"✅ [{source_name}] Recalculated: {article_publishedAt} → {article_publishedAt_gmt}"
-                                                )
-                                                
-                                        except Exception as e:
-                                            self.logger.debug(f"Auto-timezone detection failed for {source_name}: {e}")
                                     
                                     # Update source timezone if detected from article and different from configured
                                     if detected_tz and source_tz != detected_tz:
@@ -1517,6 +1645,48 @@ class NewsGather():
             
             self.logger.debug(f"📥 [{source_name}] Received {len(feed.entries)} entries")
             
+            # PHASE 1: Análise de fuso horário ANTES de processar artigos
+            # Coleta todos os timestamps para detectar se o fuso está incorreto
+            all_timestamps = []
+            for entry in feed.entries:
+                published = as_text(entry.get('published', entry.get('updated', '')))
+                if published:
+                    all_timestamps.append(published)
+            
+            # Detecta se há problema de fuso horário analisando todos os timestamps
+            if all_timestamps and source_id in self.sources:
+                current_use_tz = self.sources[source_id].get('use_timezone', 0)
+                
+                # Só fazer auto-correção se use_timezone não estiver manualmente configurado
+                if current_use_tz == 0:
+                    corrected_tz, should_enable = detect_timezone_from_articles(
+                        all_timestamps, 
+                        source_name=source_name,
+                        logger=self.logger
+                    )
+                    
+                    if corrected_tz and should_enable:
+                        # Atualizar banco de dados ANTES de processar artigos
+                        try:
+                            async with aiosqlite.connect(self.db_path) as db:
+                                await db.execute(
+                                    'UPDATE gm_sources SET timezone = ?, use_timezone = 1 WHERE id_source = ?',
+                                    (corrected_tz, source_id)
+                                )
+                                await db.commit()
+                            
+                            # Atualizar cache em memória
+                            self.sources[source_id]['timezone'] = corrected_tz
+                            self.sources[source_id]['use_timezone'] = 1
+                            
+                            self.logger.info(
+                                f"✅ [{source_name}] Fuso corrigido para {corrected_tz}, use_timezone=1. "
+                                f"Artigos serão inseridos com timestamps corretos."
+                            )
+                        except Exception as e:
+                            self.logger.error(f"Failed to update timezone for {source_name}: {e}")
+            
+            # PHASE 2: Processar artigos com fuso já corrigido
             articles_inserted = 0
             articles_skipped = 0
             detected_timezones = []  # Track detected timezones from all articles
@@ -1540,66 +1710,6 @@ class NewsGather():
                     # Use source timezone only if use_timezone flag is enabled
                     use_tz = source.get('use_timezone', 0)
                     published_gmt, detected_tz = normalize_timestamp_to_utc(published, source_tz, use_source_timezone=(use_tz == 1))
-                    
-                    # AUTO-DETECTION: Check if article timestamp is impossibly far in the future (RSS feed lies)
-                    if published_gmt and use_tz == 0:  # Only auto-correct if not manually configured
-                        try:
-                            from datetime import datetime, timedelta
-                            parsed_gmt = datetime.fromisoformat(published_gmt.replace('Z', '+00:00'))
-                            now_utc = datetime.now(timezone.utc)
-                            time_diff = parsed_gmt - now_utc
-                            
-                            # If article is more than 30 minutes in the future, RSS feed is lying
-                            if time_diff > timedelta(minutes=30):
-                                # Calculate correct timezone based on offset
-                                total_seconds = int(time_diff.total_seconds())
-                                hours_offset = total_seconds // 3600
-                                minutes_offset = (total_seconds % 3600) // 60
-                                
-                                # Round to nearest 30-minute increment
-                                if minutes_offset > 15 and minutes_offset < 45:
-                                    minutes_offset = 30
-                                elif minutes_offset >= 45:
-                                    hours_offset += 1
-                                    minutes_offset = 0
-                                else:
-                                    minutes_offset = 0
-                                
-                                # Format as UTC offset (negative because RSS claims UTC but is local)
-                                corrected_tz = f"UTC-{abs(hours_offset):02d}:{minutes_offset:02d}"
-                                
-                                self.logger.warning(
-                                    f"🔍 AUTO-TIMEZONE-DETECT: [{source_name}] Article is {hours_offset}h{minutes_offset}m in future! "
-                                    f"RSS claims UTC but likely publishes local time. "
-                                    f"Setting timezone={corrected_tz}, use_timezone=1"
-                                )
-                                
-                                # Update database immediately
-                                async with aiosqlite.connect(self.db_predator) as db:
-                                    await db.execute(
-                                        'UPDATE gm_sources SET timezone = ?, use_timezone = 1 WHERE id_source = ?',
-                                        (corrected_tz, source_id)
-                                    )
-                                    await db.commit()
-                                
-                                # Update in-memory cache
-                                source['timezone'] = corrected_tz
-                                source['use_timezone'] = 1
-                                use_tz = 1  # Mark as corrected for this article
-                                
-                                # Recalculate timestamp with corrected timezone
-                                published_gmt, detected_tz = normalize_timestamp_to_utc(
-                                    published, 
-                                    corrected_tz, 
-                                    use_source_timezone=True
-                                )
-                                
-                                self.logger.info(
-                                    f"✅ [{source_name}] Recalculated: {published} → {published_gmt}"
-                                )
-                                
-                        except Exception as e:
-                            self.logger.debug(f"Auto-timezone detection failed for {source_name}: {e}")
                     
                     # Track detected timezone for consistency check
                     if detected_tz:
@@ -1754,7 +1864,55 @@ class NewsGather():
                                         f"📥 MediaStack [{language}]: Received {len(articles)}/{total} articles"
                                     )
                                     
-                                    # Process and store articles
+                                    # PHASE 1: Agrupar artigos por fonte e detectar problemas de fuso
+                                    articles_by_source = {}
+                                    for article_data in articles:
+                                        source_name = article_data.get('source', 'unknown').strip()
+                                        source_id = f"mediastack-{source_name.lower().replace(' ', '-').replace('_', '-')}"
+                                        
+                                        if source_id not in articles_by_source:
+                                            articles_by_source[source_id] = {
+                                                'name': source_name,
+                                                'articles': [],
+                                                'timestamps': []
+                                            }
+                                        
+                                        articles_by_source[source_id]['articles'].append(article_data)
+                                        if article_data.get('published_at'):
+                                            articles_by_source[source_id]['timestamps'].append(article_data['published_at'])
+                                    
+                                    # Detectar fuso incorreto para cada fonte
+                                    for source_id, source_info in articles_by_source.items():
+                                        if source_id in self.sources and self.sources[source_id].get('use_timezone', 0) == 0:
+                                            # Só detectar se não foi configurado manualmente
+                                            corrected_tz, should_enable = detect_timezone_from_articles(
+                                                source_info['timestamps'],
+                                                source_name=f"MediaStack-{source_info['name']}",
+                                                logger=self.logger
+                                            )
+                                            
+                                            if corrected_tz and should_enable:
+                                                # Atualizar banco de dados
+                                                try:
+                                                    async with aiosqlite.connect(self.db_path) as db:
+                                                        await db.execute(
+                                                            'UPDATE gm_sources SET timezone = ?, use_timezone = 1 WHERE id_source = ?',
+                                                            (corrected_tz, source_id)
+                                                        )
+                                                        await db.commit()
+                                                    
+                                                    # Atualizar cache em memória
+                                                    if source_id in self.sources:
+                                                        self.sources[source_id]['timezone'] = corrected_tz
+                                                        self.sources[source_id]['use_timezone'] = 1
+                                                    
+                                                    self.logger.info(
+                                                        f"✅ [MediaStack-{source_info['name']}] Fuso corrigido para {corrected_tz}, use_timezone=1"
+                                                    )
+                                                except Exception as e:
+                                                    self.logger.error(f"Failed to update timezone for MediaStack-{source_info['name']}: {e}")
+                                    
+                                    # PHASE 2: Processar artigos com fuso já corrigido
                                     for article_data in articles:
                                         if self.shutdown_flag:
                                             break
@@ -1851,62 +2009,6 @@ class NewsGather():
             # Use source timezone only if use_timezone flag is enabled
             use_tz = self.sources.get(source_id, {}).get('use_timezone', 0)
             published_at_gmt, detected_tz = normalize_timestamp_to_utc(published_at, source_tz, use_source_timezone=(use_tz == 1))
-            
-            # AUTO-DETECTION: Check if article timestamp is impossibly far in the future
-            if published_at_gmt and use_tz == 0:  # Only auto-correct if not manually configured
-                try:
-                    from datetime import datetime, timedelta
-                    parsed_gmt = datetime.fromisoformat(published_at_gmt.replace('Z', '+00:00'))
-                    now_utc = datetime.now(timezone.utc)
-                    time_diff = parsed_gmt - now_utc
-                    
-                    # If article is more than 30 minutes in the future, RSS feed is lying
-                    if time_diff > timedelta(minutes=30):
-                        # Calculate correct timezone
-                        total_seconds = int(time_diff.total_seconds())
-                        hours_offset = total_seconds // 3600
-                        minutes_offset = (total_seconds % 3600) // 60
-                        
-                        # Round to nearest 30-minute increment
-                        if minutes_offset > 15 and minutes_offset < 45:
-                            minutes_offset = 30
-                        elif minutes_offset >= 45:
-                            hours_offset += 1
-                            minutes_offset = 0
-                        else:
-                            minutes_offset = 0
-                        
-                        corrected_tz = f"UTC-{abs(hours_offset):02d}:{minutes_offset:02d}"
-                        
-                        self.logger.warning(
-                            f"🔍 AUTO-TIMEZONE-DETECT: [MediaStack-{source_name}] Article is {hours_offset}h{minutes_offset}m in future! "
-                            f"Setting timezone={corrected_tz}, use_timezone=1"
-                        )
-                        
-                        # Update database
-                        async with aiosqlite.connect(self.db_predator) as db:
-                            await db.execute(
-                                'UPDATE gm_sources SET timezone = ?, use_timezone = 1 WHERE id_source = ?',
-                                (corrected_tz, source_id)
-                            )
-                            await db.commit()
-                        
-                        # Update in-memory cache
-                        if source_id in self.sources:
-                            self.sources[source_id]['timezone'] = corrected_tz
-                            self.sources[source_id]['use_timezone'] = 1
-                        
-                        # Recalculate timestamp
-                        published_at_gmt, detected_tz = normalize_timestamp_to_utc(
-                            published_at, 
-                            corrected_tz, 
-                            use_source_timezone=True
-                        )
-                        
-                        self.logger.info(f"✅ [MediaStack-{source_name}] Recalculated: {published_at} → {published_at_gmt}")
-                        
-                except Exception as e:
-                    self.logger.debug(f"Auto-timezone detection failed for MediaStack-{source_name}: {e}")
             
             # Update source timezone if detected from article and different from configured
             if detected_tz and source_tz != detected_tz:

@@ -32,7 +32,7 @@ from article_fetcher import fetch_article_content
 
 from sqlalchemy import (create_engine, Table, Column, Integer, 
     String, MetaData, Text)
-from sqlalchemy import inspect,select
+from sqlalchemy import inspect, select, func, literal_column
 from sqlalchemy.dialects.sqlite import insert
 import os
 
@@ -40,7 +40,7 @@ import os
 from decouple import config
 
 # Only API_KEY1 is used by the reader (for getNewsSources)
-API_KEY1 = config('NEWS_API_KEY_1')
+API_KEY1 = str(config('NEWS_API_KEY_1', cast=str))
 
 
 def url_encode(url):
@@ -400,7 +400,7 @@ class ArticleDetailFrame(wx.Frame):
 
 def dbCredentials():
     """Return SQLite database path"""
-    db_path = config('DB_PATH', default='predator_news.db')
+    db_path = str(config('DB_PATH', default='predator_news.db', cast=str))
     if not os.path.isabs(db_path):
         script_dir = os.path.dirname(os.path.abspath(__file__))
         db_path = os.path.join(script_dir, db_path)
@@ -561,7 +561,14 @@ class NewsPanel(wx.Panel):
             source_id = source[0]
             # Use COUNT to get article count efficiently
             from sqlalchemy import func
-            stm1 = select(func.count()).select_from(gm_articles).where(gm_articles.c.id_source == source_id)
+            stm1 = select(func.count()).select_from(gm_articles).where(
+                gm_articles.c.id_source == source_id
+            ).where(
+                # CRITICAL: Never count articles with future timestamps
+                # Must convert published_at_gmt (ISO format with 'T') to datetime for correct comparison
+                (gm_articles.c.published_at_gmt.is_(None)) | 
+                (literal_column("datetime(published_at_gmt)") <= literal_column("datetime('now')"))
+            )
             article_count = con.execute(stm1).scalar()
             
             # Only keep sources with minimum article count AND non-empty names
@@ -590,7 +597,14 @@ class NewsPanel(wx.Panel):
             source = item['source_data']
             
             # Now load the actual articles
-            stm2 = select(gm_articles).where(gm_articles.c.id_source == source_id)
+            stm2 = select(gm_articles).where(
+                gm_articles.c.id_source == source_id
+            ).where(
+                # CRITICAL: Never return articles with future timestamps (not even 1 second)
+                # Must convert published_at_gmt (ISO format with 'T') to datetime for correct comparison
+                (gm_articles.c.published_at_gmt.is_(None)) | 
+                (literal_column("datetime(published_at_gmt)") <= literal_column("datetime('now')"))
+            )
             articles_qry = con.execute(stm2)
             articles = dict()
             for article in articles_qry.fetchall():
@@ -1065,7 +1079,7 @@ if __name__ == '__main__':
     handler.setFormatter(formatter)
     root.addHandler(handler)   # register the App instance with Twisted:
 
-    app = NewsGather(0)
+    app = NewsGather(False)
     # start the event loop:
     loop = get_event_loop()
     loop.run_until_complete(app.MainLoop())

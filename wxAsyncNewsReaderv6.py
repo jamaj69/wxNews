@@ -28,7 +28,7 @@ from asyncio.events import get_event_loop
 import os
 
 from sqlalchemy import (create_engine, Table, Column, Integer, 
-    String, MetaData, Text, select, func)
+    String, MetaData, Text, select, func, literal_column)
 
 # Load credentials from environment
 from decouple import config
@@ -770,6 +770,11 @@ class NewsPanel(wx.Panel):
                 # Count articles
                 stm_count = select(func.count()).select_from(gm_articles).where(
                     gm_articles.c.id_source == source_id
+                ).where(
+                    # CRITICAL: Never count articles with future timestamps
+                    # Must convert published_at_gmt (ISO format with 'T') to datetime for correct comparison
+                    (gm_articles.c.published_at_gmt.is_(None)) | 
+                    (literal_column("datetime(published_at_gmt)") <= literal_column("datetime('now')"))
                 )
                 article_count = con.execute(stm_count).scalar() or 0
                 
@@ -1080,10 +1085,11 @@ class NewsPanel(wx.Panel):
             con = eng.connect()
             
             # Load articles from all checked sources
-            # Filter out articles scheduled more than 24 hours in the future (keep NULL dates)
+            # CRITICAL: Never return articles with future timestamps (not even 1 second)
+            # Must convert published_at_gmt (ISO format with 'T') to datetime for correct comparison
             stm = select(gm_articles).where(
                 gm_articles.c.id_source.in_(checked_source_ids),
-                (gm_articles.c.published_at_gmt.is_(None)) | (gm_articles.c.published_at_gmt <= func.datetime('now', '+1 day'))
+                (gm_articles.c.published_at_gmt.is_(None)) | (literal_column("datetime(published_at_gmt)") <= literal_column("datetime('now')"))
             ).order_by(gm_articles.c.published_at_gmt.desc().nullslast()).limit(200)
             
             articles = con.execute(stm).fetchall()
@@ -1133,10 +1139,11 @@ class NewsPanel(wx.Panel):
             con = eng.connect()
             
             # Load articles for this source, prefer published_at_gmt
-            # Filter out articles scheduled more than 24 hours in the future (keep NULL dates)
+            # CRITICAL: Never return articles with future timestamps (not even 1 second)
+            # Must convert published_at_gmt (ISO format with 'T') to datetime for correct comparison
             stm = select(gm_articles).where(
                 gm_articles.c.id_source == source_id,
-                (gm_articles.c.published_at_gmt.is_(None)) | (gm_articles.c.published_at_gmt <= func.datetime('now', '+1 day'))
+                (gm_articles.c.published_at_gmt.is_(None)) | (literal_column("datetime(published_at_gmt)") <= literal_column("datetime('now')"))
             ).order_by(gm_articles.c.published_at_gmt.desc().nullslast()).limit(50)
             
             articles = con.execute(stm).fetchall()

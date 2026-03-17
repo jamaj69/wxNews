@@ -20,7 +20,7 @@ from fastapi.responses import JSONResponse
 import uvicorn
 
 from decouple import config
-from sqlalchemy import create_engine, MetaData, Table, select, func, text, Engine
+from sqlalchemy import create_engine, MetaData, Table, select, func, text, Engine, literal_column
 from sqlalchemy.dialects.sqlite import insert
 
 # Import the existing news gather class
@@ -221,8 +221,11 @@ async def get_articles(
             # Filter future inserted_at_ms timestamps (data integrity protection)
             articles_table.c.inserted_at_ms <= current_time_ms
         ).where(
+            # CRITICAL: Never return articles with future timestamps (not even 1 second)
+            # This ensures clients never see articles before they are published
+            # Must convert published_at_gmt (ISO format with 'T') to datetime for correct comparison
             (articles_table.c.published_at_gmt.is_(None)) | 
-            (articles_table.c.published_at_gmt <= func.datetime('now', '+1 day'))
+            (literal_column("datetime(published_at_gmt)") <= literal_column("datetime('now')"))
         )
         
         # Add source filter if provided
