@@ -66,6 +66,17 @@ ujson>=5.9.0
 async-timeout>=4.0.3
 
 # ============================================
+# Language Detection & Translation
+# ============================================
+# Language detection (free, offline)
+langdetect>=1.0.9
+
+# Translation services (pick one or more)
+googletrans==4.0.0rc1  # Free Google Translate API (recommended)
+deep-translator>=1.11.4  # Alternative with multiple backends
+# argostranslate>=1.9.1  # Fully offline translation (large downloads)
+
+# ============================================
 # Logging & Monitoring
 # ============================================
 # Better logging
