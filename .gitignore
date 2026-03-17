@@ -317,3 +317,26 @@ archive/
 # ============================================
 scripts/timezone/
 
+# ============================================
+# Temporary Test & Fix Scripts
+# ============================================
+# Timestamp correction scripts (one-time use)
+fix_*.py
+test_*.py
+*_test.py
+
+# Cleanup scripts
+run_cleanup.sh
+CLEANUP_README.md
+
+# Database backups
+*.db.backup_*
+predator_news.db.backup_*
+
+# Generated analysis scripts
+scripts/analyze_*.py
+scripts/find_*.py
+scripts/fix_*.py
+scripts/generate_*.py
+scripts/test_*.py
+
