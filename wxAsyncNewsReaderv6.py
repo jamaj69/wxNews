@@ -27,6 +27,7 @@ from typing import Optional, List, Dict
 # Article extraction for reader mode
 try:
     import trafilatura
+    from bs4 import BeautifulSoup
     TRAFILATURA_AVAILABLE = True
 except ImportError:
     TRAFILATURA_AVAILABLE = False
@@ -1185,7 +1186,14 @@ class NewsPanel(wx.Panel):
                             'User-Agent': 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36'
                         })
                         response.raise_for_status()
-                        downloaded = response.text
+                        # Use response.content (bytes) instead of response.text to avoid encoding issues
+                        downloaded_bytes = response.content
+                        
+                        # Parse HTML with BeautifulSoup (will handle encoding automatically)
+                        soup = BeautifulSoup(downloaded_bytes, 'html.parser')  # type: ignore[possibly-unbound]
+                        
+                        # Get HTML as string for trafilatura (BeautifulSoup decoded it correctly)
+                        downloaded = str(soup)
                         
                         # Extract content with trafilatura
                         content = trafilatura.extract(  # type: ignore[possibly-unbound]
@@ -1200,9 +1208,19 @@ class NewsPanel(wx.Panel):
                         if not content:
                             return None
                         
-                        # Get metadata if available
+                        # Extract title from HTML content
+                        title = "Article"
+                        
+                        # Try to get title from HTML (in order of preference)
+                        if soup.title and soup.title.string:
+                            title = soup.title.string.strip()
+                        elif soup.find('h1'):
+                            title = soup.find('h1').get_text().strip()
+                        elif soup.find('meta', property='og:title'):
+                            title = soup.find('meta', property='og:title')['content'].strip()
+                        
+                        # Get other metadata from trafilatura
                         metadata = trafilatura.extract_metadata(downloaded)  # type: ignore[possibly-unbound]
-                        title = str(metadata.title) if metadata and metadata.title else "Article"
                         author = str(metadata.author) if metadata and metadata.author else None
                         date = str(metadata.date) if metadata and metadata.date else None
                         
@@ -1211,10 +1229,6 @@ class NewsPanel(wx.Panel):
                         author = fix_encoding_if_needed(author) if author else None
                         date = fix_encoding_if_needed(date) if date else None
                         content = fix_encoding_if_needed(content)
-                        
-                        # Debug encoding
-                        if 'Ã' in title:
-                            print(f"DEBUG: Title still has encoding issues after fix: {title[:50]}")
                         
                         return {'content': content, 'title': title, 'author': author, 'date': date}
                     except Exception as e:
