@@ -47,6 +47,52 @@ API_URL = config('NEWS_API_URL', default='http://localhost:8765')
 POLL_INTERVAL_MS = int(config('NEWS_POLL_INTERVAL_MS', default=30000))  # 30 seconds
 
 
+def fix_encoding_if_needed(text):
+    """
+    Detect and fix encoding issues where UTF-8 was misinterpreted as Latin-1
+    
+    Common signs: 'Ã£' should be 'ã', 'Ã©' should be 'é', 'Ã§Ã£' should be 'ção', etc.
+    This happens when UTF-8 bytes are incorrectly decoded as Latin-1
+    
+    Multiple passes may be needed for double-encoding issues.
+    """
+    if not text:
+        return text
+    
+    original = text
+    max_iterations = 3  # Prevent infinite loops
+    
+    for iteration in range(max_iterations):
+        # Stop if no more Ã patterns to fix
+        if 'Ã' not in text:
+            break
+            
+        try:
+            # Try to encode as Latin-1 and decode as UTF-8
+            fixed = text.encode('latin-1').decode('utf-8')
+            
+            # Check if we made progress (fewer Ã or other improvements)
+            if fixed == text:
+                # No change, stop iterating
+                break
+                
+            if fixed.count('Ã') <= text.count('Ã'):
+                # Progress made or all fixed, use fixed version
+                text = fixed
+                # If all 'Ã' are gone, we're done
+                if 'Ã' not in text:
+                    break
+            else:
+                # No improvement, stop
+                break
+                
+        except (UnicodeDecodeError, UnicodeEncodeError):
+            # Can't fix this way, return what we have
+            break
+    
+    return text
+
+
 def dbCredentials():
     """Return SQLite database path"""
     db_path = str(config('DB_PATH', default='predator_news.db'))
@@ -1096,8 +1142,8 @@ class NewsPanel(wx.Panel):
             loading_label.SetLabel("⏳ Reloading...")
             loading_label.SetForegroundColour(wx.Colour(0, 120, 215))
         
-        # Reader mode state
-        reader_mode_active = [False]
+        # Reader mode state - start in Reader Mode by default if available
+        reader_mode_active = [TRAFILATURA_AVAILABLE and reader_mode_btn is not None]
         extracted_content: List[Optional[Dict]] = [None]
         
         def toggle_reader_mode(evt):
@@ -1156,9 +1202,19 @@ class NewsPanel(wx.Panel):
                         
                         # Get metadata if available
                         metadata = trafilatura.extract_metadata(downloaded)  # type: ignore[possibly-unbound]
-                        title = metadata.title if metadata and metadata.title else "Article"
-                        author = metadata.author if metadata and metadata.author else None
-                        date = metadata.date if metadata and metadata.date else None
+                        title = str(metadata.title) if metadata and metadata.title else "Article"
+                        author = str(metadata.author) if metadata and metadata.author else None
+                        date = str(metadata.date) if metadata and metadata.date else None
+                        
+                        # Fix encoding issues (double-encoded UTF-8)
+                        title = fix_encoding_if_needed(title)
+                        author = fix_encoding_if_needed(author) if author else None
+                        date = fix_encoding_if_needed(date) if date else None
+                        content = fix_encoding_if_needed(content)
+                        
+                        # Debug encoding
+                        if 'Ã' in title:
+                            print(f"DEBUG: Title still has encoding issues after fix: {title[:50]}")
                         
                         return {'content': content, 'title': title, 'author': author, 'date': date}
                     except Exception as e:
@@ -1248,19 +1304,26 @@ class NewsPanel(wx.Panel):
                     reader_mode_active[0] = True
                     print(f"✅ Reader mode activated: {result['title']}")
                 else:
-                    wx.CallAfter(lambda: loading_label.SetLabel("❌ Cannot extract content"))
-                    wx.CallAfter(lambda: loading_label.SetForegroundColour(wx.Colour(200, 0, 0)))
+                    # Extraction failed - fallback to full page if this was the initial load
+                    wx.CallAfter(lambda: loading_label.SetLabel("❌ Cannot extract - loading full page..."))
+                    wx.CallAfter(lambda: loading_label.SetForegroundColour(wx.Colour(200, 120, 0)))
                     if reader_mode_btn:
                         btn = reader_mode_btn  # Capture for lambda
                         wx.CallAfter(lambda: btn.SetLabel("📖 Reader Mode"))
+                    reader_mode_active[0] = False
+                    wx.CallAfter(lambda: article_viewer.LoadURL(url))
+                    print(f"⚠️ Reader mode extraction failed, falling back to full page: {url}")
                     
             except Exception as e:
                 print(f"ERROR in reader mode: {e}")
-                wx.CallAfter(lambda: loading_label.SetLabel("❌ Reader mode failed"))
-                wx.CallAfter(lambda: loading_label.SetForegroundColour(wx.Colour(200, 0, 0)))
+                # Fallback to full page on error
+                wx.CallAfter(lambda: loading_label.SetLabel("❌ Error - loading full page..."))
+                wx.CallAfter(lambda: loading_label.SetForegroundColour(wx.Colour(200, 120, 0)))
                 if reader_mode_btn:
                     btn = reader_mode_btn  # Capture for lambda
                     wx.CallAfter(lambda: btn.SetLabel("📖 Reader Mode"))
+                reader_mode_active[0] = False
+                wx.CallAfter(lambda: article_viewer.LoadURL(url))
         
         stop_btn.Bind(wx.EVT_BUTTON, on_stop)
         refresh_btn.Bind(wx.EVT_BUTTON, on_refresh)
@@ -1319,9 +1382,18 @@ class NewsPanel(wx.Panel):
         self.notebook.AddPage(article_panel, f"📄 {tab_title}", select=True)
         print(f"DEBUG: Added new tab: {tab_title}")
         
-        # Load URL after panel is visible (LoadURL is non-blocking)
-        wx.CallAfter(article_viewer.LoadURL, url)
-        print(f"DEBUG: Scheduled async load for: {url}")
+        # Open in Reader Mode by default if available, otherwise load full page
+        if TRAFILATURA_AVAILABLE and reader_mode_btn:
+            # Start in Reader Mode for faster loading
+            reader_mode_btn.SetLabel("🌐 Full Page")
+            loading_label.SetLabel("📖 Extracting content...")
+            loading_label.SetForegroundColour(wx.Colour(0, 120, 215))
+            wx.CallAfter(lambda: asyncio.create_task(extract_and_display_content()))
+            print(f"DEBUG: Opening in Reader Mode by default: {url}")
+        else:
+            # Fallback to full page load
+            wx.CallAfter(article_viewer.LoadURL, url)
+            print(f"DEBUG: Scheduled async load for: {url}")
     
     def OpenInExternalBrowser(self, url):
         """Open URL in external browser"""
