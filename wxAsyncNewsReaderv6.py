@@ -21,9 +21,18 @@ from datetime import datetime
 import requests
 import json
 import time
-from threading import Thread
+import asyncio
+from typing import Optional, List, Dict
 
-from wxasync import WxAsyncApp
+# Article extraction for reader mode
+try:
+    import trafilatura
+    TRAFILATURA_AVAILABLE = True
+except ImportError:
+    TRAFILATURA_AVAILABLE = False
+    print("WARNING: trafilatura not available - Reader Mode disabled")
+
+from wxasync import WxAsyncApp, AsyncBind
 from asyncio.events import get_event_loop
 import os
 
@@ -607,23 +616,32 @@ class NewsPanel(wx.Panel):
             logging.warning("⚠️  Polling disabled, skipping")
             return
         
-        def poll_in_thread():
-            try:
-                logging.info(f"🔄 Starting poll request (timestamp: {self.api_client.last_timestamp})")
-                # Poll ALL new articles regardless of currently displayed sources
-                new_articles = self.api_client.poll_new_articles(
+        # Schedule async polling task
+        asyncio.create_task(self.poll_articles_async())
+    
+    async def poll_articles_async(self):
+        """Async method to poll for new articles"""
+        try:
+            logging.info(f"🔄 Starting async poll request (timestamp: {self.api_client.last_timestamp})")
+            
+            # Run blocking API call in executor to not block event loop
+            loop = asyncio.get_event_loop()
+            new_articles = await loop.run_in_executor(
+                None,
+                lambda: self.api_client.poll_new_articles(
                     source_ids=None,  # Get all sources
                     limit=50
                 )
-                logging.info(f"📊 Poll completed - found {len(new_articles) if new_articles else 0} new articles")
-                if new_articles:
-                    wx.CallAfter(self.InsertNewArticles, new_articles)
-            except Exception as e:
-                logging.error(f"❌ Polling error: {e}")
-                import traceback
-                logging.error(traceback.format_exc())
-        
-        Thread(target=poll_in_thread, daemon=True).start()
+            )
+            
+            logging.info(f"📊 Poll completed - found {len(new_articles) if new_articles else 0} new articles")
+            if new_articles:
+                # Insert using wx.CallAfter for thread safety
+                wx.CallAfter(self.InsertNewArticles, new_articles)
+        except Exception as e:
+            logging.error(f"❌ Polling error: {e}")
+            import traceback
+            logging.error(traceback.format_exc())
     
     def InsertNewArticles(self, articles):
         """Insert new articles at the top of the feed using JavaScript"""
@@ -744,103 +762,116 @@ class NewsPanel(wx.Panel):
         return html
     
     def LoadSources(self):
-        """Load sources from database and populate CheckListBox"""
-        print("\n=== Loading Sources ===")
+        """Load sources from database and populate CheckListBox (wrapper)"""
+        asyncio.create_task(self.LoadSourcesAsync())
+    
+    async def LoadSourcesAsync(self):
+        """Async method to load sources from database"""
+        print("\n=== Loading Sources (Async) ===")
         
         try:
-            eng = dbOpen()
-            meta = MetaData()
+            loop = asyncio.get_event_loop()
             
-            gm_sources = Table('gm_sources', meta, autoload_with=eng)
-            gm_articles = Table('gm_articles', meta, autoload_with=eng)
-            
-            con = eng.connect()
-            
-            # Get sources with article counts
-            MIN_ARTICLES = 10
-            
-            stm = select(gm_sources)
-            rs = con.execute(stm)
-            
-            source_list = []
-            for source in rs.fetchall():
-                source_id = source[0]
-                source_name = source[1] if source[1] else ""
+            # Run database operations in executor to not block event loop
+            def load_sources_from_db():
+                eng = dbOpen()
+                meta = MetaData()
                 
-                # Count articles
-                stm_count = select(func.count()).select_from(gm_articles).where(
-                    gm_articles.c.id_source == source_id
-                ).where(
-                    # CRITICAL: Never count articles with future timestamps
-                    # Must convert published_at_gmt (ISO format with 'T') to datetime for correct comparison
-                    (gm_articles.c.published_at_gmt.is_(None)) | 
-                    (literal_column("datetime(published_at_gmt)") <= literal_column("datetime('now')"))
-                )
-                article_count = con.execute(stm_count).scalar() or 0
+                gm_sources = Table('gm_sources', meta, autoload_with=eng)
+                gm_articles = Table('gm_articles', meta, autoload_with=eng)
                 
-                if article_count >= MIN_ARTICLES and source_name.strip():
-                    source_list.append({
-                        'source_id': source_id,
-                        'source_name': source_name.strip(),
-                        'source_data': source,
+                con = eng.connect()
+                
+                # Get sources with article counts
+                MIN_ARTICLES = 10
+                
+                stm = select(gm_sources)
+                rs = con.execute(stm)
+                
+                source_list = []
+                for source in rs.fetchall():
+                    source_id = source[0]
+                    source_name = source[1] if source[1] else ""
+                    
+                    # Count articles
+                    stm_count = select(func.count()).select_from(gm_articles).where(
+                        gm_articles.c.id_source == source_id
+                    ).where(
+                        # CRITICAL: Never count articles with future timestamps
+                        # Must convert published_at_gmt (ISO format with 'T') to datetime for correct comparison
+                        (gm_articles.c.published_at_gmt.is_(None)) | 
+                        (literal_column("datetime(published_at_gmt)") <= literal_column("datetime('now')"))
+                    )
+                    article_count = con.execute(stm_count).scalar() or 0
+                    
+                    if article_count >= MIN_ARTICLES and source_name.strip():
+                        source_list.append({
+                            'source_id': source_id,
+                            'source_name': source_name.strip(),
+                            'source_data': source,
+                            'article_count': article_count
+                        })
+                
+                # Sort by article count (most articles first)
+                source_list.sort(key=lambda x: x['article_count'], reverse=True)
+                
+                con.close()
+                return source_list
+            
+            # Execute in thread pool
+            source_list = await loop.run_in_executor(None, load_sources_from_db)
+            
+            print(f"Found {len(source_list)} sources with >= {10} articles")
+            
+            # Populate CheckListBox (must be done in main thread via CallAfter)
+            def populate_ui():
+                self.sources_checklist.Clear()
+                self.source_id_map = {}
+                
+                for idx, item in enumerate(source_list):
+                    source_id = item['source_id']
+                    source_name = item['source_name']
+                    article_count = item['article_count']
+                    
+                    display_name = f"{source_name} ({article_count})"
+                    self.sources_checklist.Append(display_name)
+                    self.source_id_map[idx] = source_id
+                    
+                    # Store full source data
+                    self.sources[source_id] = {
+                        'id_source': source_id,
+                        'name': source_name,
+                        'description': item['source_data'][2],
+                        'url': item['source_data'][3],
+                        'category': item['source_data'][4],
+                        'language': item['source_data'][5],
+                        'country': item['source_data'][6],
                         'article_count': article_count
-                    })
+                    }
                 
-                wx.YieldIfNeeded()
-            
-            # Sort by article count (most articles first)
-            source_list.sort(key=lambda x: x['article_count'], reverse=True)
-            
-            print(f"Found {len(source_list)} sources with >= {MIN_ARTICLES} articles")
-            
-            # Populate CheckListBox
-            self.sources_checklist.Clear()
-            self.source_id_map = {}
-            
-            for idx, item in enumerate(source_list):
-                source_id = item['source_id']
-                source_name = item['source_name']
-                article_count = item['article_count']
+                # Update status
+                self.status_text.SetLabel(f"{len(source_list)} sources loaded")
                 
-                display_name = f"{source_name} ({article_count})"
-                self.sources_checklist.Append(display_name)
-                self.source_id_map[idx] = source_id
+                # Select all sources by default
+                for i in range(self.sources_checklist.GetCount()):
+                    self.sources_checklist.Check(i, True)
                 
-                # Store full source data
-                self.sources[source_id] = {
-                    'id_source': source_id,
-                    'name': source_name,
-                    'description': item['source_data'][2],
-                    'url': item['source_data'][3],
-                    'category': item['source_data'][4],
-                    'language': item['source_data'][5],
-                    'country': item['source_data'][6],
-                    'article_count': article_count
-                }
+                checked_count = self.sources_checklist.GetCount()
+                self.status_text.SetLabel(f"{checked_count} sources selected")
+                print(f"✓ Auto-selected all {checked_count} sources")
+                
+                # Auto-load checked sources
+                wx.CallAfter(self.LoadCheckedSources)
+                
+                print(f"✓ Loaded {len(source_list)} sources")
             
-            con.close()
-            
-            # Update status
-            self.status_text.SetLabel(f"{len(source_list)} sources loaded")
-            
-            # Select all sources by default
-            for i in range(self.sources_checklist.GetCount()):
-                self.sources_checklist.Check(i, True)
-            
-            checked_count = self.sources_checklist.GetCount()
-            self.status_text.SetLabel(f"{checked_count} sources selected")
-            print(f"✓ Auto-selected all {checked_count} sources")
-            
-            # Auto-load checked sources
-            wx.CallAfter(self.LoadCheckedSources)
-            
-            print(f"✓ Loaded {len(source_list)} sources")
+            wx.CallAfter(populate_ui)
             
         except Exception as e:
             print(f"ERROR loading sources: {e}")
             import traceback
             traceback.print_exc()
-            self.status_text.SetLabel("Error loading sources")
+            wx.CallAfter(lambda: self.status_text.SetLabel("Error loading sources"))
     
     def ShowWelcomeMessage(self):
         """Display welcome message in HTML viewer"""
@@ -973,11 +1004,19 @@ class NewsPanel(wx.Panel):
     
     def OpenArticleTab(self, url):
         """Open a news article in a new tab"""
+        print(f"DEBUG: OpenArticleTab called with URL: {url}")
+        
+        # Validate URL
+        if not url or not (url.startswith('http://') or url.startswith('https://')):
+            print(f"ERROR: Invalid URL: {url}")
+            wx.MessageBox(f"Invalid URL: {url}", "Error", wx.OK | wx.ICON_ERROR)
+            return
+        
         # Create new panel for the article
         article_panel = wx.Panel(self.notebook)
         article_sizer = wx.BoxSizer(wx.VERTICAL)
         
-        # Add close button bar
+        # Add close button bar with loading indicator
         button_bar = wx.Panel(article_panel)
         button_bar.SetBackgroundColour(wx.Colour(240, 240, 240))
         button_sizer = wx.BoxSizer(wx.HORIZONTAL)
@@ -985,6 +1024,30 @@ class NewsPanel(wx.Panel):
         back_btn = wx.Button(button_bar, label="← Back to Feed", size=(120, 28))
         back_btn.Bind(wx.EVT_BUTTON, lambda evt: self.CloseArticleTab(article_panel))
         button_sizer.Add(back_btn, 0, wx.ALL, 5)
+        
+        # Add loading indicator with elapsed time
+        loading_label = wx.StaticText(button_bar, label="⏳ Loading...")
+        loading_label.SetForegroundColour(wx.Colour(0, 120, 215))
+        button_sizer.Add(loading_label, 0, wx.ALL | wx.ALIGN_CENTER_VERTICAL, 5)
+        
+        # Add stop button
+        stop_btn = wx.Button(button_bar, label="⏹ Stop", size=(80, 28))
+        button_sizer.Add(stop_btn, 0, wx.ALL, 5)
+        
+        # Add refresh button
+        refresh_btn = wx.Button(button_bar, label="🔄 Refresh", size=(80, 28))
+        button_sizer.Add(refresh_btn, 0, wx.ALL, 5)
+        
+        # Add Reader Mode button (only if trafilatura available)
+        reader_mode_btn = None
+        if TRAFILATURA_AVAILABLE:
+            reader_mode_btn = wx.Button(button_bar, label="📖 Reader Mode", size=(120, 28))
+            button_sizer.Add(reader_mode_btn, 0, wx.ALL, 5)
+        
+        # Add "Open in Browser" button for slow pages
+        browser_btn = wx.Button(button_bar, label="🌐 Open in Browser", size=(140, 28))
+        browser_btn.Bind(wx.EVT_BUTTON, lambda evt: self.OpenInExternalBrowser(url))
+        button_sizer.Add(browser_btn, 0, wx.ALL, 5)
         
         url_text = wx.StaticText(button_bar, label=url)
         url_text.SetForegroundColour(wx.Colour(100, 100, 100))
@@ -995,9 +1058,253 @@ class NewsPanel(wx.Panel):
         
         # Create WebView for the article
         article_viewer = wx.html2.WebView.New(article_panel)
-        article_viewer.LoadURL(url)
-        article_sizer.Add(article_viewer, 1, wx.EXPAND)
         
+        # Timer variables for tracking loading time
+        load_start_time = [None]  # Use list to make it mutable in closures
+        load_timer: List[Optional[wx.Timer]] = [None]
+        elapsed_seconds = [0]
+        
+        def update_loading_time():
+            """Update the loading indicator with elapsed time"""
+            if load_start_time[0] is not None:
+                elapsed_seconds[0] += 1
+                loading_label.SetLabel(f"⏳ Loading... ({elapsed_seconds[0]}s)")
+                
+                # Warning after 15 seconds
+                if elapsed_seconds[0] == 15:
+                    loading_label.SetLabel(f"⚠️ Slow load... ({elapsed_seconds[0]}s)")
+                    loading_label.SetForegroundColour(wx.Colour(200, 120, 0))
+                    print(f"WARNING: Page taking long to load: {url}")
+                
+                # Suggest browser after 30 seconds
+                elif elapsed_seconds[0] == 30:
+                    loading_label.SetLabel(f"⏱️ Very slow! Try browser button ({elapsed_seconds[0]}s)")
+                    loading_label.SetForegroundColour(wx.Colour(200, 0, 0))
+                    print(f"WARNING: Page timeout approaching: {url}")
+        
+        # Bind stop and refresh buttons
+        def on_stop(evt):
+            article_viewer.Stop()
+            if load_timer[0]:
+                load_timer[0].Stop()
+            loading_label.SetLabel("⏹ Stopped")
+            loading_label.SetForegroundColour(wx.Colour(150, 150, 0))
+        
+        def on_refresh(evt):
+            article_viewer.Reload()
+            elapsed_seconds[0] = 0
+            loading_label.SetLabel("⏳ Reloading...")
+            loading_label.SetForegroundColour(wx.Colour(0, 120, 215))
+        
+        # Reader mode state
+        reader_mode_active = [False]
+        extracted_content: List[Optional[Dict]] = [None]
+        
+        def toggle_reader_mode(evt):
+            """Toggle between reader mode and full page"""
+            if not reader_mode_btn:  # Guard: only if button exists
+                return
+                
+            if not reader_mode_active[0]:
+                # Switch to reader mode - extract content
+                loading_label.SetLabel("📖 Extracting content...")
+                loading_label.SetForegroundColour(wx.Colour(0, 120, 215))
+                reader_mode_btn.SetLabel("🌐 Full Page")
+                
+                # Run extraction in background
+                asyncio.create_task(extract_and_display_content())
+            else:
+                # Switch back to full page
+                loading_label.SetLabel("⏳ Loading full page...")
+                loading_label.SetForegroundColour(wx.Colour(0, 120, 215))
+                reader_mode_btn.SetLabel("📖 Reader Mode")
+                reader_mode_active[0] = False
+                article_viewer.LoadURL(url)
+        
+        async def extract_and_display_content():
+            """Extract article content and display in reader mode"""
+            if not TRAFILATURA_AVAILABLE:  # Guard: should not reach here, but check anyway
+                return
+                
+            try:
+                loop = asyncio.get_event_loop()
+                
+                # Download and extract in executor to not block
+                def extract_content():
+                    if not TRAFILATURA_AVAILABLE:
+                        return None
+                    try:
+                        # Download HTML
+                        response = requests.get(url, timeout=10, headers={
+                            'User-Agent': 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36'
+                        })
+                        response.raise_for_status()
+                        downloaded = response.text
+                        
+                        # Extract content with trafilatura
+                        content = trafilatura.extract(  # type: ignore[possibly-unbound]
+                            downloaded,
+                            include_comments=False,
+                            include_tables=True,
+                            include_images=False,
+                            output_format='html',
+                            favor_recall=True
+                        )
+                        
+                        if not content:
+                            return None
+                        
+                        # Get metadata if available
+                        metadata = trafilatura.extract_metadata(downloaded)  # type: ignore[possibly-unbound]
+                        title = metadata.title if metadata and metadata.title else "Article"
+                        author = metadata.author if metadata and metadata.author else None
+                        date = metadata.date if metadata and metadata.date else None
+                        
+                        return {'content': content, 'title': title, 'author': author, 'date': date}
+                    except Exception as e:
+                        print(f"ERROR extracting content: {e}")
+                        return None
+                
+                result = await loop.run_in_executor(None, extract_content)
+                
+                if result:
+                    extracted_content[0] = result
+                    
+                    # Build reader mode HTML
+                    reader_html = f"""
+                    <!DOCTYPE html>
+                    <html>
+                    <head>
+                        <meta charset="UTF-8">
+                        <style>
+                            body {{
+                                font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+                                line-height: 1.6;
+                                max-width: 800px;
+                                margin: 0 auto;
+                                padding: 40px 20px;
+                                background: #ffffff;
+                                color: #333;
+                            }}
+                            h1 {{
+                                font-size: 2em;
+                                margin-bottom: 0.5em;
+                                color: #000;
+                            }}
+                            .meta {{
+                                color: #666;
+                                font-size: 0.9em;
+                                margin-bottom: 2em;
+                                padding-bottom: 1em;
+                                border-bottom: 1px solid #eee;
+                            }}
+                            .content {{
+                                font-size: 1.1em;
+                            }}
+                            .content p {{
+                                margin: 1em 0;
+                            }}
+                            .content h2 {{
+                                margin-top: 1.5em;
+                                margin-bottom: 0.5em;
+                            }}
+                            .content img {{
+                                max-width: 100%;
+                                height: auto;
+                            }}
+                            table {{
+                                border-collapse: collapse;
+                                width: 100%;
+                                margin: 1em 0;
+                            }}
+                            th, td {{
+                                border: 1px solid #ddd;
+                                padding: 8px;
+                                text-align: left;
+                            }}
+                            th {{
+                                background-color: #f5f5f5;
+                            }}
+                        </style>
+                    </head>
+                    <body>
+                        <h1>{result['title']}</h1>
+                        <div class="meta">
+                            {f"<div>By {result['author']}</div>" if result['author'] else ""}
+                            {f"<div>{result['date']}</div>" if result['date'] else ""}
+                            <div><a href="{url}">{url}</a></div>
+                        </div>
+                        <div class="content">
+                            {result['content']}
+                        </div>
+                    </body>
+                    </html>
+                    """
+                    
+                    # Display in WebView
+                    wx.CallAfter(lambda: article_viewer.SetPage(reader_html, url))
+                    wx.CallAfter(lambda: loading_label.SetLabel("✅ Reader Mode"))
+                    wx.CallAfter(lambda: loading_label.SetForegroundColour(wx.Colour(0, 150, 0)))
+                    reader_mode_active[0] = True
+                    print(f"✅ Reader mode activated: {result['title']}")
+                else:
+                    wx.CallAfter(lambda: loading_label.SetLabel("❌ Cannot extract content"))
+                    wx.CallAfter(lambda: loading_label.SetForegroundColour(wx.Colour(200, 0, 0)))
+                    if reader_mode_btn:
+                        btn = reader_mode_btn  # Capture for lambda
+                        wx.CallAfter(lambda: btn.SetLabel("📖 Reader Mode"))
+                    
+            except Exception as e:
+                print(f"ERROR in reader mode: {e}")
+                wx.CallAfter(lambda: loading_label.SetLabel("❌ Reader mode failed"))
+                wx.CallAfter(lambda: loading_label.SetForegroundColour(wx.Colour(200, 0, 0)))
+                if reader_mode_btn:
+                    btn = reader_mode_btn  # Capture for lambda
+                    wx.CallAfter(lambda: btn.SetLabel("📖 Reader Mode"))
+        
+        stop_btn.Bind(wx.EVT_BUTTON, on_stop)
+        refresh_btn.Bind(wx.EVT_BUTTON, on_refresh)
+        if reader_mode_btn:
+            reader_mode_btn.Bind(wx.EVT_BUTTON, toggle_reader_mode)
+        
+        # Bind loading events to update UI
+        def on_loading(evt):
+            load_start_time[0] = wx.GetApp().GetTopWindow().GetSize()  # Dummy marker
+            elapsed_seconds[0] = 0
+            loading_label.SetLabel("⏳ Loading...")
+            loading_label.SetForegroundColour(wx.Colour(0, 120, 215))
+            # Start timer to update every second
+            if load_timer[0]:
+                load_timer[0].Stop()
+            load_timer[0] = wx.Timer(article_panel)
+            article_panel.Bind(wx.EVT_TIMER, lambda e: update_loading_time(), load_timer[0])
+            load_timer[0].Start(1000)  # Update every second
+            print(f"DEBUG: Started loading: {evt.GetURL()}")
+        
+        def on_loaded(evt):
+            load_start_time[0] = None
+            if load_timer[0]:
+                load_timer[0].Stop()
+            loading_label.SetLabel(f"✅ Loaded in {elapsed_seconds[0]}s")
+            loading_label.SetForegroundColour(wx.Colour(0, 150, 0))
+            print(f"DEBUG: Page loaded successfully in {elapsed_seconds[0]}s: {evt.GetURL()}")
+            # Hide loading indicator after 3 seconds
+            wx.CallLater(3000, lambda: loading_label.SetLabel(""))
+        
+        def on_error(evt):
+            load_start_time[0] = None
+            if load_timer[0]:
+                load_timer[0].Stop()
+            error_msg = evt.GetString() if hasattr(evt, 'GetString') else "Unknown error"
+            loading_label.SetLabel(f"❌ Error after {elapsed_seconds[0]}s")
+            loading_label.SetForegroundColour(wx.Colour(200, 0, 0))
+            print(f"ERROR: Failed to load page after {elapsed_seconds[0]}s: {evt.GetURL()} - {error_msg}")
+        
+        article_viewer.Bind(wx.html2.EVT_WEBVIEW_NAVIGATING, on_loading)
+        article_viewer.Bind(wx.html2.EVT_WEBVIEW_LOADED, on_loaded)
+        article_viewer.Bind(wx.html2.EVT_WEBVIEW_ERROR, on_error)
+        
+        article_sizer.Add(article_viewer, 1, wx.EXPAND)
         article_panel.SetSizer(article_sizer)
         
         # Extract title from URL for tab label
@@ -1010,7 +1317,17 @@ class NewsPanel(wx.Panel):
         
         # Add the new tab
         self.notebook.AddPage(article_panel, f"📄 {tab_title}", select=True)
-        print(f"Opened new tab: {tab_title}")
+        print(f"DEBUG: Added new tab: {tab_title}")
+        
+        # Load URL after panel is visible (LoadURL is non-blocking)
+        wx.CallAfter(article_viewer.LoadURL, url)
+        print(f"DEBUG: Scheduled async load for: {url}")
+    
+    def OpenInExternalBrowser(self, url):
+        """Open URL in external browser"""
+        import webbrowser
+        print(f"DEBUG: Opening in external browser: {url}")
+        webbrowser.open(url)
     
     def CloseArticleTab(self, panel):
         """Close an article tab"""
@@ -1058,7 +1375,11 @@ class NewsPanel(wx.Panel):
         self.LoadCheckedSources()
     
     def LoadCheckedSources(self):
-        """Load articles from all checked sources combined"""
+        """Load articles from all checked sources combined (wrapper)"""
+        asyncio.create_task(self.LoadCheckedSourcesAsync())
+    
+    async def LoadCheckedSourcesAsync(self):
+        """Async method to load articles from checked sources"""
         # Get checked source IDs
         checked_source_ids = []
         for i in range(self.sources_checklist.GetCount()):
@@ -1068,45 +1389,53 @@ class NewsPanel(wx.Panel):
                     checked_source_ids.append(source_id)
         
         if not checked_source_ids:
-            self.ShowWelcomeMessage()
+            wx.CallAfter(self.ShowWelcomeMessage)
             self.current_source_ids = []
             return
         
-        print(f"\n=== Loading articles from {len(checked_source_ids)} checked sources ===")
+        print(f"\n=== Loading articles from {len(checked_source_ids)} checked sources (Async) ===")
         
         # Update current source IDs for polling
         self.current_source_ids = checked_source_ids
         
         try:
-            eng = dbOpen()
-            meta = MetaData()
-            gm_articles = Table('gm_articles', meta, autoload_with=eng)
+            loop = asyncio.get_event_loop()
             
-            con = eng.connect()
+            # Run database query in executor
+            def load_articles_from_db():
+                eng = dbOpen()
+                meta = MetaData()
+                gm_articles = Table('gm_articles', meta, autoload_with=eng)
+                
+                con = eng.connect()
+                
+                # Load articles from all checked sources
+                # CRITICAL: Never return articles with future timestamps (not even 1 second)
+                # Must convert published_at_gmt (ISO format with 'T') to datetime for correct comparison
+                stm = select(gm_articles).where(
+                    gm_articles.c.id_source.in_(checked_source_ids),
+                    (gm_articles.c.published_at_gmt.is_(None)) | (literal_column("datetime(published_at_gmt)") <= literal_column("datetime('now')"))
+                ).order_by(gm_articles.c.published_at_gmt.desc().nullslast()).limit(200)
+                
+                articles = con.execute(stm).fetchall()
+                con.close()
+                
+                return articles
             
-            # Load articles from all checked sources
-            # CRITICAL: Never return articles with future timestamps (not even 1 second)
-            # Must convert published_at_gmt (ISO format with 'T') to datetime for correct comparison
-            stm = select(gm_articles).where(
-                gm_articles.c.id_source.in_(checked_source_ids),
-                (gm_articles.c.published_at_gmt.is_(None)) | (literal_column("datetime(published_at_gmt)") <= literal_column("datetime('now')"))
-            ).order_by(gm_articles.c.published_at_gmt.desc().nullslast()).limit(200)
-            
-            articles = con.execute(stm).fetchall()
-            con.close()
+            articles = await loop.run_in_executor(None, load_articles_from_db)
             
             if not articles:
                 source_names = [self.sources[sid]['name'] for sid in checked_source_ids[:3]]
                 display_names = ", ".join(source_names)
                 if len(checked_source_ids) > 3:
                     display_names += f" and {len(checked_source_ids) - 3} more"
-                self.ShowNoArticlesMessage(display_names)
+                wx.CallAfter(lambda: self.ShowNoArticlesMessage(display_names))
                 return
             
             # Build HTML with multiple sources
             source_names = [self.sources[sid]['name'] for sid in checked_source_ids]
             html = self.BuildMultiSourceArticlesHTML(source_names, articles)
-            self.html_viewer.SetPage(html, "")
+            wx.CallAfter(lambda: self.html_viewer.SetPage(html, ""))
             
             print(f"✓ Loaded {len(articles)} articles from {len(checked_source_ids)} sources")
             
@@ -1120,8 +1449,12 @@ class NewsPanel(wx.Panel):
             traceback.print_exc()
     
     def LoadSourceArticles(self, source_id):
-        """Load and display articles from selected source"""
-        print(f"\n=== Loading articles for source: {source_id} ===")
+        """Load and display articles from selected source (wrapper)"""
+        asyncio.create_task(self.LoadSourceArticlesAsync(source_id))
+    
+    async def LoadSourceArticlesAsync(self, source_id):
+        """Async method to load articles from specific source"""
+        print(f"\n=== Loading articles for source: {source_id} (Async) ===")
         
         try:
             source = self.sources.get(source_id)
@@ -1132,30 +1465,38 @@ class NewsPanel(wx.Panel):
             # Update current source IDs for polling
             self.current_source_ids = [source_id]
             
-            eng = dbOpen()
-            meta = MetaData()
-            gm_articles = Table('gm_articles', meta, autoload_with=eng)
+            loop = asyncio.get_event_loop()
             
-            con = eng.connect()
+            # Run database query in executor
+            def load_articles_from_db():
+                eng = dbOpen()
+                meta = MetaData()
+                gm_articles = Table('gm_articles', meta, autoload_with=eng)
+                
+                con = eng.connect()
+                
+                # Load articles for this source, prefer published_at_gmt
+                # CRITICAL: Never return articles with future timestamps (not even 1 second)
+                # Must convert published_at_gmt (ISO format with 'T') to datetime for correct comparison
+                stm = select(gm_articles).where(
+                    gm_articles.c.id_source == source_id,
+                    (gm_articles.c.published_at_gmt.is_(None)) | (literal_column("datetime(published_at_gmt)") <= literal_column("datetime('now')"))
+                ).order_by(gm_articles.c.published_at_gmt.desc().nullslast()).limit(50)
+                
+                articles = con.execute(stm).fetchall()
+                con.close()
+                
+                return articles
             
-            # Load articles for this source, prefer published_at_gmt
-            # CRITICAL: Never return articles with future timestamps (not even 1 second)
-            # Must convert published_at_gmt (ISO format with 'T') to datetime for correct comparison
-            stm = select(gm_articles).where(
-                gm_articles.c.id_source == source_id,
-                (gm_articles.c.published_at_gmt.is_(None)) | (literal_column("datetime(published_at_gmt)") <= literal_column("datetime('now')"))
-            ).order_by(gm_articles.c.published_at_gmt.desc().nullslast()).limit(50)
-            
-            articles = con.execute(stm).fetchall()
-            con.close()
+            articles = await loop.run_in_executor(None, load_articles_from_db)
             
             if not articles:
-                self.ShowNoArticlesMessage(source['name'])
+                wx.CallAfter(lambda: self.ShowNoArticlesMessage(source['name']))
                 return
             
             # Build HTML to display articles
             html = self.BuildArticlesHTML(source, articles)
-            self.html_viewer.SetPage(html, "")
+            wx.CallAfter(lambda: self.html_viewer.SetPage(html, ""))
             
             print(f"✓ Loaded {len(articles)} articles")
             

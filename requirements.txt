@@ -43,6 +43,9 @@ requests>=2.31.0
 beautifulsoup4>=4.12.2
 lxml>=5.1.0
 
+# Article extraction (reader mode)
+trafilatura>=1.8.0  # Fast article content extraction
+
 # ============================================
 # Social Media (Twitter Replacement)
 # ============================================
