@@ -14,6 +14,7 @@ from multiprocessing import Queue
 import re
 import subprocess
 import tempfile
+from typing import Optional, Tuple
 
 import urllib.request 
 import json
@@ -44,6 +45,16 @@ from decouple import config
 # Import article content fetcher
 from article_fetcher import fetch_article_content
 import signal
+
+# Language detection
+try:
+    from langdetect import detect, LangDetectException  # type: ignore
+    LANGDETECT_AVAILABLE = True
+except ImportError:
+    LANGDETECT_AVAILABLE = False
+    detect = None  # type: ignore
+    LangDetectException = Exception  # type: ignore
+    logging.warning("⚠️  langdetect not available - language detection disabled. Install with: pip install langdetect")
 
 # NewsAPI Configuration
 API_KEY1 = str(config('NEWS_API_KEY_1', cast=str))
@@ -210,6 +221,49 @@ class HTMLContentSanitizer(HTMLParser):
         return ''.join(self.content)
 
 
+def fix_encoding_if_needed(text):
+    """
+    Detect and fix encoding issues where UTF-8 was misinterpreted as Latin-1
+    
+    Common signs: 'Ã£' should be 'ã', 'Ã©' should be 'é', 'Ã§Ã£' should be 'ção', etc.
+    This happens when UTF-8 bytes are incorrectly decoded as Latin-1
+    
+    Multiple passes may be needed for double-encoding issues.
+    """
+    if not text:
+        return text
+    
+    original = text
+    max_iterations = 3  # Prevent infinite loops
+    
+    for iteration in range(max_iterations):
+        # Stop if no more Ã patterns to fix
+        if 'Ã' not in text:
+            break
+            
+        try:
+            # Try to encode as Latin-1 and decode as UTF-8
+            fixed = text.encode('latin-1').decode('utf-8')
+            
+            # Check if we made progress (fewer Ã or other improvements)
+            if fixed == text:
+                # No change, stop iterating
+                break
+                
+            if fixed.count('Ã') < text.count('Ã'):
+                # Progress made, use fixed version
+                text = fixed
+            else:
+                # No improvement, stop
+                break
+                
+        except (UnicodeDecodeError, UnicodeEncodeError):
+            # Can't fix this way, return what we have
+            break
+    
+    return text
+
+
 def sanitize_html_content(html_content):
     """Sanitize HTML content during collection
     
@@ -225,6 +279,9 @@ def sanitize_html_content(html_content):
     """
     if not html_content:
         return ""
+    
+    # Fix encoding issues first (UTF-8 misinterpreted as Latin-1)
+    html_content = fix_encoding_if_needed(html_content)
     
     # Unescape HTML entities
     html_content = html.unescape(html_content)
@@ -309,14 +366,61 @@ def dbCredentials():
 
 
 def as_text(value):
-    """Return a safe string for loosely-typed feed/API fields."""
+    """Return a safe string for loosely-typed feed/API fields with encoding fix."""
     if value is None:
         return ""
     if isinstance(value, str):
-        return value
+        # Fix encoding issues before returning
+        return fix_encoding_if_needed(value)
     if isinstance(value, list):
         return " ".join(as_text(item) for item in value if item is not None)
-    return str(value)
+    result = str(value)
+    return fix_encoding_if_needed(result)
+
+
+def detect_article_language(title, description=None, content=None):
+    """
+    Detect language of article using langdetect
+    
+    Args:
+        title: Article title
+        description: Article description (optional)
+        content: Article content (optional)
+    
+    Returns:
+        tuple: (language_code, confidence) or (None, 0.0) if detection fails
+    """
+    if not LANGDETECT_AVAILABLE:
+        return None, 0.0
+    
+    # Assertion for type checker - at this point, detect and LangDetectException are available
+    assert detect is not None, "detect should be available when LANGDETECT_AVAILABLE is True"
+    
+    # Build detection text (prefer longer text for better accuracy)
+    detection_text = ""
+    
+    if content and len(content.strip()) > 100:
+        detection_text = content[:500]  # Use first 500 chars of content
+    elif description and len(description.strip()) > 50:
+        detection_text = description[:300]  # Use description
+    elif title:
+        detection_text = title  # Fallback to title
+    else:
+        return None, 0.0
+    
+    # Clean HTML tags if present
+    detection_text = re.sub(r'<[^>]+>', '', detection_text).strip()
+    
+    if len(detection_text) < 10:
+        return None, 0.0
+    
+    try:
+        lang_code = detect(detection_text)
+        # langdetect doesn't provide confidence, so we use 0.85 as default
+        return lang_code, 0.85
+    except (LangDetectException, Exception) as e:
+        # Detection failed (text too short, unknown language, etc.)
+        return None, 0.0
 
 
 # Country code to timezone mapping (most common timezone for each country)
@@ -1485,6 +1589,11 @@ class NewsGather():
                                                     self.logger.error(f"Failed to insert source {source_name}: {e}")
                                                     conn.rollback()
                                     
+                                    # Detect language
+                                    detected_lang, lang_confidence = detect_article_language(
+                                        article_title, article_description, article_content
+                                    )
+                                    
                                     # Insert article
                                     new_article = {
                                         'id_article': article_key,
@@ -1497,7 +1606,9 @@ class NewsGather():
                                         'publishedAt': article_publishedAt,  # Original with timezone
                                         'published_at_gmt': article_publishedAt_gmt,  # Normalized UTC
                                         'content': article_content,
-                                        'inserted_at_ms': int(time.time() * 1000)  # Insertion timestamp in ms
+                                        'inserted_at_ms': int(time.time() * 1000),  # Insertion timestamp in ms
+                                        'detected_language': detected_lang,
+                                        'language_confidence': lang_confidence
                                     }
                                     
                                     # Try to enrich with missing content
@@ -1724,6 +1835,9 @@ class NewsGather():
                     # Extract first image from description and remove it from HTML to avoid duplicates
                     extracted_image_url, clean_description = extract_and_remove_first_image(clean_description) if clean_description else (None, clean_description)
                     
+                    # Detect language
+                    detected_lang, lang_confidence = detect_article_language(title, clean_description)
+                    
                     # Create article object
                     new_article = {
                         'id_article': article_key,
@@ -1736,7 +1850,9 @@ class NewsGather():
                         'publishedAt': published,  # Original with timezone
                         'published_at_gmt': published_gmt,  # Normalized UTC
                         'content': '',
-                        'inserted_at_ms': int(time.time() * 1000)  # Insertion timestamp in ms
+                        'inserted_at_ms': int(time.time() * 1000),  # Insertion timestamp in ms
+                        'detected_language': detected_lang,
+                        'language_confidence': lang_confidence
                     }
                     
                     # Try to enrich with missing content from URL
@@ -2039,6 +2155,9 @@ class NewsGather():
             if not image and clean_description:
                 extracted_image, clean_description = extract_and_remove_first_image(clean_description)
             
+            # Detect language
+            detected_lang, lang_confidence = detect_article_language(title, clean_description)
+            
             new_article = {
                 'id_article': article_id,
                 'id_source': source_id,
@@ -2050,7 +2169,9 @@ class NewsGather():
                 'publishedAt': published_at,  # Original with timezone
                 'published_at_gmt': published_at_gmt,  # Normalized UTC
                 'content': '',
-                'inserted_at_ms': int(time.time() * 1000)  # Insertion timestamp in ms
+                'inserted_at_ms': int(time.time() * 1000),  # Insertion timestamp in ms
+                'detected_language': detected_lang,
+                'language_confidence': lang_confidence
             }
             
             # Try to enrich with missing content from URL

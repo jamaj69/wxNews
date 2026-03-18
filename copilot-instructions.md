@@ -1,74 +1,86 @@
 # wxNews - Instruções do Sistema
 
-Sistema de agregação e leitura de notícias com coleta automática via RSS/NewsAPI e interface gráfica moderna.
+Sistema de agregação e leitura de notícias com coleta automática via RSS/NewsAPI/MediaStack e interface gráfica moderna com FastAPI backend.
 
 ---
 
-## 🚀 Gerenciamento do Serviço wxAsyncNewsGather
+## 🚀 Gerenciamento do Serviço wxAsyncNewsGatherAPI
 
-O serviço está configurado como **systemd service**.
+O serviço está configurado como **systemd service** e roda tanto o coletor quanto a API REST.
 
 ### Iniciar o Serviço
 ```bash
-sudo systemctl start wxAsyncNewsGather.service
+sudo systemctl start wxAsyncNewsGatherAPI.service
 ```
 
 ### Verificar Status do Serviço
 ```bash
-sudo systemctl status wxAsyncNewsGather.service
+sudo systemctl status wxAsyncNewsGatherAPI.service
 ```
 
 ### Parar o Serviço
 ```bash
-sudo systemctl stop wxAsyncNewsGather.service
+sudo systemctl stop wxAsyncNewsGatherAPI.service
 ```
 
 ### Reiniciar o Serviço
 ```bash
-sudo systemctl restart wxAsyncNewsGather.service
+sudo systemctl restart wxAsyncNewsGatherAPI.service
 ```
 
 ### Ver Logs em Tempo Real
 ```bash
-journalctl -u wxAsyncNewsGather.service -f
+journalctl -u wxAsyncNewsGatherAPI.service -f
 ```
 
 ### Ver Últimas Linhas do Log (últimas 50)
 ```bash
-journalctl -u wxAsyncNewsGather.service -n 50
+journalctl -u wxAsyncNewsGatherAPI.service -n 50
 ```
 
 ### Ver Logs com Erro
 ```bash
-journalctl -u wxAsyncNewsGather.service -p err
+journalctl -u wxAsyncNewsGatherAPI.service -p err
 ```
 
 ### Habilitar Serviço no Boot
 ```bash
-sudo systemctl enable wxAsyncNewsGather.service
+sudo systemctl enable wxAsyncNewsGatherAPI.service
 ```
 
 ### Desabilitar Serviço no Boot
 ```bash
-sudo systemctl disable wxAsyncNewsGather.service
+sudo systemctl disable wxAsyncNewsGatherAPI.service
 ```
 
 ### Recarregar Configuração do Systemd (após editar .service)
 ```bash
 sudo systemctl daemon-reload
-sudo systemctl restart wxAsyncNewsGather.service
+sudo systemctl restart wxAsyncNewsGatherAPI.service
 ```
 
 ### Ver Arquivo de Unidade do Serviço
 ```bash
-systemctl cat wxAsyncNewsGather.service
+systemctl cat wxAsyncNewsGatherAPI.service
 ```
 
 ### Execução Manual (para debug)
 ```bash
 cd /home/jamaj/src/python/pyTweeter
 source /home/python/pyenv/bin/activate
-python wxAsyncNewsGather.py
+python wxAsyncNewsGatherAPI.py
+```
+
+### Acessar Documentação da API
+```bash
+# Swagger UI (interativo)
+firefox http://localhost:8765/docs
+
+# ReDoc (alternativo)
+firefox http://localhost:8765/redoc
+
+# Health check
+curl http://localhost:8765/api/health
 ```
 
 ---
@@ -126,16 +138,16 @@ cat broken_rss_urls.txt
 ### Ver Logs em Tempo Real
 ```bash
 # Via systemd journal
-journalctl -u wxAsyncNewsGather.service -f
+journalctl -u wxAsyncNewsGatherAPI.service -f
 
 # Ver últimas 100 linhas
-journalctl -u wxAsyncNewsGather.service -n 100
+journalctl -u wxAsyncNewsGatherAPI.service -n 100
 
 # Ver apenas erros
-journalctl -u wxAsyncNewsGather.service -p err -f
+journalctl -u wxAsyncNewsGatherAPI.service -p err -f
 
 # Ver logs de hoje
-journalctl -u wxAsyncNewsGather.service --since today
+journalctl -u wxAsyncNewsGatherAPI.service --since today
 ```
 
 ---
@@ -146,7 +158,7 @@ journalctl -u wxAsyncNewsGather.service --since today
 
 ```
 pyTweeter/
-├── docs/                          # 📚 Documentação (28 arquivos .md)
+├── docs/                          # 📚 Documentação (30+ arquivos .md)
 │   ├── README.md
 │   ├── USE_TIMEZONE_SYSTEM.md
 │   ├── TIMEZONE_BACKFILL_COMPLETE.md
@@ -157,20 +169,39 @@ pyTweeter/
 │   ├── validate_*.py             # Scripts de validação
 │   └── *.sh                      # Shell scripts de monitoramento
 │
-├── wxAsyncNewsGather.py          # 🤖 Serviço coletor principal
+├── wxAsyncNewsGatherAPI.py       # 🚀 Serviço principal (FastAPI + Coletor)
+├── wxAsyncNewsGather.py          # 📡 Módulo coletor (usado pelo API)
 ├── wxAsyncNewsReaderv6.py        # 📱 Interface gráfica moderna
 ├── article_fetcher.py            # 📄 Fetcher de conteúdo de artigos
 ├── async_tickdb.py               # ⏰ Sistema de agendamento
 │
 ├── predator_news.db              # 💾 Banco de dados SQLite (~55k artigos)
 ├── .env                          # 🔐 Credenciais (NEWS_API_KEY_1, etc)
+├── requirements-fastapi.txt      # 📦 Dependências FastAPI
+├── requirements.txt              # 📦 Todas as dependências
 └── .gitignore                    # 🚫 Exclusões do git
 ```
 
 ### Arquivos Principais
 
-#### 🤖 wxAsyncNewsGather.py (Coletor)
-- **Função**: Coleta notícias de RSS feeds e NewsAPI
+#### 🚀 wxAsyncNewsGatherAPI.py (Serviço Principal)
+- **Função**: Aplicação FastAPI unificada com coletor e API REST
+- **Recursos**:
+  - FastAPI server na porta 8765
+  - Coleta paralela: NewsAPI, RSS feeds, MediaStack
+  - REST API com endpoints:
+    - GET /api/health - Health check
+    - GET /api/articles - Query articles com timestamp
+    - GET /api/sources - Lista de fontes
+    - GET /api/stats - Estatísticas de coleta
+    - GET /api/latest_timestamp - Último timestamp
+    - GET /docs - Swagger UI interativo
+  - Documentação automática (OpenAPI)
+  - Systemd service com auto-restart
+- **Arquivo**: `/etc/systemd/system/wxAsyncNewsGatherAPI.service`
+
+#### 📡 wxAsyncNewsGather.py (Módulo Coletor)
+- **Função**: Módulo de coleta de notícias (importado pelo API)
 - **Recursos**:
   - Coleta assíncrona com aiohttp
   - Sistema de timezone automático (96.5% cobertura GMT)
@@ -179,22 +210,33 @@ pyTweeter/
   - Fetch automático de conteúdo de artigos
   - Deduplicação por URL
 - **Config**: Usa variáveis do `.env` (API_KEY1, API_KEY2, DB_PATH, etc)
+- **Nota**: Não executar diretamente, usar via wxAsyncNewsGatherAPI.py
 
 #### 📱 wxAsyncNewsReaderv6.py (Interface)
 - **Função**: Interface gráfica para leitura de notícias
 - **Recursos**:
   - wx.Notebook com abas
-  - wx.CheckListBox com 481+ fontes
+  - wx.CheckListBox com 480+ fontes
   - Seleção múltipla de fontes
   - Botões: Select All / Deselect All / Load Checked
   - Ordenação por published_at_gmt DESC
   - Visualização HTML com wx.html2
   - Auto-reload ao mudar checkbox
+  - **Polling da API FastAPI** (NewsAPIClient):
+    - Intervalo: 30 segundos (configurável)
+    - Endpoint: http://localhost:8765/api/articles
+    - Usando timestamp-based queries para eficiência
+  - Filtragem de timestamps futuros (data integrity)
 - **Execução**:
   ```bash
   cd /home/jamaj/src/python/pyTweeter
   source /home/python/pyenv/bin/activate
   python wxAsyncNewsReaderv6.py
+  ```
+- **Configuração** (.env):
+  ```bash
+  NEWS_API_URL=http://localhost:8765
+  NEWS_POLL_INTERVAL_MS=30000  # 30 segundos
   ```
 
 #### 💾 predator_news.db (Banco de Dados)
@@ -321,22 +363,28 @@ gzip predator_news_backup.db
 ### Problema: Serviço não coleta notícias
 ```bash
 # 1. Verificar status do serviço
-sudo systemctl status wxAsyncNewsGather.service
+sudo systemctl status wxAsyncNewsGatherAPI.service
 
 # 2. Ver log de erros
-journalctl -u wxAsyncNewsGather.service -p err -n 50
+journalctl -u wxAsyncNewsGatherAPI.service -p err -n 50
 
 # 3. Ver log completo recente
-journalctl -u wxAsyncNewsGather.service -n 100
+journalctl -u wxAsyncNewsGatherAPI.service -n 100
 
-# 4. Verificar credenciais
+# 4. Verificar se API está respondendo
+curl http://localhost:8765/api/health
+
+# 5. Verificar credenciais
 cat .env | grep API_KEY
 
-# 5. Testar conexão manualmente
+# 6. Testar conexão manualmente
 python -c "from decouple import config; print(config('NEWS_API_KEY_1'))"
 
-# 6. Reiniciar o serviço
-sudo systemctl restart wxAsyncNewsGather.service
+# 7. Verificar porta em uso
+sudo lsof -i :8765
+
+# 8. Reiniciar o serviço
+sudo systemctl restart wxAsyncNewsGatherAPI.service
 ```
 
 ### Problema: Fontes retornando erro
@@ -408,14 +456,17 @@ RSS_CYCLE_INTERVAL=1800     # 30 minutos
 
 ### 1. Inicialização do Sistema
 ```bash
-# Iniciar o serviço
-sudo systemctl start wxAsyncNewsGather.service
+# Iniciar o serviço (coletor + API)
+sudo systemctl start wxAsyncNewsGatherAPI.service
 
 # Verificar status
-sudo systemctl status wxAsyncNewsGather.service
+sudo systemctl status wxAsyncNewsGatherAPI.service
+
+# Testar API
+curl http://localhost:8765/api/health
 
 # Ver logs em tempo real
-journalctl -u wxAsyncNewsGather.service -f
+journalctl -u wxAsyncNewsGatherAPI.service -f
 ```
 
 ### 2. Usar a Interface de Leitura
@@ -432,10 +483,13 @@ python wxAsyncNewsReaderv6.py
 ### 3. Monitoramento Periódico
 ```bash
 # Ver logs do serviço em tempo real
-journalctl -u wxAsyncNewsGather.service -f
+journalctl -u wxAsyncNewsGatherAPI.service -f
 
 # Ver status do serviço
-sudo systemctl status wxAsyncNewsGather.service
+sudo systemctl status wxAsyncNewsGatherAPI.service
+
+# Verificar API
+curl http://localhost:8765/api/stats
 
 # Ver últimas notícias coletadas
 sqlite3 predator_news.db "
@@ -476,11 +530,16 @@ Toda documentação detalhada está em **`docs/`**:
 
 ```bash
 # Core
-python >= 3.8
+python >= 3.10
 wxPython >= 4.1.0
 wxasync
 asyncio
 aiohttp
+
+# Web Framework
+fastapi >= 0.109
+uvicorn[standard]
+pydantic
 
 # Database
 sqlalchemy >= 1.4
@@ -505,11 +564,12 @@ beautifulsoup4 (implícito em article_fetcher)
 
 | Componente | Status | Notas |
 |------------|--------|-------|
-| wxAsyncNewsGather | ✅ Ativo | Coleta assíncrona funcionando |
-| wxAsyncNewsReaderv6 | ✅ Ativo | Interface moderna com Notebook |
+| wxAsyncNewsGatherAPI | ✅ Ativo | Serviço FastAPI unificado (coletor + API) |
+| wxAsyncNewsReaderv6 | ✅ Ativo | Interface moderna com Notebook e API polling |
+| FastAPI Server | ✅ Port 8765 | Swagger UI em /docs |
 | Sistema Timezone | ✅ 96.5% | Cobertura GMT excelente |
-| Banco de Dados | ✅ 55k+ artigos | predator_news.db |
-| Fontes Ativas | ✅ 481+ | RSS + NewsAPI |
+| Banco de Dados | ✅ 55k+ artigos | SQLite (predator_news.db) |
+| Fontes Ativas | ✅ 480+ | RSS + NewsAPI + MediaStack |
 | Type Safety | ✅ Clean | Pylance sem erros |
 | Projeto  | ✅ Organizado | docs/ + scripts/timezone/ |
 

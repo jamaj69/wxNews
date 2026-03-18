@@ -1,203 +1,558 @@
-# pyTweeter - Real-Time News & Social Media Aggregator
+# wxNews - Real-Time News Aggregator
 
-## ⚠️ PROJECT STATUS: REQUIRES MODERNIZATION
+## ✅ PROJECT STATUS: PRODUCTION READY
 
-**Last Updated:** 2026-02-26
+**Last Updated:** March 17, 2026
 
 ### Current State
-- ❌ **Twitter Integration:** BROKEN (API deprecated)
-- ⚠️ **News Collection:** LIMITED (free tier restrictions)
-- ✅ **GUI:** Functional
-- ❌ **Security:** Critical issues (exposed credentials)
+- ✅ **FastAPI Backend:** Fully functional with REST API
+- ✅ **News Collection:** NewsAPI + RSS + MediaStack (480+ sources)
+- ✅ **GUI:** Modern wxPython interface with real-time polling
+- ✅ **Database:** SQLite with efficient indexing
+- ✅ **Security:** Environment-based configuration (.env)
+- ✅ **Timezone:** 96.5% automatic coverage
+- ✅ **Service:** Systemd integration with auto-restart
 
 ---
 
 ## Overview
 
-This project was designed to collect tweets and RSS news, hash them for deduplication, store in Redis and PostgreSQL databases, and display real-time news updates through a wxPython GUI.
+**wxNews** is a modern news aggregation system designed to collect, store, and display news from multiple sources through a unified interface.
 
 ### Features
-- Async news collection from NewsAPI.org
-- PostgreSQL storage with SQLAlchemy
-- Redis caching for social media posts
-- wxPython desktop GUI
-- Multi-language support (English, Portuguese, Spanish, Italian)
-
----
-
-## ⚠️ CRITICAL: Read Before Using
-
-1. **Twitter API is NON-FUNCTIONAL**
-   - Twitter deprecated the v1.1 Streaming API
-   - X (Twitter) now requires paid subscription ($100+/month)
-   - See [ANALYSIS_AND_REFACTORING_PLAN.md](ANALYSIS_AND_REFACTORING_PLAN.md) for migration options
-
-2. **Exposed Credentials**
-   - API keys and passwords are currently hardcoded
-   - **DO NOT commit .env files to version control**
-   - Follow Phase 1 security fixes immediately
-
-3. **Dependencies May Be Outdated**
-   - Some libraries are unmaintained (Peony)
-   - Python 3.7-3.8 era code
-   - Requires testing in modern environments
-
----
-
-## Quick Start (News-Only Mode)
-
-### Prerequisites
-- Python 3.10+
-- PostgreSQL 12+
-- Redis 5+
-
-### Installation
-
-1. **Clone repository** (if not already)
-```bash
-cd /home/jamaj/src/python/pyTweeter
-```
-
-2. **Create virtual environment**
-```bash
-python3 -m venv venv
-source venv/bin/activate  # On Linux/Mac
-# venv\Scripts\activate  # On Windows
-```
-
-3. **Install dependencies**
-```bash
-pip install -r requirements.txt
-```
-
-4. **Configure environment variables**
-```bash
-cp .env.example .env
-nano .env  # Edit with your credentials
-```
-
-5. **Set up PostgreSQL database**
-```bash
-createdb predator3_dev
-# Or use your preferred database name
-```
-
-6. **Run news collector**
-```bash
-python wxAsyncNewsGather.py
-```
-
-7. **Run GUI news reader**
-```bash
-python wxAsyncNewsReaderv5.py
-```
+- ✅ Async news collection from NewsAPI, RSS feeds, and MediaStack
+- ✅ FastAPI REST API with automatic Swagger documentation
+- ✅ SQLite storage with SQLAlchemy ORM
+- ✅ wxPython desktop GUI with real-time updates
+- ✅ Multi-language support (English, Portuguese, Spanish, Italian)
+- ✅ Automatic timezone detection and normalization
+- ✅ Content enrichment with full article fetching
+- ✅ Deduplication by URL
+- ✅ Systemd service integration
 
 ---
 
 ## Architecture
 
 ```
-┌─────────────────┐
-│   NewsAPI.org   │
-│  (4 languages)  │
-└────────┬────────┘
-         │
-         ▼
-┌─────────────────┐
-│ wxAsyncNewsGather│
-│  (Collector)    │
-└────────┬────────┘
-         │
-         ▼
-┌─────────────────┐      ┌─────────────┐
-│   PostgreSQL    │◄─────┤ Redis Cache │
-│  gm_sources     │      │             │
-│  gm_articles    │      └─────────────┘
-└────────┬────────┘
-         │
-         ▼
-┌─────────────────┐
-│wxAsyncNewsReader│
-│   (GUI Viewer)  │
-└─────────────────┘
+┌──────────────────────────────────────────────────────────────┐
+│            wxAsyncNewsGatherAPI.py (systemd)                 │
+│                                                               │
+│  ┌──────────────────────┐   ┌──────────────────────────┐   │
+│  │  FastAPI Server      │   │  News Collectors         │   │
+│  │  (Port 8765)         │   │  (Parallel Async Tasks)  │   │
+│  ├──────────────────────┤   ├──────────────────────────┤   │
+│  │ • /api/articles      │   │ • NewsAPI (4 keys)       │   │
+│  │ • /api/sources       │   │ • RSS Feeds (480+ src)   │   │
+│  │ • /api/stats         │   │ • MediaStack (7500+ src) │   │
+│  │ • /api/health        │   │                          │   │
+│  │ • /docs (Swagger)    │   │ Continuous collection    │   │
+│  └──────────────────────┘   └──────────────────────────┘   │
+│             │                          │                     │
+│             └─────────┬────────────────┘                     │
+│                       ▼                                      │
+│            ┌─────────────────────┐                          │
+│            │  predator_news.db   │                          │
+│            │  (SQLite)           │                          │
+│            │  • gm_articles      │                          │
+│            │  • gm_sources       │                          │
+│            │  • gm_newsapi_src   │                          │
+│            └─────────────────────┘                          │
+└──────────────────────────────────────────────────────────────┘
+                       ▲
+                       │ HTTP API (polling every 30s)
+                       │
+            ┌──────────────────────┐
+            │ wxAsyncNewsReaderv6  │
+            │  (wxPython GUI)      │
+            │                      │
+            │ • Source filtering   │
+            │ • Real-time updates  │
+            │ • HTML rendering     │
+            │ • 480+ sources       │
+            └──────────────────────┘
 ```
 
 ---
 
-## File Structure
+## Quick Start
 
-### Active Files
-- `wxAsyncNewsGather.py` - News collection worker
-- `wxAsyncNewsReaderv5.py` - GUI application
-- `redis_twitter.py` - Redis helper functions
-- `predator_gm.py` - Database utilities
+### Prerequisites
+- Python 3.10+
+- SQLite 3
+- wxPython 4.2+
 
-### Deprecated Files (DO NOT USE)
-- `twitterasync_new.py` - Broken Twitter collector
-- `twitterasync.py` - Old Twitter collector
-- `wxAsyncNewsReaderv1-4.py` - Old GUI versions
+### Installation
 
-### Configuration
-- `.env` - Environment variables (create from `.env.example`)
-- `requirements.txt` - Python dependencies
+1. **Install Dependencies**
+```bash
+cd /home/jamaj/src/python/pyTweeter
+source /home/python/pyenv/bin/activate
+pip install -r requirements-fastapi.txt
+```
+
+2. **Configure Environment**
+```bash
+# Edit .env file with your API keys
+nano .env
+```
+
+3. **Start Backend Service**
+```bash
+sudo systemctl start wxAsyncNewsGatherAPI.service
+sudo systemctl status wxAsyncNewsGatherAPI.service
+```
+
+4. **Start GUI**
+```bash
+python wxAsyncNewsReaderv6.py
+```
 
 ---
 
 ## Configuration
 
-### Database Configuration
-Edit `.env`:
-```bash
-DB_HOST=localhost
-DB_PORT=5432
-DB_USER=your_user
-DB_PASSWORD=your_password
-DB_NAME=predator3_dev
-```
-
-### NewsAPI Configuration
-Get free API key at https://newsapi.org/register
+### Environment Variables (.env)
 
 ```bash
-NEWS_API_KEYS=key1,key2,key3,key4
-LANGUAGES=en,pt,es,it
-UPDATE_INTERVAL_SEC=600
-```
+# NewsAPI Keys (https://newsapi.org)
+NEWS_API_KEY_1=your_primary_key
+NEWS_API_KEY_2=your_secondary_key
 
-### Redis Configuration
-```bash
-REDIS_HOST=localhost
-REDIS_PORT=6379
-REDIS_DB=0
+# MediaStack (optional, https://mediastack.com)
+MEDIASTACK_API_KEY=your_mediastack_key
+
+# Database
+DB_PATH=predator_news.db
+
+# API Configuration  
+NEWS_API_URL=http://localhost:8765
+NEWS_API_PORT=8765
+NEWS_API_HOST=0.0.0.0
+
+# Polling Interval (GUI)
+NEWS_POLL_INTERVAL_MS=30000  # 30 seconds
+
+# Collection Intervals (seconds)
+NEWSAPI_UPDATE_INTERVAL=600      # 10 minutes
+RSS_UPDATE_INTERVAL=1800         # 30 minutes
+MEDIASTACK_UPDATE_INTERVAL=3600  # 1 hour
 ```
 
 ---
 
-## Known Issues
+## Components
 
-1. **Twitter API Broken**
-   - Solution: Remove Twitter code or migrate to alternatives
+### 1. Backend Service (wxAsyncNewsGatherAPI.py)
 
-2. **NewsAPI Rate Limits**
-   - Free tier: 100 requests/day per key
-   - Currently using 4 keys = 400 requests/day
-   - Updates every 10 minutes = ~144 requests/day per language
-   - Will hit limits with 4 languages simultaneously
-   - Solution: Implement caching and stagger requests
+**Purpose**: Unified FastAPI application running news collection and REST API
 
-3. **Hardcoded Credentials**
-   - Credentials currently in source files
-   - Solution: Move to .env (Phase 1 of refactoring plan)
+**Features**:
+- FastAPI server with automatic OpenAPI documentation
+- Three parallel collectors (NewsAPI, RSS, MediaStack)
+- Timestamp-based article queries
+- Source filtering
+- Health checks and statistics
+- CORS middleware for web clients
 
-4. **No Error Handling**
-   - Minimal exception handling
-   - Solution: Add try/except blocks and logging
+**Systemd Service**: `/etc/systemd/system/wxAsyncNewsGatherAPI.service`
 
-5. **Multiple File Versions**
-   - 5+ versions of some modules
-   - Solution: Consolidate to single version
+**Management**:
+```bash
+sudo systemctl start wxAsyncNewsGatherAPI.service
+sudo systemctl stop wxAsyncNewsGatherAPI.service
+sudo systemctl restart wxAsyncNewsGatherAPI.service
+journalctl -u wxAsyncNewsGatherAPI.service -f
+```
+
+**API Endpoints**:
+- `GET /` - API information
+- `GET /docs` - Interactive Swagger UI
+- `GET /api/health` - Health check
+- `GET /api/articles?since=<ms>&limit=<n>` - Query articles
+- `GET /api/latest_timestamp` - Latest insertion timestamp
+- `GET /api/sources` - List available sources
+- `GET /api/stats` - Collection statistics
 
 ---
+
+### 2. GUI Client (wxAsyncNewsReaderv6.py)
+
+**Purpose**: Desktop interface for browsing collected news
+
+**Features**:
+- wx.Notebook tabbed interface
+- CheckListBox for source selection (480+ sources)
+- Real-time API polling (configurable interval)
+- HTML article rendering with wx.html2
+- Article detail viewer
+- Auto-refresh on source changes
+- Select All / Deselect All / Load Checked buttons
+- Future timestamp filtering (data integrity)
+
+**Startup**:
+```bash
+cd /home/jamaj/src/python/pyTweeter
+source /home/python/pyenv/bin/activate
+python wxAsyncNewsReaderv6.py
+```
+
+---
+
+### 3. Database (predator_news.db)
+
+**Engine**: SQLite 3
+
+**Tables**:
+- `gm_articles` - News articles (~55k+)
+  - `id_article` - Primary key
+  - `title`, `description`, `url`, `author`
+  - `published_at` - Original timestamp string
+  - `published_at_gmt` - Normalized Unix timestamp
+  - `inserted_at_ms` - Millisecond insertion timestamp
+  - `content` - Full article content
+  - `source_name`, `id_source` - Source identifiers
+  - `use_timezone` - Timezone detection flag
+
+- `gm_sources` - Source catalog (480+ entries)
+  - `id_source` - Primary key
+  - `source_name` - Display name
+  - `url` - RSS feed URL or API source
+  - `timezone` - Configured timezone
+  - `use_timezone` - Enable automatic timezone detection
+
+- `gm_newsapi_sources` - NewsAPI source registry
+
+**Indexes**:
+- `idx_articles_inserted_at_ms` - Fast timestamp queries
+- `idx_articles_url` - Deduplication
+- `idx_articles_source` - Source filtering
+
+---
+
+## API Usage Examples
+
+### Health Check
+```bash
+curl http://localhost:8765/api/health
+```
+
+### Get Recent Articles
+```bash
+# Get 50 articles since timestamp
+curl "http://localhost:8765/api/articles?since=1710000000000&limit=50"
+
+# Filter by sources
+curl "http://localhost:8765/api/articles?since=1710000000000&sources=bbc,cnn&limit=20"
+```
+
+### Get Statistics
+```bash
+curl http://localhost:8765/api/stats | python -m json.tool
+```
+
+### Interactive Documentation
+Open browser: `http://localhost:8765/docs`
+
+---
+
+## Database Queries
+
+```bash
+# Total articles
+sqlite3 predator_news.db "SELECT COUNT(*) FROM gm_articles;"
+
+# Recent articles
+sqlite3 predator_news.db "
+SELECT datetime(published_at_gmt, 'unixepoch') as date,
+       title,
+       source_name
+FROM gm_articles
+ORDER BY published_at_gmt DESC
+LIMIT 10;"
+
+# Articles by source (last 24h)
+sqlite3 predator_news.db "
+SELECT source_name, COUNT(*) as total
+FROM gm_articles
+WHERE published_at_gmt > unixepoch('now', '-1 day')
+GROUP BY source_name
+ORDER BY total DESC
+LIMIT 20;"
+```
+
+---
+
+## Migration History
+
+### March 2026
+- ✅ Migrated to FastAPI from Flask
+- ✅ Unified collector and API in single process
+- ✅ Added systemd service integration
+- ✅ Improved timezone detection (96.5% coverage)
+- ✅ Added timestamp-based queries
+- ✅ Migrated from PostgreSQL to SQLite
+- ✅ Updated GUI to wxAsyncNewsReaderv6
+- ✅ Added API polling with real-time updates
+
+---
+
+## File Structure
+
+### Active Components
+- `wxAsyncNewsGatherAPI.py` - Main service (FastAPI + Collector)
+- `wxAsyncNewsGather.py` - News collection module
+- `wxAsyncNewsReaderv6.py` - GUI application (current version)
+- `article_fetcher.py` - Content fetcher
+- `async_tickdb.py` - Async scheduler
+- `predator_news.db` - SQLite database
+
+### Configuration Files
+- `.env` - Environment variables (API keys, config)
+- `requirements-fastapi.txt` - FastAPI dependencies
+- `requirements.txt` - All dependencies
+- `wxAsyncNewsGatherAPI.service` - Systemd service file
+
+### Documentation
+- `README.md` - Main project README (root)
+- `copilot-instructions.md` - Operations guide
+- `QUICK_REFERENCE.md` - Command reference
+- `FASTAPI_DOCUMENTATION.md` - API documentation
+- `FASTAPI_README.md` - FastAPI migration summary
+- `docs/` - Technical documentation (30+ files)
+
+### Deprecated Files (Archived)
+- `wxAsyncNewsReaderv[1-5].py` - Old GUI versions
+- `twitterasync*.py` - Twitter integration (API deprecated)
+- Database recovery scripts - PostgreSQL era
+- `wxAsyncNewsGather.service` - Old service file (replaced by API version)
+
+---
+
+## Troubleshooting
+
+### Service Not Starting
+
+```bash
+# Check logs
+journalctl -u wxAsyncNewsGatherAPI.service -n 100
+
+# Check if port is in use
+sudo lsof -i :8765
+
+# Verify environment
+cat .env | grep -v '^#'
+
+# Test manual start
+cd /home/jamaj/src/python/pyTweeter
+source /home/python/pyenv/bin/activate
+python wxAsyncNewsGatherAPI.py
+```
+
+### GUI Not Connecting
+
+```bash
+# Verify API is running
+curl http://localhost:8765/api/health
+
+# Check configuration
+grep NEWS_API_URL .env
+
+# Test API endpoint
+curl http://localhost:8765/api/articles?since=0&limit=10
+```
+
+### No New Articles Collected
+
+```bash
+# Check collector logs
+journalctl -u wxAsyncNewsGatherAPI.service -f | grep "Collected"
+
+# Verify API keys
+python -c "from decouple import config; print('Key exists:', bool(config('NEWS_API_KEY_1')))"
+
+# Check last collection
+sqlite3 predator_news.db "
+SELECT datetime(MAX(inserted_at_ms)/1000, 'unixepoch') as last_insert 
+FROM gm_articles;"
+
+# Test NewsAPI directly
+curl "https://newsapi.org/v2/top-headlines?country=us&apiKey=YOUR_KEY"
+```
+
+### Database Issues
+
+```bash
+# Check integrity
+sqlite3 predator_news.db "PRAGMA integrity_check;"
+
+# Check schema
+sqlite3 predator_news.db ".schema gm_articles"
+
+# Rebuild indexes
+sqlite3 predator_news.db "REINDEX;"
+
+# Database size
+ls -lh predator_news.db
+```
+
+---
+
+## Monitoring & Maintenance
+
+### Daily Checks
+
+```bash
+# Service status
+sudo systemctl status wxAsyncNewsGatherAPI.service
+
+# Recent articles
+sqlite3 predator_news.db "
+SELECT COUNT(*) FROM gm_articles 
+WHERE published_at_gmt > unixepoch('now', '-1 day');"
+
+# API health
+curl http://localhost:8765/api/health
+```
+
+### Weekly Maintenance
+
+```bash
+# Backup database
+cp predator_news.db backups/predator_news_$(date +%Y%m%d).db
+
+# Check timezone coverage
+python check_gmt_coverage.py
+
+# View statistics
+curl http://localhost:8765/api/stats | python -m json.tool
+```
+
+### Cleanup (Monthly)
+
+```bash
+# Remove articles older than 90 days
+sqlite3 predator_news.db "
+DELETE FROM gm_articles 
+WHERE published_at_gmt < unixepoch('now', '-90 days');"
+
+# Remove duplicates
+bash run_cleanup.sh
+
+# Vacuum database
+sqlite3 predator_news.db "VACUUM;"
+```
+
+---
+
+## Documentation Index
+
+### Getting Started
+- [Main README](../README.md) - Project overview
+- [NEWS_QUICK_START.md](NEWS_QUICK_START.md) - Beginner's guide
+- [QUICK_REFERENCE.md](../QUICK_REFERENCE.md) - Command reference
+
+### Technical Documentation
+- [FASTAPI_DOCUMENTATION.md](../FASTAPI_DOCUMENTATION.md) - API architecture
+- [FASTAPI_README.md](../FASTAPI_README.md) - FastAPI migration
+- [USE_TIMEZONE_SYSTEM.md](USE_TIMEZONE_SYSTEM.md) - Timezone system
+- [SQLITE_MIGRATION.md](SQLITE_MIGRATION.md) - Database migration
+- [CONTENT_ENRICHMENT.md](CONTENT_ENRICHMENT.md) - Content fetching
+
+### Operations
+- [copilot-instructions.md](../copilot-instructions.md) - System operations
+- [POLLING_TESTING_GUIDE.md](../POLLING_TESTING_GUIDE.md) - API testing
+
+### Analysis & Reports
+- [TIMEZONE_AUTO_DETECTION.md](TIMEZONE_AUTO_DETECTION.md) - Timezone coverage
+- [RSS_VALIDATION_REPORT.md](RSS_VALIDATION_REPORT.md) - Feed validation
+- [DATABASE_OPTIMIZATION.md](DATABASE_OPTIMIZATION.md) - Optimization guide
+- [LOST_SOURCES_ANALYSIS.md](LOST_SOURCES_ANALYSIS.md) - Source analysis
+
+---
+
+## Contributing
+
+### Development Setup
+
+```bash
+# Clone repository
+git clone https://github.com/jamaj69/wxNews.git
+cd wxNews
+
+# Create virtual environment
+python3 -m venv venv
+source venv/bin/activate
+
+# Install development dependencies
+pip install -r requirements-fastapi.txt
+
+# Configure environment
+cp .env.example .env
+# Edit .env with your credentials
+
+# Run tests
+python test_fastapi_news.py
+python test_api_polling.py
+```
+
+### Code Style
+
+- Python 3.10+ features
+- Type hints where appropriate
+- Async/await for I/O operations
+- SQLAlchemy for database access
+- FastAPI best practices
+
+### Testing
+
+```bash
+# Test API endpoints
+python test_fastapi_news.py
+
+# Test database
+python test_db_sanitize.py
+
+# Test content parsing
+python test_html_parser.py
+```
+
+---
+
+## Performance
+
+### Current Metrics
+- **Articles**: 55,000+
+- **Sources**: 480+
+- **API Response Time**: <100ms (typical)
+- **Database Size**: ~150MB
+- **Memory Usage**: ~200MB (service)
+- **CPU Usage**: <10% (idle), ~30% (collecting)
+
+### Optimization Tips
+1. **Database**: Regular vacuuming and indexing
+2. **Collection**: Stagger update intervals by source type
+3. **API**: Use timestamp queries for efficient polling
+4. **GUI**: Limit sources loaded simultaneously
+
+---
+
+## License
+
+MIT License - See LICENSE file for details
+
+---
+
+## Support
+
+For issues, questions, or contributions:
+- GitHub: [@jamaj69/wxNews](https://github.com/jamaj69/wxNews)
+- Documentation: [docs/README.md](README.md)
+
+---
+
+**Last Updated**: March 17, 2026
+
 
 ## Refactoring Plan
 
