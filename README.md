@@ -50,7 +50,7 @@ sudo systemctl stop wxAsyncNewsGather.service
 
 ## 🏗️ Architecture
 
-```
+```text
 ┌───────────────────────────────────────────────────────────────┐
 │              wxAsyncNewsGather.py (systemd)                   │
 │                                                                │
@@ -99,6 +99,7 @@ sudo systemctl stop wxAsyncNewsGather.service
 **Purpose**: Unified async service running news collection, content backfill, and FastAPI server in a single process
 
 **Features**:
+
 - Runs **four parallel collectors** as async tasks:
   - NewsAPI (4 languages)
   - RSS Feeds (480+ sources)
@@ -120,6 +121,7 @@ sudo systemctl stop wxAsyncNewsGather.service
 **Purpose**: Modern desktop interface for browsing collected news
 
 **Features**:
+
 - **wx.Notebook** interface with multiple tabs
 - **CheckListBox** for source selection (480+ sources)
 - Real-time polling via FastAPI (30-second intervals)
@@ -132,6 +134,7 @@ sudo systemctl stop wxAsyncNewsGather.service
 **API Connection**: Polls `http://localhost:8765/api/articles`
 
 **Startup**:
+
 ```bash
 cd /home/jamaj/src/python/pyTweeter
 source /home/python/pyenv/bin/activate
@@ -143,11 +146,13 @@ python wxAsyncNewsReaderv6.py
 ### 3. **predator_news.db** (SQLite Database)
 
 **Tables**:
+
 - `gm_articles` - Collected news articles (~55k+)
 - `gm_sources` - News source catalog (480+ sources)
 - `gm_newsapi_sources` - NewsAPI source registry
 
 **Key Article Fields**:
+
 - `id_article` - Primary key
 - `title`, `description`, `url`, `author`
 - `published_at` - Original timestamp (string)
@@ -276,7 +281,7 @@ journalctl -u wxAsyncNewsGather.service -p err
 **Base URL**: `http://localhost:8765`
 
 | Endpoint | Method | Description |
-|----------|--------|-------------|
+| ---------- | ------ | ----------- |
 | `/` | GET | API information |
 | `/docs` | GET | Interactive Swagger UI |
 | `/api/health` | GET | Health check |
@@ -286,6 +291,7 @@ journalctl -u wxAsyncNewsGather.service -p err
 | `/api/stats` | GET | Collection statistics |
 
 **Example API Call**:
+
 ```bash
 # Get articles since timestamp
 curl "http://localhost:8765/api/articles?since=1710000000000&limit=50"
@@ -336,12 +342,14 @@ ORDER BY source_name;"
 **Coverage**: 96.5% of articles have `published_at_gmt` populated
 
 **Detection Methods** (in order):
+
 1. **RFC-5322 Header**: `Date:` header from RSS feed
 2. **pubDate Tag**: `<pubDate>` with timezone in XML
 3. **X-Powered-By**: Server header analysis
 4. **Manual Fallback**: Configured in `gm_sources.timezone`
 
 **Verification**:
+
 ```bash
 python check_gmt_coverage.py
 ```
@@ -516,7 +524,7 @@ journalctl -u wxAsyncNewsGather.service -f
 
 ## 🗂️ Project Structure
 
-```
+```text
 pyTweeter/
 ├── wxAsyncNewsGather.py          # 🚀 Main service (Collector + FastAPI + Backfill)
 ├── wxAsyncNewsGather.service     # ⚙️  Systemd service file
@@ -559,7 +567,7 @@ MIT License - see LICENSE file for details
 
 ## 👤 Author
 
-**jamaj**
+### jamaj
 
 - GitHub: [@jamaj69](https://github.com/jamaj69)
 - Project: wxNews (previously pyTweeter)
@@ -581,6 +589,7 @@ MIT License - see LICENSE file for details
 ### March 31, 2026
 
 #### `wxAsyncNewsGather.py` — Unified Backend
+
 - ✅ **Merged FastAPI server** into the collector process — `wxAsyncNewsGatherAPI.py` retired
   - `serve_api()` coroutine runs as a 5th parallel async task
   - All endpoints (`/api/articles`, `/api/health`, `/api/sources`, `/api/stats`, `/api/latest_timestamp`) preserved
@@ -590,21 +599,25 @@ MIT License - see LICENSE file for details
   - Configurable via `.env`: `BACKFILL_ENABLED`, `BACKFILL_BATCH_SIZE`, `BACKFILL_DELAY`, `BACKFILL_CYCLE_INTERVAL`
 
 #### `article_fetcher.py` — Content Fetcher
+
 - ✅ **Playwright headless Chromium fallback** for JS-rendered pages and 403/406 bot-blocking errors
 - ✅ **Removed 5-paragraph extraction cap** — `_extract_content()` now returns up to 50,000 characters (all paragraphs)
 
 #### `wxAsyncNewsReaderv6.py` — GUI Reader
+
 - ✅ **Fixed blank feed on startup** — `article.get('content')` was failing on SQLAlchemy Row objects; now uses index access `article[8]`
 - ✅ **Article cards show full content** with collapsible "Read more / Read less" toggle when RSS description < 200 chars
 - ✅ **Article images displayed** in every card (`urlToImage` field)
 - ✅ Applied content display logic to both `BuildMultiSourceArticlesHTML` and `GenerateArticleCardHTML`
 
 #### `wxAsyncNewsReader.py` — Classic GUI Reader
+
 - ✅ **Auto-enrich articles on open** — background thread fetches full content silently
 - ✅ **Persists enriched content to database** via SQLAlchemy UPDATE
 - ✅ "Enrich Content" button always visible when article has URL
 
 ### March 17, 2026
+
 - ✅ Migrated to FastAPI from Flask
 - ✅ Added systemd service (`wxAsyncNewsGatherAPI`)
 - ✅ Improved timezone detection (96.5% coverage)
@@ -614,6 +627,7 @@ MIT License - see LICENSE file for details
 - ✅ Added API polling with real-time updates (30s interval)
 
 ### Previous
+
 - ❌ Removed Twitter integration (API deprecated)
 - ✅ Consolidated to single database (SQLite)
 - ✅ Added content enrichment
