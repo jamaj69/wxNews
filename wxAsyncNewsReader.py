@@ -28,6 +28,7 @@ from asyncio.events import get_event_loop
 import time
 import base64
 import zlib
+import threading
 from article_fetcher import fetch_article_content
 
 from sqlalchemy import (create_engine, Table, Column, Integer, 
@@ -56,7 +57,7 @@ class NewsPanel1(wx.Panel):
 class ArticleDetailFrame(wx.Frame):
     """Frame to display full article details with metadata fields and HTML viewer"""
     
-    def __init__(self, parent, article_data, source_name=''):
+    def __init__(self, parent, article_data, source_name='', eng=None, gm_articles=None):
         super(ArticleDetailFrame, self).__init__(
             parent, 
             title=article_data.get('title', 'Article Details')[:100],
@@ -65,6 +66,8 @@ class ArticleDetailFrame(wx.Frame):
         
         self.article_data = article_data
         self.source_name = source_name
+        self.eng = eng
+        self.gm_articles = gm_articles
         self.Centre()
         
         # Create main panel
@@ -184,15 +187,13 @@ class ArticleDetailFrame(wx.Frame):
         # Button panel
         button_sizer = wx.BoxSizer(wx.HORIZONTAL)
         
-        # Fetch Content button (if content is missing)
-        description = article_data.get('description', '')
-        content = article_data.get('content', '')
+        # Enrich Content button — always shown when a URL is available
         url = article_data.get('url', '')
         
-        if url and not (description and description.strip()) and not (content and content.strip()):
-            fetch_btn = wx.Button(panel, label="🔄 Fetch Missing Content")
-            fetch_btn.Bind(wx.EVT_BUTTON, self.OnFetchContent)
-            button_sizer.Add(fetch_btn, 0, wx.ALL, 5)
+        if url:
+            self.enrich_btn = wx.Button(panel, label="🔄 Enrich Content")
+            self.enrich_btn.Bind(wx.EVT_BUTTON, self.OnFetchContent)
+            button_sizer.Add(self.enrich_btn, 0, wx.ALL, 5)
         
         # Open in Browser button
         if url:
@@ -211,6 +212,10 @@ class ArticleDetailFrame(wx.Frame):
         
         # Keyboard shortcuts
         self.Bind(wx.EVT_CHAR_HOOK, self.OnKeyPress)
+        
+        # Auto-enrich in background if the article has a URL
+        if url:
+            threading.Thread(target=self._enrich_in_background, args=(url,), daemon=True).start()
         
     def _build_html_content(self):
         """Build HTML content from article data"""
@@ -308,74 +313,96 @@ class ArticleDetailFrame(wx.Frame):
         else:
             event.Skip()
     
+    def _enrich_in_background(self, url):
+        """Fetch and apply article enrichment in a background thread."""
+        try:
+            result = fetch_article_content(url, timeout=15)
+            if result['success']:
+                wx.CallAfter(self._apply_enrichment, result, silent=True)
+        except Exception:
+            pass  # Silent failure for background enrichment
+
+    def _save_enrichment_to_db(self):
+        """Persist enriched author, description and content back to the database."""
+        if not self.eng or self.gm_articles is None:
+            return
+        article_id = self.article_data.get('id_article')
+        if not article_id:
+            return
+        try:
+            from sqlalchemy import update as sa_update
+            with self.eng.begin() as con:
+                stmt = (
+                    sa_update(self.gm_articles)
+                    .where(self.gm_articles.c.id_article == article_id)
+                    .values(
+                        author=self.article_data.get('author'),
+                        description=self.article_data.get('description'),
+                        content=self.article_data.get('content'),
+                    )
+                )
+                con.execute(stmt)
+            print(f"DB: enrichment saved for article {article_id}")
+        except Exception as e:
+            print(f"DB: failed to save enrichment for {article_id}: {e}")
+
+    def _apply_enrichment(self, result, silent=False):
+        """Apply fetched enrichment data to article_data and refresh the viewer."""
+        if not self.IsBeingDeleted() and self:
+            # Overwrite with fetched data where available
+            if result.get('author'):
+                self.article_data['author'] = result['author']
+            if result.get('published_time') and not self.article_data.get('publishedAt'):
+                self.article_data['publishedAt'] = result['published_time']
+            if result.get('description'):
+                self.article_data['description'] = result['description']
+            if result.get('content'):
+                self.article_data['content'] = result['content']
+
+            # Persist to database
+            self._save_enrichment_to_db()
+
+            # Refresh HTML viewer
+            html_content = self._build_html_content()
+            self.html_viewer.SetPage(html_content, "")
+
+            if not silent:
+                wx.MessageBox(
+                    f"Article enriched!\n\nAuthor: {result.get('author') or 'Not found'}\n"
+                    f"Published: {result.get('published_time') or 'Not found'}\n"
+                    f"Content: {'Found' if result.get('content') else 'Not found'}",
+                    "Enriched",
+                    wx.OK | wx.ICON_INFORMATION
+                )
+
     def OnFetchContent(self, event):
-        """Fetch missing content from the article URL"""
+        """Manually enrich article content from the article URL."""
         url = self.article_data.get('url', '')
         if not url:
             wx.MessageBox("No URL available to fetch content from.", "Error", wx.OK | wx.ICON_ERROR)
             return
-        
+
+        if hasattr(self, 'enrich_btn'):
+            self.enrich_btn.Disable()
+
         # Show progress dialog
         progress = wx.ProgressDialog(
-            "Fetching Content",
+            "Enriching Content",
             f"Fetching article content from:\n{url[:60]}...",
             maximum=100,
             parent=self,
             style=wx.PD_APP_MODAL | wx.PD_AUTO_HIDE
         )
         progress.Pulse("Requesting webpage...")
-        
+
         try:
-            # Fetch content (this might take a few seconds)
             wx.Yield()  # Allow UI to update
             result = fetch_article_content(url, timeout=15)
-            
+
+            progress.Update(100)
             if result['success']:
-                # Update article data with fetched content
-                if result['author'] and not self.article_data.get('author'):
-                    self.article_data['author'] = result['author']
-                
-                if result['published_time'] and not self.article_data.get('publishedAt'):
-                    self.article_data['publishedAt'] = result['published_time']
-                
-                if result['description']:
-                    self.article_data['description'] = result['description']
-                
-                if result['content']:
-                    self.article_data['content'] = result['content']
-                
-                # Rebuild and refresh HTML content
-                html_content = self._build_html_content()
-                self.html_viewer.SetPage(html_content, "")
-                
-                # Update metadata display
-                author_text = self.article_data.get('author', 'Unknown')
-                published_text = self.article_data.get('publishedAt', 'Unknown')
-                
-                # Find and update the metadata panel
-                for child in self.GetChildren():
-                    if isinstance(child, wx.Panel):
-                        for subchild in child.GetChildren():
-                            if isinstance(subchild, wx.Panel):
-                                # This is likely the metadata panel
-                                for item in subchild.GetChildren():
-                                    if isinstance(item, wx.StaticText):
-                                        text = item.GetLabel()
-                                        if text.startswith('Author:'):
-                                            item.SetLabel(f'Author: {author_text}')
-                                        elif text.startswith('Published:'):
-                                            item.SetLabel(f'Published: {published_text}')
-                
-                progress.Update(100)
-                wx.MessageBox(
-                    f"Successfully fetched content!\n\nAuthor: {result['author'] or 'Not found'}\n"
-                    f"Published: {result['published_time'] or 'Not found'}\n"
-                    f"Content: {'Found' if result['content'] else 'Not found'}",
-                    "Success",
-                    wx.OK | wx.ICON_INFORMATION
-                )
+                self._apply_enrichment(result, silent=False)
             else:
-                progress.Update(100)
                 wx.MessageBox(
                     "Failed to fetch content from the article URL.\n\n"
                     "This could be due to:\n"
@@ -386,7 +413,6 @@ class ArticleDetailFrame(wx.Frame):
                     "Fetch Failed",
                     wx.OK | wx.ICON_WARNING
                 )
-                
         except Exception as e:
             progress.Update(100)
             wx.MessageBox(
@@ -396,6 +422,8 @@ class ArticleDetailFrame(wx.Frame):
             )
         finally:
             progress.Destroy()
+            if hasattr(self, 'enrich_btn'):
+                self.enrich_btn.Enable()
 
 
 def dbCredentials():
@@ -969,7 +997,10 @@ class NewsPanel(wx.Panel):
         
         if article_data:
             print(f"DEBUG: Found article, opening detail frame")
-            detail_frame = ArticleDetailFrame(self, article_data, source_name)
+            detail_frame = ArticleDetailFrame(
+                self, article_data, source_name,
+                eng=self.eng, gm_articles=self.gm_articles
+            )
             detail_frame.Show()
         else:
             print(f"ERROR: Article '{article_key}' not found")

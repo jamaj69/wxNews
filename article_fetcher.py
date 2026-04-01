@@ -12,6 +12,14 @@ import logging
 
 logger = logging.getLogger(__name__)
 
+# Playwright is used as a headless-browser fallback for JS-rendered pages.
+try:
+    from playwright.sync_api import sync_playwright
+    _PLAYWRIGHT_AVAILABLE = True
+except ImportError:
+    _PLAYWRIGHT_AVAILABLE = False
+    logger.debug("playwright not installed — headless fallback disabled")
+
 
 class ArticleContentFetcher:
     """Fetch additional article content from URLs when RSS feed data is incomplete."""
@@ -178,12 +186,42 @@ class ArticleContentFetcher:
             
             result['success'] = True
             logger.debug(f"Successfully extracted content from {sanitized_url}")
+
+            # ── Playwright fallback ──────────────────────────────────────────
+            # If requests got a response but yielded no useful content, the page
+            # is likely JS-rendered. Re-fetch with a real headless browser.
+            if not self._has_useful_content(result) and _PLAYWRIGHT_AVAILABLE:
+                logger.debug(f"No content from requests — retrying with headless browser: {sanitized_url}")
+                pw_html = self._fetch_with_playwright(sanitized_url)
+                if pw_html:
+                    pw_soup = BeautifulSoup(pw_html, 'html.parser')
+                    result['author'] = result['author'] or self._extract_author(pw_soup)
+                    result['published_time'] = result['published_time'] or self._extract_time(pw_soup)
+                    result['description'] = result['description'] or self._extract_description(pw_soup)
+                    result['content'] = result['content'] or self._extract_content(pw_soup)
+                    if self._has_useful_content(result):
+                        logger.debug(f"Headless browser enrichment succeeded for {sanitized_url}")
+            # ────────────────────────────────────────────────────────────────
             
         except requests.HTTPError as e:
             # Capture HTTP error code (403, 404, etc.)
             if e.response is not None:
                 result['error_code'] = e.response.status_code
             logger.error(f"HTTP {result['error_code']} error for {sanitized_url}: {e}")
+            # For bot-blocking errors (403/406), try headless browser
+            if result['error_code'] in (403, 406) and _PLAYWRIGHT_AVAILABLE:
+                logger.debug(f"HTTP {result['error_code']} — retrying with headless browser: {sanitized_url}")
+                pw_html = self._fetch_with_playwright(sanitized_url)
+                if pw_html:
+                    pw_soup = BeautifulSoup(pw_html, 'html.parser')
+                    result['author'] = self._extract_author(pw_soup)
+                    result['published_time'] = self._extract_time(pw_soup)
+                    result['description'] = self._extract_description(pw_soup)
+                    result['content'] = self._extract_content(pw_soup)
+                    if self._has_useful_content(result):
+                        result['success'] = True
+                        result['error_code'] = None
+                        logger.debug(f"Headless browser recovered content after HTTP {e.response.status_code}")
         except requests.Timeout as e:
             # Connection or read timeout
             result['error_code'] = 'TIMEOUT'
@@ -197,6 +235,45 @@ class ArticleContentFetcher:
         
         return result
     
+    def _fetch_with_playwright(self, url):
+        """
+        Fetch page HTML using a headless Chromium browser.
+        Used as fallback when requests returns a JS-rendered skeleton.
+        Returns the rendered HTML string, or None on failure.
+        """
+        if not _PLAYWRIGHT_AVAILABLE:
+            return None
+        try:
+            with sync_playwright() as pw:
+                browser = pw.chromium.launch(headless=True)
+                context = browser.new_context(
+                    user_agent='Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 '
+                               '(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+                    locale='pt-BR',
+                    java_script_enabled=True,
+                )
+                page = context.new_page()
+                # Block images/fonts to speed things up
+                page.route('**/*.{png,jpg,jpeg,gif,webp,svg,woff,woff2,ttf,otf}',
+                           lambda route: route.abort())
+                page.goto(url, wait_until='domcontentloaded',
+                          timeout=self.timeout * 1000)
+                # Wait a moment for lazy-loaded content
+                page.wait_for_timeout(1500)
+                html = page.content()
+                browser.close()
+                return html
+        except Exception as e:
+            logger.debug(f"Playwright fetch failed for {url}: {e}")
+            return None
+
+    def _has_useful_content(self, result):
+        """Return True if the result already contains meaningful content."""
+        return bool(
+            (result.get('content') or '').strip() or
+            (result.get('description') or '').strip()
+        )
+
     def _extract_author(self, soup):
         """Extract author name from various common locations."""
         # Try meta tags
@@ -277,7 +354,7 @@ class ArticleContentFetcher:
         return None
     
     def _extract_content(self, soup):
-        """Extract main article content (first few paragraphs)."""
+        """Extract main article content (all paragraphs up to 50000 chars)."""
         paragraphs = []
         
         # Try to find article body with common selectors
@@ -298,9 +375,10 @@ class ArticleContentFetcher:
             all_p = soup.find_all('p')
             paragraphs = [p.get_text().strip() for p in all_p if len(p.get_text().strip()) > 50]
         
-        # Return first 3-5 paragraphs
         if paragraphs:
-            return '\n\n'.join(paragraphs[:5])
+            full_text = '\n\n'.join(paragraphs)
+            # Cap at 50000 characters to avoid storing enormous pages
+            return full_text[:50000]
         
         return None
 

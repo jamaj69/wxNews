@@ -46,6 +46,18 @@ from decouple import config
 from article_fetcher import fetch_article_content
 import signal
 
+# FastAPI server (optional - enabled via API_SERVER_ENABLED)
+try:
+    from fastapi import FastAPI, Query, HTTPException
+    from fastapi.middleware.cors import CORSMiddleware
+    from fastapi.responses import JSONResponse
+    from sqlalchemy import func
+    import uvicorn
+    _FASTAPI_AVAILABLE = True
+except ImportError:
+    _FASTAPI_AVAILABLE = False
+    logging.warning("⚠️  fastapi/uvicorn not available - API server disabled. Install with: pip install fastapi uvicorn")
+
 # Language detection
 try:
     from langdetect import detect, LangDetectException  # type: ignore
@@ -80,6 +92,18 @@ MEDIASTACK_CYCLE_INTERVAL = int(config('MEDIASTACK_CYCLE_INTERVAL', default=3600
 # Content Enrichment Configuration
 ENRICH_MISSING_CONTENT = config('ENRICH_MISSING_CONTENT', default=True, cast=bool)
 ENRICH_TIMEOUT = int(config('ENRICH_TIMEOUT', default=10))
+
+# API Server Configuration
+API_SERVER_ENABLED = config('API_SERVER_ENABLED', default=True, cast=bool)
+API_PORT = int(config('NEWS_API_PORT', default=8765))
+API_HOST = str(config('NEWS_API_HOST', default='0.0.0.0'))
+API_MAX_ARTICLES = 200
+
+# Backfill Configuration — enriches existing articles that have no content yet
+BACKFILL_ENABLED = config('BACKFILL_ENABLED', default=True, cast=bool)
+BACKFILL_BATCH_SIZE = int(config('BACKFILL_BATCH_SIZE', default=20))   # articles per batch
+BACKFILL_DELAY = float(config('BACKFILL_DELAY', default=3.0))           # seconds between articles
+BACKFILL_CYCLE_INTERVAL = int(config('BACKFILL_CYCLE_INTERVAL', default=1800))  # 30 min between cycles
 
 # Basic browser-like headers improve compatibility with feeds/CDNs
 BROWSER_USER_AGENT = (
@@ -2236,6 +2260,155 @@ class NewsGather():
                     conn.rollback()
                     return False
     
+    async def backfill_content(self):
+        """
+        Continuously backfill articles that have no content yet.
+
+        Each cycle:
+          1. Fetch a batch of articles where content IS NULL or empty,
+             ordered by published_at_gmt DESC (newest first).
+          2. For each article, call enrich_article_content().
+          3. If enrichment succeeds, UPDATE the row in the DB.
+          4. Sleep BACKFILL_DELAY between articles to be polite.
+          5. Sleep BACKFILL_CYCLE_INTERVAL before the next batch.
+        """
+        if not BACKFILL_ENABLED:
+            self.logger.info("⏭️  Backfill disabled (BACKFILL_ENABLED=False)")
+            return
+
+        self.logger.info(
+            f"🔁 Backfill started — batch={BACKFILL_BATCH_SIZE}, "
+            f"delay={BACKFILL_DELAY}s, cycle={BACKFILL_CYCLE_INTERVAL}s"
+        )
+
+        from sqlalchemy import update as sa_update, or_, and_, literal_column
+
+        while not self.shutdown_flag:
+            try:
+                # ── 1. Find articles without content ──────────────────────
+                async with self.db_lock:
+                    with self.eng.connect() as conn:
+                        stmt = (
+                            select(
+                                self.gm_articles.c.id_article,
+                                self.gm_articles.c.id_source,
+                                self.gm_articles.c.url,
+                                self.gm_articles.c.author,
+                                self.gm_articles.c.description,
+                                self.gm_articles.c.content,
+                                self.gm_articles.c.urlToImage,
+                            )
+                            .where(
+                                and_(
+                                    self.gm_articles.c.url.isnot(None),
+                                    self.gm_articles.c.url != '',
+                                    or_(
+                                        self.gm_articles.c.content.is_(None),
+                                        self.gm_articles.c.content == '',
+                                    ),
+                                )
+                            )
+                            .order_by(
+                                literal_column("datetime(published_at_gmt)").desc()
+                            )
+                            .limit(BACKFILL_BATCH_SIZE)
+                        )
+                        rows = conn.execute(stmt).fetchall()
+
+                if not rows:
+                    self.logger.info(
+                        f"✅ Backfill: no articles need content — "
+                        f"sleeping {BACKFILL_CYCLE_INTERVAL}s"
+                    )
+                    await asyncio.sleep(BACKFILL_CYCLE_INTERVAL)
+                    continue
+
+                self.logger.info(
+                    f"🔁 Backfill: enriching {len(rows)} articles..."
+                )
+                enriched = 0
+                failed = 0
+
+                for row in rows:
+                    if self.shutdown_flag:
+                        break
+
+                    article_dict = {
+                        'id_article':  row[0],
+                        'id_source':   row[1],
+                        'url':         row[2],
+                        'author':      row[3],
+                        'description': row[4],
+                        'content':     row[5],
+                        'urlToImage':  row[6] if len(row) > 6 else None,
+                    }
+                    source_id = row[1] or ''
+
+                    # Lookup source name for logging
+                    source_name = source_id
+                    try:
+                        async with self.db_lock:
+                            with self.eng.connect() as conn:
+                                sn = conn.execute(
+                                    select(self.gm_sources.c.name)
+                                    .where(self.gm_sources.c.id_source == source_id)
+                                ).scalar()
+                                if sn:
+                                    source_name = sn
+                    except Exception:
+                        pass
+
+                    ok = await self.enrich_article_content(
+                        article_dict, source_name, source_id
+                    )
+
+                    if ok:
+                        # ── 3. Write enriched fields back to DB ───────────
+                        try:
+                            async with self.db_lock:
+                                with self.eng.begin() as conn:
+                                    conn.execute(
+                                        sa_update(self.gm_articles)
+                                        .where(
+                                            self.gm_articles.c.id_article
+                                            == article_dict['id_article']
+                                        )
+                                        .values(
+                                            author=article_dict.get('author'),
+                                            description=article_dict.get('description'),
+                                            content=article_dict.get('content'),
+                                            **({'urlToImage': article_dict['urlToImage']} if article_dict.get('urlToImage') else {}),
+                                        )
+                                    )
+                            enriched += 1
+                            self.logger.debug(
+                                f"✅ Backfill saved: [{source_name}] "
+                                f"{article_dict['id_article']}"
+                            )
+                        except Exception as e:
+                            self.logger.error(
+                                f"Backfill DB write failed for "
+                                f"{article_dict['id_article']}: {e}"
+                            )
+                    else:
+                        failed += 1
+
+                    await asyncio.sleep(BACKFILL_DELAY)
+
+                self.logger.info(
+                    f"🔁 Backfill cycle done — enriched={enriched}, "
+                    f"failed/skipped={failed} — "
+                    f"sleeping {BACKFILL_CYCLE_INTERVAL}s"
+                )
+                await asyncio.sleep(BACKFILL_CYCLE_INTERVAL)
+
+            except asyncio.CancelledError:
+                self.logger.info("🏁 Backfill task cancelled")
+                return
+            except Exception as e:
+                self.logger.error(f"Backfill unexpected error: {e}", exc_info=True)
+                await asyncio.sleep(60)  # back off before retrying
+
     async def enrich_article_content(self, article_dict, source_name='', source_id=''):
         """
         Attempt to fetch missing content from article URL.
@@ -2410,6 +2583,187 @@ class NewsGather():
         except Exception as e:
             self.logger.debug(f"Could not update blocked_count for {source_name}: {e}")
                      
+    async def serve_api(self):
+        """Run FastAPI HTTP server (real-time article polling endpoint)."""
+        if not API_SERVER_ENABLED:
+            self.logger.info("⏭️  API server disabled (API_SERVER_ENABLED=False)")
+            return
+        if not _FASTAPI_AVAILABLE:
+            self.logger.warning("⚠️  FastAPI not available — API server skipped")
+            return
+
+        from sqlalchemy import func as sa_func
+        from typing import cast as typing_cast
+
+        api_app = FastAPI(
+            title="wxNews API",
+            description="Real-time news updates API with timestamp-based queries",
+            version="2.0.0",
+        )
+        api_app.add_middleware(
+            CORSMiddleware,
+            allow_origins=["*"],
+            allow_credentials=True,
+            allow_methods=["*"],
+            allow_headers=["*"],
+        )
+
+        gather = self  # closure reference
+
+        @api_app.get("/")
+        async def root():
+            return {
+                "name": "wxNews API", "version": "2.0.0", "status": "running",
+                "endpoints": {
+                    "GET /api/health": "Health check",
+                    "GET /api/articles": "Get articles since timestamp",
+                    "GET /api/latest_timestamp": "Get latest insertion timestamp",
+                    "GET /api/sources": "Get available news sources",
+                    "GET /api/stats": "Get collection statistics",
+                },
+                "documentation": "/docs",
+            }
+
+        @api_app.get("/api/health")
+        async def health_check():
+            return {
+                "status": "ok",
+                "timestamp": int(time.time() * 1000),
+                "version": "2.0.0",
+                "database": "connected",
+            }
+
+        @api_app.get("/api/articles")
+        async def get_articles(
+            since: int = Query(..., description="Timestamp in milliseconds"),
+            limit: int = Query(100, ge=1, le=API_MAX_ARTICLES),
+            sources: Optional[str] = Query(None, description="Comma-separated source IDs"),
+        ):
+            try:
+                current_time_ms = int(time.time() * 1000)
+                from sqlalchemy import literal_column as lc
+                query = (
+                    select(
+                        gather.gm_articles.c.id_article,
+                        gather.gm_articles.c.id_source,
+                        gather.gm_articles.c.author,
+                        gather.gm_articles.c.title,
+                        gather.gm_articles.c.description,
+                        gather.gm_articles.c.url,
+                        gather.gm_articles.c.urlToImage,
+                        gather.gm_articles.c.publishedAt,
+                        gather.gm_articles.c.published_at_gmt,
+                        gather.gm_articles.c.inserted_at_ms,
+                    )
+                    .where(gather.gm_articles.c.inserted_at_ms > since)
+                    .where(gather.gm_articles.c.inserted_at_ms <= current_time_ms)
+                    .where(
+                        (gather.gm_articles.c.published_at_gmt.is_(None))
+                        | (lc("datetime(published_at_gmt)") <= lc("datetime('now')"))
+                    )
+                )
+                if sources:
+                    src_list = [s.strip() for s in sources.split(',') if s.strip()]
+                    if src_list:
+                        query = query.where(gather.gm_articles.c.id_source.in_(src_list))
+                query = query.order_by(gather.gm_articles.c.inserted_at_ms.desc()).limit(limit)
+                with gather.eng.connect() as conn:
+                    rows = conn.execute(query).fetchall()
+                articles = [
+                    {
+                        'id_article': r[0], 'id_source': r[1], 'author': r[2],
+                        'title': r[3], 'description': r[4], 'url': r[5],
+                        'urlToImage': r[6], 'publishedAt': r[7],
+                        'published_at_gmt': r[8], 'inserted_at_ms': r[9],
+                    }
+                    for r in rows
+                ]
+                latest_ts = articles[0]['inserted_at_ms'] if articles else since
+                return {'success': True, 'count': len(articles), 'since': since,
+                        'latest_timestamp': latest_ts, 'articles': articles,
+                        'timestamp': int(time.time() * 1000)}
+            except Exception as e:
+                self.logger.error(f"API /api/articles error: {e}", exc_info=True)
+                raise HTTPException(status_code=500, detail=str(e))
+
+        @api_app.get("/api/latest_timestamp")
+        async def get_latest_timestamp():
+            try:
+                with gather.eng.connect() as conn:
+                    row = conn.execute(
+                        select(
+                            sa_func.max(gather.gm_articles.c.inserted_at_ms).label('latest_ts'),
+                            sa_func.count().label('total'),
+                        ).where(gather.gm_articles.c.inserted_at_ms.isnot(None))
+                    ).fetchone()
+                return {'success': True,
+                        'latest_timestamp': (row[0] or 0) if row else 0,
+                        'total_articles': (row[1] or 0) if row else 0,
+                        'timestamp': int(time.time() * 1000)}
+            except Exception as e:
+                raise HTTPException(status_code=500, detail=str(e))
+
+        @api_app.get("/api/sources")
+        async def get_sources():
+            try:
+                query = (
+                    select(
+                        gather.gm_sources.c.id_source,
+                        gather.gm_sources.c.name,
+                        gather.gm_sources.c.category,
+                        gather.gm_sources.c.language,
+                        sa_func.count(gather.gm_articles.c.id_article).label('article_count'),
+                    )
+                    .select_from(
+                        gather.gm_sources.outerjoin(
+                            gather.gm_articles,
+                            gather.gm_sources.c.id_source == gather.gm_articles.c.id_source,
+                        )
+                    )
+                    .group_by(gather.gm_sources.c.id_source)
+                    .having(sa_func.count(gather.gm_articles.c.id_article) > 0)
+                    .order_by(gather.gm_sources.c.name)
+                )
+                with gather.eng.connect() as conn:
+                    rows = conn.execute(query).fetchall()
+                return {'success': True, 'count': len(rows),
+                        'sources': [{'id_source': r[0], 'name': r[1],
+                                     'category': r[2], 'language': r[3],
+                                     'article_count': r[4]} for r in rows]}
+            except Exception as e:
+                raise HTTPException(status_code=500, detail=str(e))
+
+        @api_app.get("/api/stats")
+        async def get_stats():
+            try:
+                now_ms = int(time.time() * 1000)
+                yesterday_ms = now_ms - 86400_000
+                hour_ago_ms  = now_ms - 3600_000
+                with gather.eng.connect() as conn:
+                    total = conn.execute(select(sa_func.count()).select_from(gather.gm_articles)).scalar()
+                    recent = conn.execute(select(sa_func.count()).select_from(gather.gm_articles)
+                                         .where(gather.gm_articles.c.inserted_at_ms > yesterday_ms)).scalar()
+                    hourly = conn.execute(select(sa_func.count()).select_from(gather.gm_articles)
+                                         .where(gather.gm_articles.c.inserted_at_ms > hour_ago_ms)).scalar()
+                    total_src = conn.execute(select(sa_func.count()).select_from(gather.gm_sources)).scalar()
+                return {'success': True, 'total_articles': total,
+                        'articles_last_24h': recent, 'articles_last_hour': hourly,
+                        'total_sources': total_src,
+                        'timestamp': now_ms}
+            except Exception as e:
+                raise HTTPException(status_code=500, detail=str(e))
+
+        self.logger.info(f"🌐 API server starting on http://{API_HOST}:{API_PORT}")
+        config_uvicorn = uvicorn.Config(
+            api_app,
+            host=API_HOST,
+            port=API_PORT,
+            log_level="warning",
+            access_log=False,
+        )
+        server = uvicorn.Server(config_uvicorn)
+        await server.serve()
+
     def getNewsSources(self):
 #        url = "https://newsapi.org/v2/sources?country=br&apiKey=" + API_KEY
         url = "https://newsapi.org/v2/sources?language=en&apiKey=" + API_KEY1
@@ -2474,12 +2828,15 @@ if __name__ == '__main__':
         app.logger.info(f"   • NewsAPI: every {NEWSAPI_CYCLE_INTERVAL}s ({NEWSAPI_CYCLE_INTERVAL//60} min)")
         app.logger.info(f"   • RSS Feeds: every {RSS_CYCLE_INTERVAL}s ({RSS_CYCLE_INTERVAL//60} min)")
         app.logger.info(f"   • MediaStack: every {MEDIASTACK_CYCLE_INTERVAL}s ({MEDIASTACK_CYCLE_INTERVAL//60} min)")
+        app.logger.info(f"   • Backfill: every {BACKFILL_CYCLE_INTERVAL}s ({BACKFILL_CYCLE_INTERVAL//60} min), batch={BACKFILL_BATCH_SIZE}")
         
-        # Create tasks for all collectors
+        # Create tasks for all collectors + API server
         tasks = [
             loop.create_task(app.collect_newsapi()),
             loop.create_task(app.collect_rss_feeds()),
-            loop.create_task(app.collect_mediastack())
+            loop.create_task(app.collect_mediastack()),
+            loop.create_task(app.backfill_content()),
+            loop.create_task(app.serve_api()),
         ]
         
         # Store tasks globally for signal handler access

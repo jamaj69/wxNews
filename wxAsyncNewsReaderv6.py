@@ -781,11 +781,19 @@ class NewsPanel(wx.Panel):
             author = clean_text(author).replace('<', '&lt;').replace('>', '&gt;')
         source_name = clean_text(source_name).replace('<', '&lt;').replace('>', '&gt;')
         
-        # Sanitize description HTML
+        # Build display text: prefer content when description is absent or very short
+        content = article.get('content', None)
         description_html = ""
+        content_html = ""
         if description:
             description_html = sanitize_html_content(description)
-        
+        if content:
+            content_html = sanitize_html_content(content)
+
+        # Use content as body when description is missing or just a short teaser
+        desc_text_len = len(re.sub(r'<[^>]+>', '', description_html)) if description_html else 0
+        use_content = content_html and desc_text_len < 200
+
         # Build article card
         html = '<div class="article" style="animation: fadeIn 0.5s;">'
         html += f'<div class="article-title"><a href="{url}">{title}</a></div>'
@@ -795,17 +803,32 @@ class NewsPanel(wx.Panel):
             html += f'<span class="article-author">✍️ {author}</span>'
         html += f'<span class="article-date">📅 {date_str}</span>'
         html += '</div>'
-        
+
         # Show main article image
         if url_to_image and url_to_image.startswith(('http://', 'https://')):
             html += f'<img src="{url_to_image}" alt="Article image" onerror="this.style.display=\'none\'" style="max-width: 100%; width: 100%; height: auto; display: block; margin: 10px 0; border-radius: 4px;">'
-        
-        # Show description
-        if description_html:
+
+        if use_content:
+            # Show short description as lead (if present), then full content collapsible
+            if description_html:
+                html += f'<div class="article-content">{description_html}</div>'
+            uid = abs(hash(article_id or url)) % 10000000
+            preview = content_html[:600]
+            rest = content_html[600:]
+            html += f'<div class="article-content">{preview}'
+            if rest:
+                html += (f'<span id="more-{uid}" style="display:none">{rest}</span>'
+                         f'<a href="#" onclick="var m=document.getElementById(\'more-{uid}\');'
+                         f'var t=document.getElementById(\'tog-{uid}\');'
+                         f'm.style.display=m.style.display==\'none\'?\'inline\':\'none\';'
+                         f't.textContent=m.style.display==\'inline\'?\'Read less\':\'Read more\';'
+                         f'return false;" id="tog-{uid}" style="margin-left:6px;font-size:0.85em;">Read more</a>')
+            html += '</div>'
+        elif description_html:
             html += f'<div class="article-content">{description_html}</div>'
-        
+
         html += '</div>'
-        
+
         return html
     
     def LoadSources(self):
@@ -1798,11 +1821,19 @@ class NewsPanel(wx.Panel):
                 author = author.replace('<', '&lt;').replace('>', '&gt;')
             source_name = source_name.replace('<', '&lt;').replace('>', '&gt;')
             
-            # Sanitize HTML description (keep images and structure, remove classes/styles)
+            # Sanitize HTML description and content
             description_html = ""
+            content_html = ""
             if description:
                 description_html = sanitize_html_content(description)
-            
+            content = article[8] if len(article) > 8 and article[8] and article[8].strip() else None
+            if content:
+                content_html = sanitize_html_content(content)
+
+            # Use content as body when description is absent or just a short teaser
+            desc_text_len = len(re.sub(r'<[^>]+>', '', description_html)) if description_html else 0
+            use_content = content_html and desc_text_len < 200
+
             # Build article card
             html += '<div class="article">'
             html += f'<div class="article-title"><a href="{url}">{title}</a></div>'
@@ -1812,15 +1843,29 @@ class NewsPanel(wx.Panel):
                 html += f'<span class="article-author">✍️ {author}</span>'
             html += f'<span class="article-date">📅 {date_str}</span>'
             html += '</div>'
-            
-            # Show main article image if available (from urlToImage field)
+
+            # Show main article image if available
             if url_to_image and url_to_image.startswith(('http://', 'https://')):
                 html += f'<img src="{url_to_image}" alt="Article image" onerror="this.style.display=\'none\'" style="max-width: 100%; width: 100%; height: auto; display: block; margin: 10px 0; border-radius: 4px; clear: both;">'
-            
-            # Show sanitized description HTML (includes images and content structure)
-            if description_html:
+
+            if use_content:
+                if description_html:
+                    html += f'<div class="article-content">{description_html}</div>'
+                uid = abs(hash(article_id or url)) % 10000000
+                preview = content_html[:600]
+                rest = content_html[600:]
+                html += f'<div class="article-content">{preview}'
+                if rest:
+                    html += (f'<span id="more-{uid}" style="display:none">{rest}</span>'
+                             f'<a href="#" onclick="var m=document.getElementById(\'more-{uid}\');'
+                             f'var t=document.getElementById(\'tog-{uid}\');'
+                             f'm.style.display=m.style.display==\'none\'?\'inline\':\'none\';'
+                             f't.textContent=m.style.display==\'inline\'?\'Read less\':\'Read more\';'
+                             f'return false;" id="tog-{uid}" style="margin-left:6px;font-size:0.85em;">Read more</a>')
+                html += '</div>'
+            elif description_html:
                 html += f'<div class="article-content">{description_html}</div>'
-            
+
             html += '</div>'  # Close article div
         
         html += """
