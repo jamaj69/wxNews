@@ -10,10 +10,21 @@ Language rules are read from the `languages` table in the database:
 """
 
 import asyncio
+import re
 import sqlite3
 from functools import lru_cache
 from deep_translator import GoogleTranslator
 from deep_translator.exceptions import LanguageNotSupportedException
+
+# Google Translate free API limit per request
+MAX_TRANSLATE_CHARS = 4500
+
+
+def _strip_html(text: str) -> str:
+    """Remove HTML tags and collapse whitespace."""
+    text = re.sub(r'<[^>]+>', ' ', text)
+    text = re.sub(r'\s+', ' ', text)
+    return text.strip()
 
 DB_PATH = "predator_news.db"
 
@@ -71,14 +82,20 @@ def translate_text(text: str, source_lang: str, target_lang: str) -> str:
         return text
     if source_lang == target_lang:
         return text
+    # Strip HTML tags and truncate to stay within API limit
+    clean = _strip_html(text)
+    if not clean:
+        return text
+    clean = clean[:MAX_TRANSLATE_CHARS]
     try:
-        translated = GoogleTranslator(source=source_lang, target=target_lang).translate(text)
+        translated = GoogleTranslator(source=source_lang, target=target_lang).translate(clean)
         return translated or text
     except LanguageNotSupportedException as e:
         print(f"[translate] Language not supported: {source_lang}→{target_lang}: {e}")
         return text
     except Exception as e:
-        print(f"[translate] Error translating {source_lang}→{target_lang}: {e}")
+        # Log only first 200 chars of error to avoid dumping full article text
+        print(f"[translate] Error translating {source_lang}→{target_lang}: {str(e)[:200]}")
         return text
 
 
@@ -110,12 +127,16 @@ def translate_article(text: str, source_language_code: str | None) -> tuple[str,
         # Language known — apply stored rule
         if not rules['translate']:
             return text, False
+        # Compare result against the cleaned input so HTML stripping doesn't
+        # make every field appear "translated" when the API returns unchanged text.
+        clean_input = _strip_html(text)[:MAX_TRANSLATE_CHARS]
         result = translate_text(text, rules['translator_code'], rules['translate_to'])
-        return result, result != text
+        return result, bool(result) and result != clean_input
 
     # Language unknown / detection failed — let Google auto-detect
+    clean_input = _strip_html(text)[:MAX_TRANSLATE_CHARS]
     result = translate_text(text, 'auto', AUTO_FALLBACK_TARGET)
-    was_translated = result != text
+    was_translated = bool(result) and result != clean_input
     return result, was_translated
 
 

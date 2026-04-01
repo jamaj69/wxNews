@@ -2625,32 +2625,55 @@ class NewsGather():
             f"delay={TRANSLATE_DELAY}s, cycle={TRANSLATE_CYCLE_INTERVAL}s"
         )
 
-        from sqlalchemy import update as sa_update, and_, or_
+        from sqlalchemy import update as sa_update, and_, or_, text as sa_text
+
+        # ── One-time bulk mark: articles in non-translatable languages → -1 ──
+        # Languages with translate=0 (en, pt, pt-BR) never need translation.
+        # Mark them all at once so they don't clog the per-article loop.
+        try:
+            async with self.db_lock:
+                with self.eng.begin() as conn:
+                    result = conn.execute(sa_text("""
+                        UPDATE gm_articles
+                        SET is_translated = -1
+                        WHERE is_translated = 0
+                          AND detected_language IN (
+                              SELECT language_code FROM languages WHERE translate = 0
+                          )
+                    """))
+                    if result.rowcount:
+                        self.logger.info(
+                            f"🌐 Translation: bulk-skipped {result.rowcount} articles "
+                            f"in non-translatable languages (en/pt/etc.)"
+                        )
+        except Exception as e:
+            self.logger.warning(f"Translation bulk-skip failed (non-critical): {e}")
 
         while not self.shutdown_flag:
             try:
                 # ── 1. Find articles that need translation ─────────────────
+                # Only select articles where the language requires translation
+                # (translate=1) OR the language is unknown/undetected (NULL or not
+                # in the languages table) — those use Google auto-detect.
                 async with self.db_lock:
                     with self.eng.connect() as conn:
-                        stmt = (
-                            select(
-                                self.gm_articles.c.id_article,
-                                self.gm_articles.c.detected_language,
-                                self.gm_articles.c.title,
-                                self.gm_articles.c.description,
-                                self.gm_articles.c.content,
-                            )
-                            .where(
-                                and_(
-                                    self.gm_articles.c.is_translated == 0,
-                                    self.gm_articles.c.title.isnot(None),
-                                    self.gm_articles.c.title != '',
-                                )
-                            )
-                            .order_by(self.gm_articles.c.inserted_at_ms.desc())
-                            .limit(TRANSLATE_BATCH_SIZE)
-                        )
-                        rows = conn.execute(stmt).fetchall()
+                        stmt = sa_text("""
+                            SELECT a.id_article,
+                                   a.detected_language,
+                                   a.title,
+                                   a.description,
+                                   a.content
+                            FROM gm_articles a
+                            LEFT JOIN languages l
+                                   ON a.detected_language = l.language_code
+                            WHERE a.is_translated = 0
+                              AND a.title IS NOT NULL
+                              AND a.title != ''
+                              AND (l.translate = 1 OR l.language_code IS NULL)
+                            ORDER BY a.inserted_at_ms DESC
+                            LIMIT :batch
+                        """)
+                        rows = conn.execute(stmt, {"batch": TRANSLATE_BATCH_SIZE}).fetchall()
 
                 if not rows:
                     self.logger.info(
