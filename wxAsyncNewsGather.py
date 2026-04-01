@@ -2773,6 +2773,8 @@ class NewsGather():
         )
 
         gather = self  # closure reference
+        # Local alias so nested async handlers inherit the narrowed type
+        _HTTPException = HTTPException
 
         @api_app.get("/")
         async def root():
@@ -2848,7 +2850,7 @@ class NewsGather():
                         'timestamp': int(time.time() * 1000)}
             except Exception as e:
                 self.logger.error(f"API /api/articles error: {e}", exc_info=True)
-                raise HTTPException(status_code=500, detail=str(e))
+                raise _HTTPException(status_code=500, detail=str(e))
 
         @api_app.get("/api/latest_timestamp")
         async def get_latest_timestamp():
@@ -2865,7 +2867,7 @@ class NewsGather():
                         'total_articles': (row[1] or 0) if row else 0,
                         'timestamp': int(time.time() * 1000)}
             except Exception as e:
-                raise HTTPException(status_code=500, detail=str(e))
+                raise _HTTPException(status_code=500, detail=str(e))
 
         @api_app.get("/api/sources")
         async def get_sources():
@@ -2895,7 +2897,7 @@ class NewsGather():
                                      'category': r[2], 'language': r[3],
                                      'article_count': r[4]} for r in rows]}
             except Exception as e:
-                raise HTTPException(status_code=500, detail=str(e))
+                raise _HTTPException(status_code=500, detail=str(e))
 
         @api_app.get("/api/stats")
         async def get_stats():
@@ -2915,7 +2917,7 @@ class NewsGather():
                         'total_sources': total_src,
                         'timestamp': now_ms}
             except Exception as e:
-                raise HTTPException(status_code=500, detail=str(e))
+                raise _HTTPException(status_code=500, detail=str(e))
 
         self.logger.info(f"🌐 API server starting on http://{API_HOST}:{API_PORT}")
         config_uvicorn = uvicorn.Config(
