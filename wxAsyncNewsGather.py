@@ -2749,6 +2749,13 @@ class NewsGather():
             self.logger.warning("⚠️  FastAPI not available — API server skipped")
             return
 
+        # Narrow types for static analysis — guaranteed non-None past this point
+        assert FastAPI is not None
+        assert CORSMiddleware is not None
+        assert Query is not None
+        assert HTTPException is not None
+        assert uvicorn is not None
+
         from sqlalchemy import func as sa_func
         from typing import cast as typing_cast
 

@@ -244,6 +244,7 @@ class ArticleContentFetcher:
         """
         if not _PLAYWRIGHT_AVAILABLE:
             return None
+        assert sync_playwright is not None  # narrowed for static analysis
         try:
             with sync_playwright() as pw:
                 browser = pw.chromium.launch(headless=True)
