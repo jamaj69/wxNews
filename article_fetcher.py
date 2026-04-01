@@ -17,6 +17,7 @@ try:
     from playwright.sync_api import sync_playwright
     _PLAYWRIGHT_AVAILABLE = True
 except ImportError:
+    sync_playwright = None  # type: ignore[assignment]
     _PLAYWRIGHT_AVAILABLE = False
     logger.debug("playwright not installed — headless fallback disabled")
 

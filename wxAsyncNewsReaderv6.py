@@ -1238,9 +1238,11 @@ class NewsPanel(wx.Panel):
                         if soup.title and soup.title.string:
                             title = soup.title.string.strip()
                         elif soup.find('h1'):
-                            title = soup.find('h1').get_text().strip()
+                            h1 = soup.find('h1')
+                            title = h1.get_text().strip() if h1 else title
                         elif soup.find('meta', property='og:title'):
-                            title = soup.find('meta', property='og:title')['content'].strip()
+                            meta = soup.find('meta', property='og:title')
+                            title = meta['content'].strip() if meta else title  # type: ignore[index]
                         
                         # Get other metadata from trafilatura
                         metadata = trafilatura.extract_metadata(downloaded)  # type: ignore[possibly-unbound]

@@ -55,6 +55,12 @@ try:
     import uvicorn
     _FASTAPI_AVAILABLE = True
 except ImportError:
+    FastAPI = None  # type: ignore[assignment,misc]
+    Query = None  # type: ignore[assignment,misc]
+    HTTPException = None  # type: ignore[assignment,misc]
+    CORSMiddleware = None  # type: ignore[assignment,misc]
+    JSONResponse = None  # type: ignore[assignment,misc]
+    uvicorn = None  # type: ignore[assignment]
     _FASTAPI_AVAILABLE = False
     logging.warning("⚠️  fastapi/uvicorn not available - API server disabled. Install with: pip install fastapi uvicorn")
 
@@ -104,6 +110,11 @@ BACKFILL_ENABLED = config('BACKFILL_ENABLED', default=True, cast=bool)
 BACKFILL_BATCH_SIZE = int(config('BACKFILL_BATCH_SIZE', default=20))   # articles per batch
 BACKFILL_DELAY = float(config('BACKFILL_DELAY', default=3.0))           # seconds between articles
 BACKFILL_CYCLE_INTERVAL = int(config('BACKFILL_CYCLE_INTERVAL', default=1800))  # 30 min between cycles
+
+TRANSLATE_ENABLED = config('TRANSLATE_ENABLED', default=True, cast=bool)
+TRANSLATE_BATCH_SIZE = int(config('TRANSLATE_BATCH_SIZE', default=10))      # articles per batch
+TRANSLATE_DELAY = float(config('TRANSLATE_DELAY', default=2.0))             # seconds between articles
+TRANSLATE_CYCLE_INTERVAL = int(config('TRANSLATE_CYCLE_INTERVAL', default=3600))  # 1 hour between cycles
 
 # Basic browser-like headers improve compatibility with feeds/CDNs
 BROWSER_USER_AGENT = (
@@ -2582,7 +2593,153 @@ class NewsGather():
                             self.logger.debug(f"⚠️  [{source_name}] HTTP {error_code} error #{new_count}")
         except Exception as e:
             self.logger.debug(f"Could not update blocked_count for {source_name}: {e}")
-                     
+
+    async def backfill_translations(self):
+        """
+        Continuously translate articles whose is_translated=0 and whose
+        detected_language requires translation (per the languages table).
+
+        Each cycle:
+          1. Fetch a batch of untranslated articles with a non-null title,
+             ordered newest first.
+          2. For each article, call translatev1.translate_article() for
+             title, description, and content.
+          3. If Google returned a translated result, write translated_title /
+             translated_description / translated_content and set is_translated=1.
+          4. If the text was unchanged (e.g. misdetected language already in
+             target language), leave translated_* NULL and is_translated stays 0
+             so we skip it on future cycles (mark with is_translated=-1).
+          5. Sleep TRANSLATE_DELAY between articles, TRANSLATE_CYCLE_INTERVAL
+             between full cycles.
+        """
+        if not TRANSLATE_ENABLED:
+            self.logger.info("⏭️  Translation backfill disabled (TRANSLATE_ENABLED=False)")
+            return
+
+        # Import here so the module is loaded once and its lru_cache is shared
+        import translatev1 as tv
+        tv._load_language_rules.cache_clear()
+
+        self.logger.info(
+            f"🌐 Translation backfill started — batch={TRANSLATE_BATCH_SIZE}, "
+            f"delay={TRANSLATE_DELAY}s, cycle={TRANSLATE_CYCLE_INTERVAL}s"
+        )
+
+        from sqlalchemy import update as sa_update, and_, or_
+
+        while not self.shutdown_flag:
+            try:
+                # ── 1. Find articles that need translation ─────────────────
+                async with self.db_lock:
+                    with self.eng.connect() as conn:
+                        stmt = (
+                            select(
+                                self.gm_articles.c.id_article,
+                                self.gm_articles.c.detected_language,
+                                self.gm_articles.c.title,
+                                self.gm_articles.c.description,
+                                self.gm_articles.c.content,
+                            )
+                            .where(
+                                and_(
+                                    self.gm_articles.c.is_translated == 0,
+                                    self.gm_articles.c.title.isnot(None),
+                                    self.gm_articles.c.title != '',
+                                )
+                            )
+                            .order_by(self.gm_articles.c.inserted_at_ms.desc())
+                            .limit(TRANSLATE_BATCH_SIZE)
+                        )
+                        rows = conn.execute(stmt).fetchall()
+
+                if not rows:
+                    self.logger.info(
+                        f"✅ Translation backfill: no pending articles — "
+                        f"sleeping {TRANSLATE_CYCLE_INTERVAL}s"
+                    )
+                    await asyncio.sleep(TRANSLATE_CYCLE_INTERVAL)
+                    continue
+
+                self.logger.info(
+                    f"🌐 Translation backfill: processing {len(rows)} articles..."
+                )
+                translated_count = 0
+                skipped_count = 0
+
+                for row in rows:
+                    if self.shutdown_flag:
+                        break
+
+                    article_id  = row[0]
+                    lang        = row[1]   # detected_language, may be None
+                    title       = row[2] or ''
+                    description = row[3] or ''
+                    content     = row[4] or ''
+
+                    # Run translations in executor (blocking I/O, non-async)
+                    loop = asyncio.get_event_loop()
+                    t_title, ok_t = await loop.run_in_executor(
+                        None, tv.translate_article, title, lang
+                    )
+                    t_desc, ok_d = await loop.run_in_executor(
+                        None, tv.translate_article, description, lang
+                    ) if description else ('', False)
+                    t_cont, ok_c = await loop.run_in_executor(
+                        None, tv.translate_article, content, lang
+                    ) if content else ('', False)
+
+                    any_translated = ok_t or ok_d or ok_c
+
+                    try:
+                        async with self.db_lock:
+                            with self.eng.begin() as conn:
+                                values: dict = {
+                                    # -1 = processed but nothing to translate
+                                    # (misdetected lang / already in target lang)
+                                    'is_translated': 1 if any_translated else -1,
+                                }
+                                if ok_t:
+                                    values['translated_title'] = t_title
+                                if ok_d:
+                                    values['translated_description'] = t_desc
+                                if ok_c:
+                                    values['translated_content'] = t_cont
+
+                                conn.execute(
+                                    sa_update(self.gm_articles)
+                                    .where(self.gm_articles.c.id_article == article_id)
+                                    .values(**values)
+                                )
+                        if any_translated:
+                            translated_count += 1
+                            self.logger.debug(
+                                f"🌐 Translated [{lang}]: {title[:60]}"
+                            )
+                        else:
+                            skipped_count += 1
+                            self.logger.debug(
+                                f"⏭️  No translation needed [{lang}]: {title[:60]}"
+                            )
+                    except Exception as e:
+                        self.logger.error(
+                            f"Translation DB write failed for {article_id}: {e}"
+                        )
+
+                    await asyncio.sleep(TRANSLATE_DELAY)
+
+                self.logger.info(
+                    f"🌐 Translation cycle done — translated={translated_count}, "
+                    f"skipped={skipped_count} — sleeping {TRANSLATE_CYCLE_INTERVAL}s"
+                )
+                await asyncio.sleep(TRANSLATE_CYCLE_INTERVAL)
+
+            except asyncio.CancelledError:
+                self.logger.info("🏁 Translation backfill task cancelled")
+                return
+            except Exception as e:
+                self.logger.error(f"Translation backfill unexpected error: {e}", exc_info=True)
+                await asyncio.sleep(60)
+
     async def serve_api(self):
         """Run FastAPI HTTP server (real-time article polling endpoint)."""
         if not API_SERVER_ENABLED:
@@ -2828,14 +2985,16 @@ if __name__ == '__main__':
         app.logger.info(f"   • NewsAPI: every {NEWSAPI_CYCLE_INTERVAL}s ({NEWSAPI_CYCLE_INTERVAL//60} min)")
         app.logger.info(f"   • RSS Feeds: every {RSS_CYCLE_INTERVAL}s ({RSS_CYCLE_INTERVAL//60} min)")
         app.logger.info(f"   • MediaStack: every {MEDIASTACK_CYCLE_INTERVAL}s ({MEDIASTACK_CYCLE_INTERVAL//60} min)")
-        app.logger.info(f"   • Backfill: every {BACKFILL_CYCLE_INTERVAL}s ({BACKFILL_CYCLE_INTERVAL//60} min), batch={BACKFILL_BATCH_SIZE}")
-        
-        # Create tasks for all collectors + API server
+        app.logger.info(f"   • Backfill content: every {BACKFILL_CYCLE_INTERVAL}s ({BACKFILL_CYCLE_INTERVAL//60} min), batch={BACKFILL_BATCH_SIZE}")
+        app.logger.info(f"   • Translate: every {TRANSLATE_CYCLE_INTERVAL}s ({TRANSLATE_CYCLE_INTERVAL//60} min), batch={TRANSLATE_BATCH_SIZE}")
+
+        # Create tasks for all collectors + translation + API server
         tasks = [
             loop.create_task(app.collect_newsapi()),
             loop.create_task(app.collect_rss_feeds()),
             loop.create_task(app.collect_mediastack()),
             loop.create_task(app.backfill_content()),
+            loop.create_task(app.backfill_translations()),
             loop.create_task(app.serve_api()),
         ]
         
