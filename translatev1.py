@@ -82,22 +82,41 @@ def translate_text(text: str, source_lang: str, target_lang: str) -> str:
         return text
 
 
-def translate_article(text: str, source_language_code: str) -> str:
+# Default target when language detection failed or code is unknown.
+AUTO_FALLBACK_TARGET = "en"
+
+
+def translate_article(text: str, source_language_code: str | None) -> tuple[str, bool]:
     """
     Translate *text* according to the rules stored in the languages table.
 
-    Looks up *source_language_code* in the DB:
-      - If no rule exists, or translate=False, returns text as-is.
-      - Otherwise translates to the configured target language.
+    Returns (translated_text, was_translated):
+      - was_translated=False → caller should store NULL in translated_* columns
+      - was_translated=True  → caller should store the result and set is_translated=1
+
+    Decision logic:
+      1. Known language, translate=False (en/pt/pt-BR) → no translation
+      2. Known language, translate=True                → translate to configured target
+      3. NULL / unknown language                       → auto-detect via Google, target=en
+         If the result is identical to the input, the article was already in the
+         target language, so was_translated is returned as False.
     """
-    rules = get_language_rules(source_language_code)
-    if rules is None or not rules['translate']:
-        return text
-    return translate_text(
-        text,
-        source_lang=rules['translator_code'],
-        target_lang=rules['translate_to'],
-    )
+    if not text or not text.strip():
+        return text, False
+
+    rules = get_language_rules(source_language_code) if source_language_code else None
+
+    if rules is not None:
+        # Language known — apply stored rule
+        if not rules['translate']:
+            return text, False
+        result = translate_text(text, rules['translator_code'], rules['translate_to'])
+        return result, result != text
+
+    # Language unknown / detection failed — let Google auto-detect
+    result = translate_text(text, 'auto', AUTO_FALLBACK_TARGET)
+    was_translated = result != text
+    return result, was_translated
 
 
 # ---------------------------------------------------------------------------
@@ -110,8 +129,8 @@ async def translate_text_async(text: str, source_lang: str, target_lang: str) ->
     return await loop.run_in_executor(None, translate_text, text, source_lang, target_lang)
 
 
-async def translate_article_async(text: str, source_language_code: str) -> str:
-    """Async wrapper around translate_article."""
+async def translate_article_async(text: str, source_language_code: str | None) -> tuple[str, bool]:
+    """Async wrapper around translate_article. Returns (translated_text, was_translated)."""
     loop = asyncio.get_event_loop()
     return await loop.run_in_executor(None, translate_article, text, source_language_code)
 
@@ -138,28 +157,31 @@ async def _run_tests():
         ("pt-BR", "Não deve ser traduzido também"),
     ]
 
+    # Also test the auto-detect fallback (None language code)
+    test_cases += [
+        (None, "Ο πρόεδρος μίλησε για την οικονομία"),   # Greek, unknown to caller
+        (None, "This should be unchanged"),               # English via auto
+    ]
+
     ok = fail = skip = 0
     rules = _load_language_rules()
-    print(f"{'Code':<8} {'→':^4} {'Target':<8} Result")
-    print("-" * 70)
+    print(f"{'Code':<10} {'→':^4} {'Target':<8} Result")
+    print("-" * 72)
     for code, text in test_cases:
-        rule = rules.get(code)
-        if rule is None:
-            print(f"{code:<8} {'→':^4} {'?':<8} ⚠ no rule in DB")
-            fail += 1
-            continue
-        if not rule['translate']:
-            print(f"{code:<8} {'→':^4} {'(skip)':<8} ✓ no translation needed")
+        result, was_translated = await translate_article_async(text, code)
+        rule = rules.get(code) if code else None
+        if code and rule and not rule['translate']:
+            print(f"{str(code):<10} {'→':^4} {'(skip)':<8} ✓ no translation needed")
             skip += 1
             continue
-        result = await translate_article_async(text, code)
-        success = result != text
-        status = "✓" if success else "⚠ unchanged"
-        print(f"{code:<8} {'→':^4} {rule['translate_to']:<8} {status}  {result[:55]}")
-        if success:
+        target = rule['translate_to'] if rule else f'auto→{AUTO_FALLBACK_TARGET}'
+        status = "✓" if was_translated else "- unchanged"
+        print(f"{str(code):<10} {'→':^4} {target:<8} {status}  {result[:50]}")
+        if was_translated:
             ok += 1
-        else:
+        elif code and rule and rule['translate']:
             fail += 1
+        # auto-detect cases: not a failure if unchanged (likely already English)
 
     print(f"\nResult: {ok} translated, {skip} skipped (no translation needed), {fail} failed")
 
