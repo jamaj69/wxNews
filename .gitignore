@@ -301,6 +301,7 @@ backup/
 backups/
 old/
 archive/
+legacy/
 
 # ============================================
 # Deprecated Files (Keep for now)
