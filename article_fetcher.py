@@ -253,8 +253,7 @@ class ArticleContentFetcher:
             # Capture HTTP error code (403, 404, etc.)
             resp = getattr(e, 'response', None)
             result['error_code'] = getattr(resp, 'status_code', None)
-            logger.error(f"HTTP {result['error_code']} error for {sanitized_url}: {e}")
-            # For bot-blocking errors (403/406), try headless browser
+            # For bot-blocking errors (403/406), try headless browser before logging anything
             if result['error_code'] in (403, 406) and _PLAYWRIGHT_AVAILABLE:
                 logger.debug(f"HTTP {result['error_code']} — retrying with headless browser: {sanitized_url}")
                 pw_html = self._fetch_with_playwright(sanitized_url)
@@ -267,7 +266,10 @@ class ArticleContentFetcher:
                     if self._has_useful_content(result):
                         result['success'] = True
                         result['error_code'] = None
-                        logger.debug(f"Headless browser recovered content after HTTP {result['error_code']}")
+                        logger.debug(f"Headless browser recovered content after HTTP {result['error_code']} for {sanitized_url}")
+                        return result
+            # Only log as ERROR if all fallbacks failed
+            logger.error(f"HTTP {result['error_code']} error for {sanitized_url}: {e}")
         except _EXC_TIMEOUT as e:
             # Connection or read timeout
             result['error_code'] = 'TIMEOUT'
