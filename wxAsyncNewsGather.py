@@ -9,6 +9,7 @@ Created on Mon Dec  2 16:21:25 2019
 from __future__ import print_function
 
 import logging
+import logging.handlers
 import sys
 from multiprocessing import Queue
 import re
@@ -2980,12 +2981,24 @@ class NewsGather():
 if __name__ == '__main__':
     root = logging.getLogger()
     root.setLevel(logging.INFO)
-    
+
+    formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+
+    # stdout handler (captured by journald when running under systemd)
     handler = logging.StreamHandler(sys.stdout)
     handler.setLevel(logging.INFO)
-    formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
     handler.setFormatter(formatter)
     root.addHandler(handler)
+
+    # File handler — always writes to collector.log in the working directory
+    import os as _os
+    _log_path = _os.path.join(_os.path.dirname(_os.path.abspath(__file__)), 'collector.log')
+    file_handler = logging.handlers.RotatingFileHandler(
+        _log_path, maxBytes=10 * 1024 * 1024, backupCount=3, encoding='utf-8'
+    )
+    file_handler.setLevel(logging.INFO)
+    file_handler.setFormatter(formatter)
+    root.addHandler(file_handler)
     
     # Create event loop
     loop = asyncio.get_event_loop()

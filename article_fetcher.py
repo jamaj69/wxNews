@@ -12,6 +12,29 @@ import logging
 
 logger = logging.getLogger(__name__)
 
+# curl_cffi impersonates browser TLS fingerprints (JA3/JA4), bypassing Cloudflare and
+# similar bot-blocking that rejects plain requests even with browser-like headers.
+try:
+    import curl_cffi.requests as _cffi_requests
+    from curl_cffi.requests import exceptions as _cffi_exc
+    _CURL_CFFI_AVAILABLE = True
+except ImportError:
+    _cffi_requests = None  # type: ignore[assignment]
+    _cffi_exc = None       # type: ignore[assignment]
+    _CURL_CFFI_AVAILABLE = False
+    logger.debug("curl_cffi not installed — TLS fingerprint bypass disabled")
+
+# Combined exception tuples — catch both requests and curl_cffi variants.
+# Built at import time so except-clauses work normally.
+if _CURL_CFFI_AVAILABLE and _cffi_exc is not None:
+    _EXC_HTTP_ERROR      = (requests.HTTPError,      _cffi_exc.HTTPError)
+    _EXC_TIMEOUT         = (requests.Timeout,         _cffi_exc.Timeout)
+    _EXC_REQUEST         = (requests.RequestException, _cffi_exc.RequestException)
+else:
+    _EXC_HTTP_ERROR      = (requests.HTTPError,)
+    _EXC_TIMEOUT         = (requests.Timeout,)
+    _EXC_REQUEST         = (requests.RequestException,)
+
 # Playwright is used as a headless-browser fallback for JS-rendered pages.
 try:
     from playwright.sync_api import sync_playwright
@@ -58,7 +81,19 @@ class ArticleContentFetcher:
         
         # Strip whitespace
         url = url.strip()
-        
+
+        # Handle redirect wrappers with a query-parameter target URL
+        # Pattern: http://site.com/api/redirect?u=http:/target.com/path
+        # The inner URL often has a malformed single-slash protocol (http:/ instead of http://)
+        for param in ('?u=', '&u=', '?url=', '&url='):
+            if param in url:
+                inner = url.split(param, 1)[1].split('&', 1)[0]
+                # Fix missing slash: http:/host -> http://host  (but not http://host)
+                inner = re.sub(r'^(https?:/)(?!/)', r'\1/', inner)
+                if inner.startswith(('http://', 'https://')):
+                    url = inner
+                break
+
         # Handle redirect chains (e.g., folha.com.br redirects)
         # Pattern: http://redirect.site/*http://actual.site
         if '*http://' in url or '*https://' in url:
@@ -137,8 +172,18 @@ class ArticleContentFetcher:
                 return result
             
             logger.debug(f"Fetching content from: {sanitized_url}")
-            headers = self._get_headers_for_url(sanitized_url)
-            response = requests.get(sanitized_url, headers=headers, timeout=self.timeout)
+            if _CURL_CFFI_AVAILABLE:
+                # Impersonate Chrome TLS fingerprint — bypasses Cloudflare and most bot-blocking
+                assert _cffi_requests is not None
+                response = _cffi_requests.get(
+                    sanitized_url,
+                    impersonate='chrome120',
+                    headers={'Accept-Language': 'pt-BR,pt;q=0.8,en-US;q=0.5,en;q=0.3'},
+                    timeout=self.timeout,
+                )
+            else:
+                headers = self._get_headers_for_url(sanitized_url)
+                response = requests.get(sanitized_url, headers=headers, timeout=self.timeout)
             response.raise_for_status()
             
             # Try to get text with proper encoding handling
@@ -204,10 +249,10 @@ class ArticleContentFetcher:
                         logger.debug(f"Headless browser enrichment succeeded for {sanitized_url}")
             # ────────────────────────────────────────────────────────────────
             
-        except requests.HTTPError as e:
+        except _EXC_HTTP_ERROR as e:
             # Capture HTTP error code (403, 404, etc.)
-            if e.response is not None:
-                result['error_code'] = e.response.status_code
+            resp = getattr(e, 'response', None)
+            result['error_code'] = getattr(resp, 'status_code', None)
             logger.error(f"HTTP {result['error_code']} error for {sanitized_url}: {e}")
             # For bot-blocking errors (403/406), try headless browser
             if result['error_code'] in (403, 406) and _PLAYWRIGHT_AVAILABLE:
@@ -222,12 +267,12 @@ class ArticleContentFetcher:
                     if self._has_useful_content(result):
                         result['success'] = True
                         result['error_code'] = None
-                        logger.debug(f"Headless browser recovered content after HTTP {e.response.status_code}")
-        except requests.Timeout as e:
+                        logger.debug(f"Headless browser recovered content after HTTP {result['error_code']}")
+        except _EXC_TIMEOUT as e:
             # Connection or read timeout
             result['error_code'] = 'TIMEOUT'
             logger.warning(f"Timeout fetching {sanitized_url}: {e}")
-        except requests.RequestException as e:
+        except _EXC_REQUEST as e:
             result['error_code'] = 'REQUEST_ERROR'
             logger.error(f"Request error for {sanitized_url}: {e}")
         except Exception as e:

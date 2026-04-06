@@ -38,6 +38,7 @@ feedparser>=6.0.10
 
 # HTTP requests
 requests>=2.31.0
+curl-cffi>=0.7.0  # Browser TLS fingerprint impersonation (bypass Cloudflare/bot-blocking)
 
 # Web scraping (optional)
 beautifulsoup4>=4.12.2
