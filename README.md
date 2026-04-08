@@ -19,6 +19,9 @@ sudo systemctl start wxAsyncNewsGather.service
 # Check status
 sudo systemctl status wxAsyncNewsGather.service
 
+# Restart
+sudo systemctl restart wxAsyncNewsGather.service
+
 # Start the GUI reader
 python wxAsyncNewsReaderv6.py
 ```
@@ -94,17 +97,22 @@ sudo systemctl stop wxAsyncNewsGather.service
 
 ## 📦 Components
 
-### 1. **wxAsyncNewsGather.py** (Backend Service)
+### 1. **wxAsyncNewsGather.py** (Backend Service — ARQUIVO PRINCIPAL)
 
-**Purpose**: Unified async service running news collection, content backfill, and FastAPI server in a single process
+> ⚠️ **IMPORTANTE**: O serviço systemd é chamado `wxAsyncNewsGather.service` mas executa o arquivo **`wxAsyncNewsGather.py`**.
+> O arquivo `wxAsyncNewsGatherAPI.py` é legado e **não é mais utilizado**.
+
+**Purpose**: Unified async service running news collection, content backfill, translation, and FastAPI server in a single process
 
 **Features**:
 
-- Runs **four parallel collectors** as async tasks:
+- Runs **six parallel tasks**:
   - NewsAPI (4 languages)
   - RSS Feeds (480+ sources)
   - MediaStack (7,500+ sources)
-  - Backfill task (retroactively enrich articles without content)
+  - Content backfill (`backfill_content`)
+  - Translation backfill (`backfill_translations`)
+  - FastAPI server (port 8765)
 - Provides **REST API** on port 8765 via built-in FastAPI server
 - Automatic Swagger documentation at `/docs`
 - Systemd service with auto-restart

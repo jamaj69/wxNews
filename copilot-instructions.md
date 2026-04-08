@@ -6,69 +6,73 @@ Sistema de agregação e leitura de notícias com coleta automática via RSS/New
 
 ## 🚀 Gerenciamento do Serviço wxAsyncNewsGatherAPI
 
+> ⚠️ **IMPORTANTE**: O serviço systemd executa **`wxAsyncNewsGather.py`** (não `wxAsyncNewsGatherAPI.py`).
+> O arquivo `wxAsyncNewsGatherAPI.py` é legado e **não é mais usado**.
+> O arquivo principal é `wxAsyncNewsGather.py`, que contém FastAPI + coletores + backfill + tradução.
+
 O serviço está configurado como **systemd service** e roda tanto o coletor quanto a API REST.
 
 ### Iniciar o Serviço
 ```bash
-sudo systemctl start wxAsyncNewsGatherAPI.service
+sudo systemctl start wxAsyncNewsGather.service
 ```
 
 ### Verificar Status do Serviço
 ```bash
-sudo systemctl status wxAsyncNewsGatherAPI.service
+sudo systemctl status wxAsyncNewsGather.service
 ```
 
 ### Parar o Serviço
 ```bash
-sudo systemctl stop wxAsyncNewsGatherAPI.service
+sudo systemctl stop wxAsyncNewsGather.service
 ```
 
 ### Reiniciar o Serviço
 ```bash
-sudo systemctl restart wxAsyncNewsGatherAPI.service
+sudo systemctl restart wxAsyncNewsGather.service
 ```
 
 ### Ver Logs em Tempo Real
 ```bash
-journalctl -u wxAsyncNewsGatherAPI.service -f
+journalctl -u wxAsyncNewsGather.service -f
 ```
 
 ### Ver Últimas Linhas do Log (últimas 50)
 ```bash
-journalctl -u wxAsyncNewsGatherAPI.service -n 50
+journalctl -u wxAsyncNewsGather.service -n 50
 ```
 
 ### Ver Logs com Erro
 ```bash
-journalctl -u wxAsyncNewsGatherAPI.service -p err
+journalctl -u wxAsyncNewsGather.service -p err
 ```
 
 ### Habilitar Serviço no Boot
 ```bash
-sudo systemctl enable wxAsyncNewsGatherAPI.service
+sudo systemctl enable wxAsyncNewsGather.service
 ```
 
 ### Desabilitar Serviço no Boot
 ```bash
-sudo systemctl disable wxAsyncNewsGatherAPI.service
+sudo systemctl disable wxAsyncNewsGather.service
 ```
 
 ### Recarregar Configuração do Systemd (após editar .service)
 ```bash
 sudo systemctl daemon-reload
-sudo systemctl restart wxAsyncNewsGatherAPI.service
+sudo systemctl restart wxAsyncNewsGather.service
 ```
 
 ### Ver Arquivo de Unidade do Serviço
 ```bash
-systemctl cat wxAsyncNewsGatherAPI.service
+cat /etc/systemd/system/wxAsyncNewsGather.service
 ```
 
 ### Execução Manual (para debug)
 ```bash
 cd /home/jamaj/src/python/pyTweeter
 source /home/python/pyenv/bin/activate
-python wxAsyncNewsGatherAPI.py
+python wxAsyncNewsGather.py
 ```
 
 ### Acessar Documentação da API
@@ -138,16 +142,19 @@ cat broken_rss_urls.txt
 ### Ver Logs em Tempo Real
 ```bash
 # Via systemd journal
-journalctl -u wxAsyncNewsGatherAPI.service -f
+journalctl -u wxAsyncNewsGather.service -f
 
 # Ver últimas 100 linhas
-journalctl -u wxAsyncNewsGatherAPI.service -n 100
+journalctl -u wxAsyncNewsGather.service -n 100
 
 # Ver apenas erros
-journalctl -u wxAsyncNewsGatherAPI.service -p err -f
+journalctl -u wxAsyncNewsGather.service -p err -f
 
 # Ver logs de hoje
-journalctl -u wxAsyncNewsGatherAPI.service --since today
+journalctl -u wxAsyncNewsGather.service --since today
+
+# Ver logs de tradução
+journalctl -u wxAsyncNewsGather.service -f | grep -E '🌐|Translation|Translat'
 ```
 
 ---
@@ -169,8 +176,8 @@ pyTweeter/
 │   ├── validate_*.py             # Scripts de validação
 │   └── *.sh                      # Shell scripts de monitoramento
 │
-├── wxAsyncNewsGatherAPI.py       # 🚀 Serviço principal (FastAPI + Coletor)
-├── wxAsyncNewsGather.py          # 📡 Módulo coletor (usado pelo API)
+├── wxAsyncNewsGather.py          # 🚀 ARQUIVO PRINCIPAL (FastAPI + Coletor + Backfill + Tradução)
+├── wxAsyncNewsGatherAPI.py       # ⚠️  LEGADO — não usado pelo serviço systemd
 ├── wxAsyncNewsReaderv6.py        # 📱 Interface gráfica moderna
 ├── article_fetcher.py            # 📄 Fetcher de conteúdo de artigos
 ├── async_tickdb.py               # ⏰ Sistema de agendamento
@@ -184,11 +191,16 @@ pyTweeter/
 
 ### Arquivos Principais
 
-#### 🚀 wxAsyncNewsGatherAPI.py (Serviço Principal)
-- **Função**: Aplicação FastAPI unificada com coletor e API REST
+#### 🚀 wxAsyncNewsGather.py (Arquivo Principal — executado pelo systemd)
+- **Função**: Aplicação principal unificada: FastAPI + coletores + backfill + tradução
 - **Recursos**:
   - FastAPI server na porta 8765
   - Coleta paralela: NewsAPI, RSS feeds, MediaStack
+  - Backfill de conteúdo de artigos (`backfill_content`)
+  - Tradução automática de artigos (`backfill_translations`)
+  - Sistema de timezone automático (96.5% cobertura GMT)
+  - Blocklist para fontes problemáticas
+  - Deduplicação por URL
   - REST API com endpoints:
     - GET /api/health - Health check
     - GET /api/articles - Query articles com timestamp
@@ -196,21 +208,14 @@ pyTweeter/
     - GET /api/stats - Estatísticas de coleta
     - GET /api/latest_timestamp - Último timestamp
     - GET /docs - Swagger UI interativo
-  - Documentação automática (OpenAPI)
-  - Systemd service com auto-restart
-- **Arquivo**: `/etc/systemd/system/wxAsyncNewsGatherAPI.service`
-
-#### 📡 wxAsyncNewsGather.py (Módulo Coletor)
-- **Função**: Módulo de coleta de notícias (importado pelo API)
-- **Recursos**:
-  - Coleta assíncrona com aiohttp
-  - Sistema de timezone automático (96.5% cobertura GMT)
-  - Detecção de timezone via RFC-5322, feed pubDate, e X-Powered-By
-  - Blocklist para fontes problemáticas
-  - Fetch automático de conteúdo de artigos
-  - Deduplicação por URL
+- **Arquivo de serviço**: `/etc/systemd/system/wxAsyncNewsGather.service`
 - **Config**: Usa variáveis do `.env` (API_KEY1, API_KEY2, DB_PATH, etc)
-- **Nota**: Não executar diretamente, usar via wxAsyncNewsGatherAPI.py
+
+#### ⚠️  wxAsyncNewsGatherAPI.py (LEGADO — não usar)
+- **Função**: Versão antiga/incompleta do serviço
+- **NÃO é executado pelo systemd** — o serviço aponta para `wxAsyncNewsGather.py`
+- Não possui tasks de backfill nem tradução
+- Mantido apenas por compatibilidade histórica
 
 #### 📱 wxAsyncNewsReaderv6.py (Interface)
 - **Função**: Interface gráfica para leitura de notícias
@@ -363,13 +368,13 @@ gzip predator_news_backup.db
 ### Problema: Serviço não coleta notícias
 ```bash
 # 1. Verificar status do serviço
-sudo systemctl status wxAsyncNewsGatherAPI.service
+sudo systemctl status wxAsyncNewsGather.service
 
 # 2. Ver log de erros
-journalctl -u wxAsyncNewsGatherAPI.service -p err -n 50
+journalctl -u wxAsyncNewsGather.service -p err -n 50
 
 # 3. Ver log completo recente
-journalctl -u wxAsyncNewsGatherAPI.service -n 100
+journalctl -u wxAsyncNewsGather.service -n 100
 
 # 4. Verificar se API está respondendo
 curl http://localhost:8765/api/health
@@ -384,7 +389,7 @@ python -c "from decouple import config; print(config('NEWS_API_KEY_1'))"
 sudo lsof -i :8765
 
 # 8. Reiniciar o serviço
-sudo systemctl restart wxAsyncNewsGatherAPI.service
+sudo systemctl restart wxAsyncNewsGather.service
 ```
 
 ### Problema: Fontes retornando erro
@@ -457,16 +462,16 @@ RSS_CYCLE_INTERVAL=1800     # 30 minutos
 ### 1. Inicialização do Sistema
 ```bash
 # Iniciar o serviço (coletor + API)
-sudo systemctl start wxAsyncNewsGatherAPI.service
+sudo systemctl start wxAsyncNewsGather.service
 
 # Verificar status
-sudo systemctl status wxAsyncNewsGatherAPI.service
+sudo systemctl status wxAsyncNewsGather.service
 
 # Testar API
 curl http://localhost:8765/api/health
 
 # Ver logs em tempo real
-journalctl -u wxAsyncNewsGatherAPI.service -f
+journalctl -u wxAsyncNewsGather.service -f
 ```
 
 ### 2. Usar a Interface de Leitura
@@ -483,10 +488,10 @@ python wxAsyncNewsReaderv6.py
 ### 3. Monitoramento Periódico
 ```bash
 # Ver logs do serviço em tempo real
-journalctl -u wxAsyncNewsGatherAPI.service -f
+journalctl -u wxAsyncNewsGather.service -f
 
 # Ver status do serviço
-sudo systemctl status wxAsyncNewsGatherAPI.service
+sudo systemctl status wxAsyncNewsGather.service
 
 # Verificar API
 curl http://localhost:8765/api/stats
