@@ -2653,25 +2653,19 @@ class NewsGather():
         while not self.shutdown_flag:
             try:
                 # ── 1. Find articles that need translation ─────────────────
-                # Only select articles where the language requires translation
-                # (translate=1) OR the language is unknown/undetected (NULL or not
-                # in the languages table) — those use Google auto-detect.
+                # Uses the optimised view v_articles_pending_translation which
+                # already applies all filters (is_translated=0, title not null/empty,
+                # translate=1 or unknown language) and carries the resolved
+                # target_language / translator_code from the languages table.
                 async with self.db_lock:
                     with self.eng.connect() as conn:
                         stmt = sa_text("""
-                            SELECT a.id_article,
-                                   a.detected_language,
-                                   a.title,
-                                   a.description,
-                                   a.content
-                            FROM gm_articles a
-                            LEFT JOIN languages l
-                                   ON a.detected_language = l.language_code
-                            WHERE a.is_translated = 0
-                              AND a.title IS NOT NULL
-                              AND a.title != ''
-                              AND (l.translate = 1 OR l.language_code IS NULL)
-                            ORDER BY a.inserted_at_ms DESC
+                            SELECT id_article,
+                                   detected_language,
+                                   title,
+                                   description,
+                                   content
+                            FROM v_articles_pending_translation
                             LIMIT :batch
                         """)
                         rows = conn.execute(stmt, {"batch": TRANSLATE_BATCH_SIZE}).fetchall()

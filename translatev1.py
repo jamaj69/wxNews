@@ -127,13 +127,14 @@ def translate_article(text: str, source_language_code: str | None) -> tuple[str,
         # Language known — apply stored rule
         if not rules['translate']:
             return text, False
-        # Compare result against the cleaned input so HTML stripping doesn't
-        # make every field appear "translated" when the API returns unchanged text.
+        # Always use 'auto' as source so Google detects the language itself.
+        # This is more reliable than passing the translator_code directly and
+        # avoids API connection errors for specific language codes (e.g. bn).
         clean_input = _strip_html(text)[:MAX_TRANSLATE_CHARS]
-        result = translate_text(text, rules['translator_code'], rules['translate_to'])
+        result = translate_text(text, 'auto', rules['translate_to'])
         return result, bool(result) and result != clean_input
 
-    # Language unknown / detection failed — let Google auto-detect
+    # Language unknown / detection failed — let Google auto-detect, target=en
     clean_input = _strip_html(text)[:MAX_TRANSLATE_CHARS]
     result = translate_text(text, 'auto', AUTO_FALLBACK_TARGET)
     was_translated = bool(result) and result != clean_input
