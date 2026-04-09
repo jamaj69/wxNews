@@ -2242,14 +2242,19 @@ class NewsGather():
                         # Normalize empty strings to NULL so content IS NOT NULL
                         # is a reliable "has real content" check downstream.
                         fetched_content     = article_dict.get('content') or None
-                        fetched_description = article_dict.get('description') or None
                         fetched_author      = article_dict.get('author') or None
                         fetched_image       = article_dict.get('urlToImage') or None
 
-                        # If the fetch "succeeded" but returned nothing at all,
-                        # leave the article pending so the pipeline retries it
-                        # on the next collector restart rather than silently
-                        # discarding it as fully-enriched.
+                        # Use plain-text length to decide if description is
+                        # meaningful — avoids stub HTML like HN's
+                        # "<a href=...>Comments</a>" counting as real content.
+                        import re as _re
+                        raw_desc = article_dict.get('description') or ''
+                        _desc_text = _re.sub(r'<[^>]+>', '', raw_desc).strip()
+                        fetched_description = raw_desc if len(_desc_text) >= 80 else None
+
+                        # If the fetch "succeeded" but returned nothing useful,
+                        # leave the article pending so the pipeline retries it.
                         if not fetched_content and not fetched_description:
                             self.logger.debug(
                                 f"⚠️  Backfill: empty result for [{source_name}] "

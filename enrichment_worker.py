@@ -29,6 +29,7 @@ from __future__ import annotations
 import asyncio
 import concurrent.futures
 import logging
+import re
 from typing import Dict, Any, Optional
 
 from decouple import config
@@ -157,8 +158,11 @@ class EnrichmentWorker:
         url: str = (article.get('url') or '').strip()
 
         has_author = (article.get('author') or '').strip()
-        has_description = (article.get('description') or '').strip()
-        has_content = (article.get('content') or '').strip()
+        # Strip HTML tags to get plain-text length — avoids treating
+        # stub HTML like HN's "<a href=...>Comments</a>" as real content.
+        _desc_plain = re.sub(r'<[^>]+>', '', article.get('description') or '').strip()
+        has_description = len(_desc_plain) >= 80
+        has_content = bool((article.get('content') or '').strip())
 
         # Already complete — nothing to do
         if has_author and has_description and has_content:
@@ -207,14 +211,16 @@ class EnrichmentWorker:
             # --- description (sanitize HTML) ---
             if not has_description and result.get('description'):
                 clean = sanitize_html_content(result['description'])
-                article['description'] = clean if clean else ''
-                updated.append('description')
+                if clean and re.sub(r'<[^>]+>', '', clean).strip():
+                    article['description'] = clean
+                    updated.append('description')
 
             # --- content (sanitize HTML) ---
             if not has_content and result.get('content'):
                 clean = sanitize_html_content(result['content'])
-                article['content'] = clean if clean else ''
-                updated.append('content')
+                if clean and clean.strip():
+                    article['content'] = clean
+                    updated.append('content')
 
             # --- urlToImage — extract from description, remove duplicate ---
             if not article.get('urlToImage') and article.get('description'):
