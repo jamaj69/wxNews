@@ -47,6 +47,18 @@ from decouple import config
 from article_fetcher import fetch_article_content
 import signal
 
+# Shared HTML utilities (also used by enrichment_worker)
+from html_utils import (
+    HTMLContentSanitizer,
+    fix_encoding_if_needed,
+    sanitize_html_content,
+    extract_first_image_url,
+    extract_and_remove_first_image,
+)
+
+# Async parallel enrichment worker
+from enrichment_worker import EnrichmentWorker
+
 # FastAPI server (optional - enabled via API_SERVER_ENABLED)
 try:
     from fastapi import FastAPI, Query, HTTPException
@@ -99,6 +111,7 @@ MEDIASTACK_CYCLE_INTERVAL = int(config('MEDIASTACK_CYCLE_INTERVAL', default=3600
 # Content Enrichment Configuration
 ENRICH_MISSING_CONTENT = config('ENRICH_MISSING_CONTENT', default=True, cast=bool)
 ENRICH_TIMEOUT = int(config('ENRICH_TIMEOUT', default=10))
+ENRICH_CONCURRENCY = int(config('ENRICH_CONCURRENCY', default=32))
 
 # API Server Configuration
 API_SERVER_ENABLED = config('API_SERVER_ENABLED', default=True, cast=bool)
@@ -141,254 +154,9 @@ def url_encode(url):
     return base64.urlsafe_b64encode(zlib.compress(url.encode('utf-8')))[15:31]
 
 
-# ============================================================================
-# HTML Sanitization Functions for Clean Storage
-# ============================================================================
-
+# HTML utilities are imported from html_utils (see top of file)
 import html
 from html.parser import HTMLParser
-
-
-class HTMLContentSanitizer(HTMLParser):
-    """Parse HTML and extract only body content, removing unwanted tags and attributes"""
-    
-    # Tags to completely skip (including their content)
-    SKIP_TAGS = {'script', 'style', 'head', 'meta', 'link', 'noscript'}
-    
-    # Tags to ignore but keep their content
-    WRAPPER_TAGS = {'html', 'body', 'div', 'span', 'section', 'article'}
-    
-    # Attributes to remove from all tags
-    REMOVE_ATTRS = {'class', 'id', 'style', 'onclick', 'onload', 'onerror', 
-                    'align', 'width', 'height'}
-    
-    # Tags we want to keep in output
-    KEEP_TAGS = {'p', 'br', 'img', 'a', 'b', 'i', 'strong', 'em', 'u'}
-    
-    # Attributes to keep for specific tags
-    KEEP_ATTRS = {
-        'img': {'src', 'alt'},
-        'a': {'href'},
-    }
-    
-    def __init__(self):
-        super().__init__()
-        self.content = []
-        self.skip_level = 0
-    
-    def handle_starttag(self, tag, attrs):
-        if tag in self.SKIP_TAGS:
-            self.skip_level += 1
-            return
-        
-        if self.skip_level > 0:
-            return
-        
-        if tag in self.WRAPPER_TAGS:
-            return
-        
-        if tag not in self.KEEP_TAGS:
-            return
-        
-        # Filter attributes
-        allowed_attrs = self.KEEP_ATTRS.get(tag, set())
-        filtered_attrs = []
-        
-        for attr, value in attrs:
-            if attr not in self.REMOVE_ATTRS and (not allowed_attrs or attr in allowed_attrs):
-                # Filter out overly long alt attributes
-                if attr == 'alt' and value and len(value) > 100:
-                    continue
-                filtered_attrs.append((attr, value))
-        
-        if filtered_attrs:
-            attrs_str = ' '.join(f'{attr}="{value}"' for attr, value in filtered_attrs)
-            self.content.append(f'<{tag} {attrs_str}>')
-        else:
-            self.content.append(f'<{tag}>')
-    
-    def handle_endtag(self, tag):
-        if tag in self.SKIP_TAGS:
-            self.skip_level = max(0, self.skip_level - 1)
-            return
-        
-        if self.skip_level > 0:
-            return
-        
-        if tag in self.WRAPPER_TAGS:
-            return
-        
-        if tag not in self.KEEP_TAGS:
-            return
-        
-        self.content.append(f'</{tag}>')
-    
-    def handle_data(self, data):
-        if self.skip_level == 0:
-            self.content.append(data)
-    
-    def handle_startendtag(self, tag, attrs):
-        if tag in self.SKIP_TAGS or self.skip_level > 0:
-            return
-        
-        if tag in self.WRAPPER_TAGS:
-            return
-        
-        if tag not in self.KEEP_TAGS:
-            return
-        
-        # Filter attributes
-        allowed_attrs = self.KEEP_ATTRS.get(tag, set())
-        filtered_attrs = []
-        
-        for attr, value in attrs:
-            if attr not in self.REMOVE_ATTRS and (not allowed_attrs or attr in allowed_attrs):
-                if attr == 'alt' and value and len(value) > 100:
-                    continue
-                filtered_attrs.append((attr, value))
-        
-        if filtered_attrs:
-            attrs_str = ' '.join(f'{attr}="{value}"' for attr, value in filtered_attrs)
-            self.content.append(f'<{tag} {attrs_str} />')
-        else:
-            self.content.append(f'<{tag} />')
-    
-    def get_content(self):
-        return ''.join(self.content)
-
-
-def fix_encoding_if_needed(text):
-    """
-    Detect and fix encoding issues where UTF-8 was misinterpreted as Latin-1
-    
-    Common signs: 'Ã£' should be 'ã', 'Ã©' should be 'é', 'Ã§Ã£' should be 'ção', etc.
-    This happens when UTF-8 bytes are incorrectly decoded as Latin-1
-    
-    Multiple passes may be needed for double-encoding issues.
-    """
-    if not text:
-        return text
-    
-    original = text
-    max_iterations = 3  # Prevent infinite loops
-    
-    for iteration in range(max_iterations):
-        # Stop if no more Ã patterns to fix
-        if 'Ã' not in text:
-            break
-            
-        try:
-            # Try to encode as Latin-1 and decode as UTF-8
-            fixed = text.encode('latin-1').decode('utf-8')
-            
-            # Check if we made progress (fewer Ã or other improvements)
-            if fixed == text:
-                # No change, stop iterating
-                break
-                
-            if fixed.count('Ã') < text.count('Ã'):
-                # Progress made, use fixed version
-                text = fixed
-            else:
-                # No improvement, stop
-                break
-                
-        except (UnicodeDecodeError, UnicodeEncodeError):
-            # Can't fix this way, return what we have
-            break
-    
-    return text
-
-
-def sanitize_html_content(html_content):
-    """Sanitize HTML content during collection
-    
-    Removes:
-    - <script>, <style> tags
-    - class, id, style attributes
-    - wrapper tags like <html>, <body>, <div>
-    
-    Keeps:
-    - <p>, <img>, <a>, <b>, <i>, <strong>, <em>, <u>
-    - src/href attributes
-    - alt attributes (if < 100 chars)
-    """
-    if not html_content:
-        return ""
-    
-    # Fix encoding issues first (UTF-8 misinterpreted as Latin-1)
-    html_content = fix_encoding_if_needed(html_content)
-    
-    # Unescape HTML entities
-    html_content = html.unescape(html_content)
-    
-    # Check if content has HTML tags
-    if '<' not in html_content or '>' not in html_content:
-        # Plain text - wrap in paragraph
-        return f"<p>{html_content}</p>"
-    
-    # Parse HTML with custom parser
-    parser = HTMLContentSanitizer()
-    try:
-        parser.feed(html_content)
-        parser.close()  # Force parser to finish
-        result = parser.get_content()
-        
-        # If result is empty, fallback to plain text
-        if not result or len(result.strip()) < 3:
-            plain = re.sub(r'<[^>]*>', '', html_content)
-            plain = re.sub(r'\s+', ' ', plain).strip()
-            return f"<p>{plain}</p>" if plain else ""
-        
-        return result.strip()
-    except Exception as e:
-        # If parsing fails, return plain text
-        plain = re.sub(r'<[^>]*>', '', html_content)
-        plain = re.sub(r'\s+', ' ', plain).strip()
-        return f"<p>{plain}</p>" if plain else ""
-
-
-def extract_first_image_url(html_content):
-    """Extract the first image URL from HTML content"""
-    if not html_content:
-        return None
-    
-    try:
-        # Try to find img tag with src
-        img_match = re.search(r'<img[^>]+src=["\']([^"\']+)["\']', html_content, re.IGNORECASE)
-        if img_match:
-            url = img_match.group(1)
-            # Only return if it's a valid HTTP(S) URL
-            if url.startswith(('http://', 'https://')):
-                return url
-    except Exception as e:
-        pass
-    
-    return None
-
-
-def extract_and_remove_first_image(html_content):
-    """
-    Extract the first image URL from HTML and remove that image tag.
-    Returns tuple: (image_url, cleaned_html)
-    """
-    if not html_content:
-        return None, html_content
-    
-    try:
-        # Try to find first img tag with src
-        img_match = re.search(r'<img[^>]+src=["\']([^"\']+)["\'][^>]*>', html_content, re.IGNORECASE)
-        if img_match:
-            url = img_match.group(1)
-            # Only process if it's a valid HTTP(S) URL
-            if url.startswith(('http://', 'https://')):
-                # Remove the first img tag from HTML
-                cleaned_html = html_content[:img_match.start()] + html_content[img_match.end():]
-                return url, cleaned_html
-    except Exception as e:
-        pass
-    
-    return None, html_content
 
 
 def dbCredentials():
@@ -801,6 +569,12 @@ class NewsGather():
         self.logger.info("Loading existing articles from database")
         self.sources = self.InitArticles(self.eng, self.meta, self.gm_sources,self.gm_articles)
         self.logger.info(f"Loaded {len(self.sources)} sources from database")
+
+        # Parallel enrichment worker (started as bg task in run())
+        self._enrichment_worker = EnrichmentWorker(
+            concurrency=ENRICH_CONCURRENCY,
+            timeout=ENRICH_TIMEOUT,
+        )
     
     def shutdown(self):
         """
@@ -2280,12 +2054,14 @@ class NewsGather():
         Continuously backfill articles that have no content yet.
 
         Each cycle:
-          1. Fetch a batch of articles where content IS NULL or empty,
-             ordered by published_at_gmt DESC (newest first).
-          2. For each article, call enrich_article_content().
-          3. If enrichment succeeds, UPDATE the row in the DB.
-          4. Sleep BACKFILL_DELAY between articles to be polite.
+          1. Bulk-close articles belonging to blocked sources.
+          2. Fetch a batch of articles with missing content.
+          3. Enqueue all articles in the batch to EnrichmentWorker.
+          4. Collect results from output_queue and write DB updates.
           5. Sleep BACKFILL_CYCLE_INTERVAL before the next batch.
+
+        Up to ENRICH_CONCURRENCY articles are fetched in parallel.
+        BACKFILL_DELAY is no longer used (parallelism replaces the delay).
         """
         if not BACKFILL_ENABLED:
             self.logger.info("⏭️  Backfill disabled (BACKFILL_ENABLED=False)")
@@ -2293,10 +2069,10 @@ class NewsGather():
 
         self.logger.info(
             f"🔁 Backfill started — batch={BACKFILL_BATCH_SIZE}, "
-            f"delay={BACKFILL_DELAY}s, cycle={BACKFILL_CYCLE_INTERVAL}s"
+            f"concurrency={ENRICH_CONCURRENCY}, cycle={BACKFILL_CYCLE_INTERVAL}s"
         )
 
-        from sqlalchemy import update as sa_update, text as sa_text
+        from sqlalchemy import text as sa_text
 
         while not self.shutdown_flag:
             try:
@@ -2319,13 +2095,12 @@ class NewsGather():
                 # ── 1. Find articles pending enrichment ───────────────────
                 async with self.db_lock:
                     with self.eng.connect() as conn:
-                        stmt = sa_text("""
+                        rows = conn.execute(sa_text("""
                             SELECT id_article, id_source, url, author,
                                    description, content, urlToImage
                             FROM v_articles_pending_enrichment
                             LIMIT :batch
-                        """)
-                        rows = conn.execute(stmt, {"batch": BACKFILL_BATCH_SIZE}).fetchall()
+                        """), {"batch": BACKFILL_BATCH_SIZE}).fetchall()
 
                 if not rows:
                     self.logger.info(
@@ -2336,27 +2111,14 @@ class NewsGather():
                     continue
 
                 self.logger.info(
-                    f"🔁 Backfill: enriching {len(rows)} articles..."
+                    f"🔁 Backfill: enqueueing {len(rows)} articles "
+                    f"(concurrency={ENRICH_CONCURRENCY})…"
                 )
-                enriched = 0
-                failed = 0
 
+                # ── 2. Build article dicts and look up source names ────────
+                articles: list[dict] = []
                 for row in rows:
-                    if self.shutdown_flag:
-                        break
-
-                    article_dict = {
-                        'id_article':  row[0],
-                        'id_source':   row[1],
-                        'url':         row[2],
-                        'author':      row[3],
-                        'description': row[4],
-                        'content':     row[5],
-                        'urlToImage':  row[6] if len(row) > 6 else None,
-                    }
                     source_id = row[1] or ''
-
-                    # Lookup source name for logging
                     source_name = source_id
                     try:
                         async with self.db_lock:
@@ -2370,12 +2132,39 @@ class NewsGather():
                     except Exception:
                         pass
 
-                    ok = await self.enrich_article_content(
-                        article_dict, source_name, source_id
-                    )
+                    articles.append({
+                        'id_article':  row[0],
+                        'id_source':   source_id,
+                        'source_name': source_name,
+                        'url':         row[2],
+                        'author':      row[3],
+                        'description': row[4],
+                        'content':     row[5],
+                        'urlToImage':  row[6] if len(row) > 6 else None,
+                    })
+
+                # ── 3. Enqueue all articles ────────────────────────────────
+                for article in articles:
+                    await self._enrichment_worker.enqueue(article)
+
+                # ── 4. Collect results ─────────────────────────────────────
+                enriched_count = 0
+                failed_count = 0
+                received = 0
+                total = len(articles)
+
+                while received < total and not self.shutdown_flag:
+                    article_dict, ok = await self._enrichment_worker.output_queue.get()
+                    received += 1
+                    source_name = article_dict.get('source_name', '')
+                    source_id = article_dict.get('id_source', '')
+
+                    # Persist any blocking error back to the DB
+                    error_code = article_dict.pop('_error_code', None)
+                    if error_code and source_id:
+                        await self._increment_blocked_count(source_id, source_name, error_code)
 
                     if ok:
-                        # ── 3. Write enriched fields back to DB ───────────
                         try:
                             async with self.db_lock:
                                 with self.eng.begin() as conn:
@@ -2388,24 +2177,23 @@ class NewsGather():
                                             urlToImage=COALESCE(:urlToImage, urlToImage)
                                         WHERE id_article=:id_article
                                     """), {
-                                        'author': article_dict.get('author'),
+                                        'author':      article_dict.get('author'),
                                         'description': article_dict.get('description'),
-                                        'content': article_dict.get('content'),
-                                        'urlToImage': article_dict.get('urlToImage'),
-                                        'id_article': article_dict['id_article'],
+                                        'content':     article_dict.get('content'),
+                                        'urlToImage':  article_dict.get('urlToImage'),
+                                        'id_article':  article_dict['id_article'],
                                     })
-                            enriched += 1
+                            enriched_count += 1
                             self.logger.debug(
                                 f"✅ Backfill saved: [{source_name}] "
                                 f"{article_dict['id_article']}"
                             )
-                        except Exception as e:
+                        except Exception as exc:
                             self.logger.error(
                                 f"Backfill DB write failed for "
-                                f"{article_dict['id_article']}: {e}"
+                                f"{article_dict['id_article']}: {exc}"
                             )
                     else:
-                        # Mark as enriched (has description/content) or failed (−1)
                         has_desc = bool((article_dict.get('description') or '').strip())
                         has_cont = bool((article_dict.get('content') or '').strip())
                         is_enriched_val = 1 if (has_desc or has_cont) else -1
@@ -2416,16 +2204,17 @@ class NewsGather():
                                         UPDATE gm_articles
                                         SET is_enriched=:val
                                         WHERE id_article=:id
-                                    """), {'val': is_enriched_val, 'id': article_dict['id_article']})
-                        except Exception as e:
-                            self.logger.error(f"Backfill failed-update error: {e}")
-                        failed += 1
-
-                    await asyncio.sleep(BACKFILL_DELAY)
+                                    """), {
+                                        'val': is_enriched_val,
+                                        'id':  article_dict['id_article'],
+                                    })
+                        except Exception as exc:
+                            self.logger.error(f"Backfill failed-update error: {exc}")
+                        failed_count += 1
 
                 self.logger.info(
-                    f"🔁 Backfill cycle done — enriched={enriched}, "
-                    f"failed/skipped={failed} — "
+                    f"🔁 Backfill cycle done — enriched={enriched_count}, "
+                    f"failed/skipped={failed_count} — "
                     f"sleeping {BACKFILL_CYCLE_INTERVAL}s"
                 )
                 await asyncio.sleep(BACKFILL_CYCLE_INTERVAL)
@@ -2433,8 +2222,8 @@ class NewsGather():
             except asyncio.CancelledError:
                 self.logger.info("🏁 Backfill task cancelled")
                 return
-            except Exception as e:
-                self.logger.error(f"Backfill unexpected error: {e}", exc_info=True)
+            except Exception as exc:
+                self.logger.error(f"Backfill unexpected error: {exc}", exc_info=True)
                 await asyncio.sleep(60)  # back off before retrying
 
     async def enrich_article_content(self, article_dict, source_name='', source_id=''):
@@ -3055,7 +2844,7 @@ if __name__ == '__main__':
         app.logger.info(f"   • NewsAPI: every {NEWSAPI_CYCLE_INTERVAL}s ({NEWSAPI_CYCLE_INTERVAL//60} min)")
         app.logger.info(f"   • RSS Feeds: every {RSS_CYCLE_INTERVAL}s ({RSS_CYCLE_INTERVAL//60} min)")
         app.logger.info(f"   • MediaStack: every {MEDIASTACK_CYCLE_INTERVAL}s ({MEDIASTACK_CYCLE_INTERVAL//60} min)")
-        app.logger.info(f"   • Backfill content: every {BACKFILL_CYCLE_INTERVAL}s ({BACKFILL_CYCLE_INTERVAL//60} min), batch={BACKFILL_BATCH_SIZE}")
+        app.logger.info(f"   • Backfill content: every {BACKFILL_CYCLE_INTERVAL}s ({BACKFILL_CYCLE_INTERVAL//60} min), batch={BACKFILL_BATCH_SIZE}, concurrency={ENRICH_CONCURRENCY}")
         app.logger.info(f"   • Translate: every {TRANSLATE_CYCLE_INTERVAL}s ({TRANSLATE_CYCLE_INTERVAL//60} min), batch={TRANSLATE_BATCH_SIZE}")
 
         # Create tasks for all collectors + translation + API server
@@ -3063,6 +2852,7 @@ if __name__ == '__main__':
             loop.create_task(app.collect_newsapi()),
             loop.create_task(app.collect_rss_feeds()),
             loop.create_task(app.collect_mediastack()),
+            loop.create_task(app._enrichment_worker.run()),
             loop.create_task(app.backfill_content()),
             loop.create_task(app.backfill_translations()),
             loop.create_task(app.serve_api()),
