@@ -317,11 +317,19 @@ class ArticleContentFetcher:
             return None
 
     def _has_useful_content(self, result):
-        """Return True if the result already contains meaningful content."""
-        return bool(
-            (result.get('content') or '').strip() or
-            (result.get('description') or '').strip()
-        )
+        """Return True if the result already contains meaningful content.
+        
+        A description that ends with '...' is considered a truncated RSS teaser,
+        not real content — we still want Playwright to try fetching the full text.
+        """
+        content = (result.get('content') or '').strip()
+        if content:
+            return True
+        description = (result.get('description') or '').strip()
+        # Truncated teasers end with ellipsis variants — treat as insufficient
+        if description and not description.rstrip().endswith(('...', '…')):
+            return True
+        return False
 
     def _extract_author(self, soup):
         """Extract author name from various common locations."""
