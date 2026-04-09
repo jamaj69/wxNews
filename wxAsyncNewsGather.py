@@ -2210,6 +2210,7 @@ class NewsGather():
         Releases the inflight semaphore slot so the producer can enqueue more.
         """
         from sqlalchemy import text as sa_text
+        import re as _re_cons
 
         enriched_total = 0
         failed_total = 0
@@ -2248,9 +2249,8 @@ class NewsGather():
                         # Use plain-text length to decide if description is
                         # meaningful — avoids stub HTML like HN's
                         # "<a href=...>Comments</a>" counting as real content.
-                        import re as _re
                         raw_desc = article_dict.get('description') or ''
-                        _desc_text = _re.sub(r'<[^>]+>', '', raw_desc).strip()
+                        _desc_text = _re_cons.sub(r'<[^>]+>', '', raw_desc).strip()
                         fetched_description = raw_desc if len(_desc_text) >= 80 else None
 
                         # If the fetch "succeeded" but returned nothing useful,
@@ -2293,7 +2293,12 @@ class NewsGather():
                             f"Backfill DB write failed for {article_id}: {exc}"
                         )
                 else:
-                    has_desc = bool((article_dict.get('description') or '').strip())
+                    # Use plain-text length to judge description quality —
+                    # stub HTML like "<a>Comments</a>" must NOT count as content.
+                    import re as _re2
+                    _raw = article_dict.get('description') or ''
+                    _plain = _re_cons.sub(r'<[^>]+>', '', _raw).strip()
+                    has_desc = len(_plain) >= 80
                     has_cont = bool((article_dict.get('content') or '').strip())
                     is_enriched_val = 1 if (has_desc or has_cont) else -1
                     try:
