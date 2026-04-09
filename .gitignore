@@ -214,6 +214,7 @@ $RECYCLE.BIN/
 # ============================================
 # Logs
 *.log
+*.log.*
 logs/
 pytweeter.log
 backfill.log
