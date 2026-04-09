@@ -2239,27 +2239,49 @@ class NewsGather():
 
                 if ok:
                     try:
+                        # Normalize empty strings to NULL so content IS NOT NULL
+                        # is a reliable "has real content" check downstream.
+                        fetched_content     = article_dict.get('content') or None
+                        fetched_description = article_dict.get('description') or None
+                        fetched_author      = article_dict.get('author') or None
+                        fetched_image       = article_dict.get('urlToImage') or None
+
+                        # If the fetch "succeeded" but returned nothing at all,
+                        # leave the article pending so the pipeline retries it
+                        # on the next collector restart rather than silently
+                        # discarding it as fully-enriched.
+                        if not fetched_content and not fetched_description:
+                            self.logger.debug(
+                                f"⚠️  Backfill: empty result for [{source_name}] "
+                                f"{article_id} — marking pending for retry"
+                            )
+                            enriched_val = 0
+                        else:
+                            enriched_val = 1
+
                         async with self.db_lock:
                             with self.eng.begin() as conn:
                                 conn.execute(sa_text("""
                                     UPDATE gm_articles
-                                    SET author=:author,
-                                        description=:description,
+                                    SET author=COALESCE(:author, author),
+                                        description=COALESCE(:description, description),
                                         content=:content,
-                                        is_enriched=1,
+                                        is_enriched=:is_enriched,
                                         urlToImage=COALESCE(:urlToImage, urlToImage)
                                     WHERE id_article=:id_article
                                 """), {
-                                    'author':      article_dict.get('author'),
-                                    'description': article_dict.get('description'),
-                                    'content':     article_dict.get('content'),
-                                    'urlToImage':  article_dict.get('urlToImage'),
+                                    'author':      fetched_author,
+                                    'description': fetched_description,
+                                    'content':     fetched_content,
+                                    'urlToImage':  fetched_image,
+                                    'is_enriched': enriched_val,
                                     'id_article':  article_id,
                                 })
-                        enriched_total += 1
+                        if enriched_val == 1:
+                            enriched_total += 1
                         self.logger.debug(
                             f"✅ Backfill saved: [{source_name}] {article_id} "
-                            f"(enriched={enriched_total})"
+                            f"(enriched={enriched_total}, val={enriched_val})"
                         )
                     except Exception as exc:
                         self.logger.error(
