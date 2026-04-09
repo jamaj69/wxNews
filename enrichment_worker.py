@@ -31,6 +31,7 @@ import concurrent.futures
 import logging
 import re
 from typing import Dict, Any, Optional
+from urllib.parse import urlparse
 
 from decouple import config
 
@@ -53,6 +54,15 @@ _BLOCKED_THRESHOLD: int = 3
 _BLOCKING_ERROR_CODES = {401, 402, 403, 406, 410, 500, 503}
 
 ArticleDict = Dict[str, Any]
+
+
+def _url_domain(url: str) -> str:
+    """Return hostname from URL without 'www.' prefix, e.g. 'seekingalpha.com'."""
+    try:
+        host = urlparse(url).hostname or ''
+        return host.removeprefix('www.')
+    except Exception:
+        return ''
 
 
 # ---------------------------------------------------------------------------
@@ -89,7 +99,9 @@ class EnrichmentWorker:
             concurrent.futures.ThreadPoolExecutor(max_workers=concurrency)
         )
 
-        # source_id → consecutive error count (in-memory only)
+        # domain → consecutive error count (in-memory only).
+        # Keyed by URL *domain* (not source_id) so aggregator feeds are never
+        # blocked just because some articles inside them point to paywalled sites.
         self._error_counts: dict[str, int] = {}
 
         self.logger = logging.getLogger(__name__)
@@ -171,10 +183,14 @@ class EnrichmentWorker:
         if not url:
             return False
 
-        # Skip sources that have hit the in-memory error threshold
-        if source_id and self._error_counts.get(source_id, 0) >= _BLOCKED_THRESHOLD:
+        # Skip if this article's *URL domain* has hit the in-memory error threshold.
+        # Use domain (not source_id) so only paywalled domains are skipped, not
+        # the entire aggregator feed that may contain articles from many domains.
+        domain = _url_domain(url)
+        track_key = domain or source_id
+        if track_key and self._error_counts.get(track_key, 0) >= _BLOCKED_THRESHOLD:
             self.logger.debug(
-                f"⏭️  [{source_name}] Skipping — in-memory block threshold reached"
+                f"⏭️  [{source_name}] Skipping — domain '{domain or source_id}' blocked in-memory"
             )
             return False
 
@@ -190,10 +206,12 @@ class EnrichmentWorker:
                 self.timeout,
             )
 
-            # Track blocking errors in-memory and surface to caller
+            # Track blocking errors in-memory and surface to caller.
+            # Store by domain so _backfill_consumer can persist the domain block.
             if result and result.get('error_code') in _BLOCKING_ERROR_CODES:
-                self._record_error(source_id, source_name, result['error_code'])
-                article['_error_code'] = result['error_code']
+                self._record_error(track_key, source_name, result['error_code'])
+                article['_error_code']      = result['error_code']
+                article['_blocked_domain']  = domain  # for DB-level persistence
 
             if not (result and result.get('success')):
                 self.logger.debug(
@@ -276,19 +294,19 @@ class EnrichmentWorker:
             return False
 
     def _record_error(
-        self, source_id: str, source_name: str, error_code: Any
+        self, key: str, source_name: str, error_code: Any
     ) -> None:
-        """Increment in-memory error counter for *source_id*."""
-        if not source_id:
+        """Increment in-memory error counter for *key* (URL domain or source_id)."""
+        if not key:
             return
-        count = self._error_counts.get(source_id, 0) + 1
-        self._error_counts[source_id] = count
+        count = self._error_counts.get(key, 0) + 1
+        self._error_counts[key] = count
         if count >= _BLOCKED_THRESHOLD:
             self.logger.warning(
                 f"🚫 [{source_name}] In-memory block after "
-                f"{count} HTTP {error_code} errors"
+                f"{count} HTTP {error_code} errors (key={key})"
             )
         else:
             self.logger.debug(
-                f"⚠️  [{source_name}] HTTP {error_code} error #{count}"
+                f"⚠️  [{source_name}] HTTP {error_code} error #{count} (key={key})"
             )

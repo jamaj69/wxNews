@@ -15,7 +15,7 @@ from multiprocessing import Queue
 import re
 import subprocess
 import tempfile
-from typing import Optional, Tuple
+from typing import Any, Optional, Tuple
 
 import urllib.request 
 import json
@@ -33,6 +33,7 @@ from sqlalchemy import (create_engine, Table, Column, Integer,
     String, MetaData, Text)
 from sqlalchemy import inspect, select, text
 from sqlalchemy.dialects.sqlite import insert
+import hashlib
 import os
 from urllib.parse import urlparse
 import feedparser
@@ -57,7 +58,7 @@ from html_utils import (
 )
 
 # Async parallel enrichment worker
-from enrichment_worker import EnrichmentWorker
+from enrichment_worker import EnrichmentWorker, _BLOCKED_THRESHOLD
 
 # FastAPI server (optional - enabled via API_SERVER_ENABLED)
 try:
@@ -186,6 +187,14 @@ def as_text(value):
         return " ".join(as_text(item) for item in value if item is not None)
     result = str(value)
     return fix_encoding_if_needed(result)
+
+
+def _make_title_hash(title: str) -> str:
+    """SHA-1 of lowercased, stripped title — used for cross-feed dedup."""
+    if not title:
+        return ''
+    norm = ' '.join(title.lower().split())
+    return hashlib.sha1(norm.encode('utf-8', errors='ignore')).hexdigest()[:16]
 
 
 def detect_article_language(title, description=None, content=None):
@@ -581,6 +590,22 @@ class NewsGather():
             concurrency=ENRICH_CONCURRENCY,
             timeout=ENRICH_TIMEOUT,
         )
+
+        # Pre-load blocked domains into enrichment worker so re-blocked domains
+        # are still skipped after a service restart.
+        try:
+            with self.eng.connect() as conn:
+                rows = conn.execute(text(
+                    "SELECT domain, blocked_count FROM gm_blocked_domains WHERE is_blocked=1"
+                )).fetchall()
+                for (domain, cnt) in rows:
+                    self._enrichment_worker._error_counts[domain] = max(cnt, _BLOCKED_THRESHOLD)
+                if rows:
+                    self.logger.info(
+                        f"🔒 Loaded {len(rows)} blocked domain(s) into enrichment worker"
+                    )
+        except Exception:
+            pass  # Table may not exist yet on first run
     
     def shutdown(self):
         """
@@ -935,6 +960,35 @@ class NewsGather():
         except Exception as e:
             self.logger.debug(f"Error with published_at_gmt index: {e}")
         
+        # ── gm_blocked_domains table (domain-level block tracking) ─────────────
+        try:
+            with eng.connect() as conn:
+                conn.execute(text("""
+                    CREATE TABLE IF NOT EXISTS gm_blocked_domains (
+                        domain      TEXT PRIMARY KEY,
+                        blocked_count INTEGER DEFAULT 0,
+                        is_blocked  INTEGER DEFAULT 0,
+                        last_error  TEXT,
+                        updated_at  TEXT
+                    )
+                """))
+                conn.commit()
+                self.logger.debug("gm_blocked_domains table ready")
+        except Exception as e:
+            self.logger.debug(f"Error creating gm_blocked_domains: {e}")
+
+        # ── title_hash column on gm_articles ────────────────────────────────
+        try:
+            with eng.connect() as conn:
+                result = conn.execute(text("PRAGMA table_info(gm_articles)")).fetchall()
+                if 'title_hash' not in [r[1] for r in result]:
+                    conn.execute(text('ALTER TABLE gm_articles ADD COLUMN title_hash TEXT'))
+                    conn.execute(text('CREATE INDEX IF NOT EXISTS idx_articles_title_hash ON gm_articles(title_hash)'))
+                    conn.commit()
+                    self.logger.info("✅ title_hash column + index added to gm_articles")
+        except Exception as e:
+            self.logger.debug(f"Error adding title_hash: {e}")
+
         self.logger.info("Database initialization complete")
         return eng
         
@@ -1671,10 +1725,33 @@ class NewsGather():
                         'detected_language': detected_lang,
                         'language_confidence': lang_confidence,
                         'is_enriched': 0,
+                        'title_hash': _make_title_hash(title),
                     }
 
-                    if await self.enrich_article_content(new_article, source_name, source_id):
-                        new_article['is_enriched'] = 1
+                    # ── Cross-feed dedup: if another feed already enriched an
+                    # article with the same title, reuse its content ────────
+                    t_hash = new_article['title_hash']
+                    if t_hash:
+                        async with self.db_lock:
+                            with self.eng.connect() as conn:
+                                row = conn.execute(text("""
+                                    SELECT author, description, content, urlToImage
+                                    FROM gm_articles
+                                    WHERE title_hash = :h
+                                      AND is_enriched = 1
+                                      AND (content IS NOT NULL AND content != '')
+                                    LIMIT 1
+                                """), {'h': t_hash}).fetchone()
+                        if row:
+                            new_article['author']      = row[0] or new_article['author']
+                            new_article['description'] = row[1] or new_article['description']
+                            new_article['content']     = row[2]
+                            new_article['urlToImage']  = row[3] or new_article['urlToImage']
+                            new_article['is_enriched'] = 1
+
+                    if new_article['is_enriched'] == 0:
+                        if await self.enrich_article_content(new_article, source_name, source_id):
+                            new_article['is_enriched'] = 1
 
                     # Insert article
                     async with self.db_lock:
@@ -1991,6 +2068,7 @@ class NewsGather():
                 'detected_language': detected_lang,
                 'language_confidence': lang_confidence,
                 'is_enriched': 0,
+                'title_hash': _make_title_hash(title),
             }
 
             if await self.enrich_article_content(new_article, source_name, source_id):
@@ -2233,10 +2311,19 @@ class NewsGather():
                 processing_ids.discard(article_id)
                 inflight.release()
 
-                # Persist blocking error to the DB
-                error_code = article_dict.pop('_error_code', None)
-                if error_code and source_id:
-                    await self._increment_blocked_count(source_id, source_name, error_code)
+                # Persist blocking error — use the article's URL *domain* so
+                # aggregator feeds (e.g. investing.com's "All News") are never
+                # blocked; only the actual paywalled domain gets blocked.
+                error_code     = article_dict.pop('_error_code', None)
+                blocked_domain = article_dict.pop('_blocked_domain', None)
+                if error_code:
+                    if blocked_domain:
+                        await self._increment_blocked_domain(
+                            blocked_domain, source_name, error_code
+                        )
+                    elif source_id:
+                        # Fallback (no URL available): block by source
+                        await self._increment_blocked_count(source_id, source_name, error_code)
 
                 if ok:
                     try:
@@ -2500,6 +2587,54 @@ class NewsGather():
                             self.logger.debug(f"⚠️  [{source_name}] HTTP {error_code} error #{new_count}")
         except Exception as e:
             self.logger.debug(f"Could not update blocked_count for {source_name}: {e}")
+
+    async def _increment_blocked_domain(
+        self, domain: str, source_name: str = '', error_code: Any = 403
+    ) -> None:
+        """
+        Increment the blocked_count for an article *URL domain* in gm_blocked_domains.
+        Once the threshold is reached, the domain is marked blocked and all pending
+        articles whose URL contains that domain are removed from the enrichment queue
+        (is_enriched = -1).  The RSS feed source in gm_sources is NOT touched.
+        """
+        from sqlalchemy import text as sa_text
+        if not domain:
+            return
+        try:
+            async with self.db_lock:
+                with self.eng.begin() as conn:
+                    conn.execute(sa_text("""
+                        INSERT INTO gm_blocked_domains
+                            (domain, blocked_count, is_blocked, last_error, updated_at)
+                        VALUES (:d, 1, 0, :e, datetime('now'))
+                        ON CONFLICT(domain) DO UPDATE SET
+                            blocked_count = blocked_count + 1,
+                            last_error    = :e,
+                            updated_at    = datetime('now'),
+                            is_blocked    = CASE
+                                WHEN blocked_count + 1 >= 3 THEN 1 ELSE is_blocked
+                            END
+                    """), {'d': domain, 'e': str(error_code)})
+
+                    result = conn.execute(sa_text(
+                        "SELECT blocked_count, is_blocked FROM gm_blocked_domains WHERE domain=:d"
+                    ), {'d': domain}).fetchone()
+
+                    if result and result[1] == 1:
+                        # Bulk-remove pending articles for this domain from the queue
+                        upd = conn.execute(sa_text("""
+                            UPDATE gm_articles SET is_enriched = -1
+                            WHERE is_enriched = 0
+                              AND (content IS NULL OR content = '')
+                              AND url LIKE :pat
+                        """), {'pat': f'%{domain}%'})
+                        self.logger.warning(
+                            f"🚫 Domain '{domain}' blocked after {result[0]} "
+                            f"HTTP {error_code} errors — "
+                            f"{upd.rowcount} pending articles removed from queue"
+                        )
+        except Exception as e:
+            self.logger.debug(f"Could not update blocked domain '{domain}': {e}")
 
     async def probe_blocked_sources(self):
         """
