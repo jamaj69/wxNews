@@ -108,9 +108,9 @@ API_MAX_ARTICLES = 200
 
 # Backfill Configuration — enriches existing articles that have no content yet
 BACKFILL_ENABLED = config('BACKFILL_ENABLED', default=True, cast=bool)
-BACKFILL_BATCH_SIZE = int(config('BACKFILL_BATCH_SIZE', default=20))   # articles per batch
-BACKFILL_DELAY = float(config('BACKFILL_DELAY', default=3.0))           # seconds between articles
-BACKFILL_CYCLE_INTERVAL = int(config('BACKFILL_CYCLE_INTERVAL', default=1800))  # 30 min between cycles
+BACKFILL_BATCH_SIZE = int(config('BACKFILL_BATCH_SIZE', default=50))   # articles per batch
+BACKFILL_DELAY = float(config('BACKFILL_DELAY', default=1.0))           # seconds between articles
+BACKFILL_CYCLE_INTERVAL = int(config('BACKFILL_CYCLE_INTERVAL', default=10))  # seconds between cycles
 
 TRANSLATE_ENABLED = config('TRANSLATE_ENABLED', default=True, cast=bool)
 TRANSLATE_BATCH_SIZE = int(config('TRANSLATE_BATCH_SIZE', default=10))      # articles per batch
@@ -1644,12 +1644,13 @@ class NewsGather():
                                         'content': article_content,
                                         'inserted_at_ms': int(time.time() * 1000),  # Insertion timestamp in ms
                                         'detected_language': detected_lang,
-                                        'language_confidence': lang_confidence
+                                        'language_confidence': lang_confidence,
+                                        'is_enriched': 0,
                                     }
-                                    
-                                    # Try to enrich with missing content
-                                    await self.enrich_article_content(new_article, source_name, source_id)
-                                    
+
+                                    if await self.enrich_article_content(new_article, source_name, source_id):
+                                        new_article['is_enriched'] = 1
+
                                     async with self.db_lock:
                                         with self.eng.connect() as conn:
                                             try:
@@ -1888,12 +1889,13 @@ class NewsGather():
                         'content': '',
                         'inserted_at_ms': int(time.time() * 1000),  # Insertion timestamp in ms
                         'detected_language': detected_lang,
-                        'language_confidence': lang_confidence
+                        'language_confidence': lang_confidence,
+                        'is_enriched': 0,
                     }
-                    
-                    # Try to enrich with missing content from URL
-                    await self.enrich_article_content(new_article, source_name, source['id'])
-                    
+
+                    if await self.enrich_article_content(new_article, source_name, source_id):
+                        new_article['is_enriched'] = 1
+
                     # Insert article
                     async with self.db_lock:
                         with self.eng.connect() as conn:
@@ -2207,12 +2209,13 @@ class NewsGather():
                 'content': '',
                 'inserted_at_ms': int(time.time() * 1000),  # Insertion timestamp in ms
                 'detected_language': detected_lang,
-                'language_confidence': lang_confidence
+                'language_confidence': lang_confidence,
+                'is_enriched': 0,
             }
-            
-            # Try to enrich with missing content from URL
-            await self.enrich_article_content(new_article, source_name, source_id)
-            
+
+            if await self.enrich_article_content(new_article, source_name, source_id):
+                new_article['is_enriched'] = 1
+
             # Insert article with lock
             async with self.db_lock:
                 with self.eng.connect() as conn:
@@ -2293,39 +2296,36 @@ class NewsGather():
             f"delay={BACKFILL_DELAY}s, cycle={BACKFILL_CYCLE_INTERVAL}s"
         )
 
-        from sqlalchemy import update as sa_update, or_, and_, literal_column
+        from sqlalchemy import update as sa_update, text as sa_text
 
         while not self.shutdown_flag:
             try:
-                # ── 1. Find articles without content ──────────────────────
+                # ── 0. Bulk-close articles from blocked sources ────────────
+                async with self.db_lock:
+                    with self.eng.begin() as conn:
+                        conn.execute(sa_text("""
+                            UPDATE gm_articles
+                            SET is_enriched = CASE
+                                WHEN (description IS NOT NULL AND description != '')
+                                  OR (content IS NOT NULL AND content != '') THEN 1
+                                ELSE -1
+                            END
+                            WHERE is_enriched = 0
+                              AND id_source IN (
+                                  SELECT id_source FROM gm_sources WHERE fetch_blocked = 1
+                              )
+                        """))
+
+                # ── 1. Find articles pending enrichment ───────────────────
                 async with self.db_lock:
                     with self.eng.connect() as conn:
-                        stmt = (
-                            select(
-                                self.gm_articles.c.id_article,
-                                self.gm_articles.c.id_source,
-                                self.gm_articles.c.url,
-                                self.gm_articles.c.author,
-                                self.gm_articles.c.description,
-                                self.gm_articles.c.content,
-                                self.gm_articles.c.urlToImage,
-                            )
-                            .where(
-                                and_(
-                                    self.gm_articles.c.url.isnot(None),
-                                    self.gm_articles.c.url != '',
-                                    or_(
-                                        self.gm_articles.c.content.is_(None),
-                                        self.gm_articles.c.content == '',
-                                    ),
-                                )
-                            )
-                            .order_by(
-                                literal_column("datetime(published_at_gmt)").desc()
-                            )
-                            .limit(BACKFILL_BATCH_SIZE)
-                        )
-                        rows = conn.execute(stmt).fetchall()
+                        stmt = sa_text("""
+                            SELECT id_article, id_source, url, author,
+                                   description, content, urlToImage
+                            FROM v_articles_pending_enrichment
+                            LIMIT :batch
+                        """)
+                        rows = conn.execute(stmt, {"batch": BACKFILL_BATCH_SIZE}).fetchall()
 
                 if not rows:
                     self.logger.info(
@@ -2379,19 +2379,21 @@ class NewsGather():
                         try:
                             async with self.db_lock:
                                 with self.eng.begin() as conn:
-                                    conn.execute(
-                                        sa_update(self.gm_articles)
-                                        .where(
-                                            self.gm_articles.c.id_article
-                                            == article_dict['id_article']
-                                        )
-                                        .values(
-                                            author=article_dict.get('author'),
-                                            description=article_dict.get('description'),
-                                            content=article_dict.get('content'),
-                                            **({'urlToImage': article_dict['urlToImage']} if article_dict.get('urlToImage') else {}),
-                                        )
-                                    )
+                                    conn.execute(sa_text("""
+                                        UPDATE gm_articles
+                                        SET author=:author,
+                                            description=:description,
+                                            content=:content,
+                                            is_enriched=1,
+                                            urlToImage=COALESCE(:urlToImage, urlToImage)
+                                        WHERE id_article=:id_article
+                                    """), {
+                                        'author': article_dict.get('author'),
+                                        'description': article_dict.get('description'),
+                                        'content': article_dict.get('content'),
+                                        'urlToImage': article_dict.get('urlToImage'),
+                                        'id_article': article_dict['id_article'],
+                                    })
                             enriched += 1
                             self.logger.debug(
                                 f"✅ Backfill saved: [{source_name}] "
@@ -2403,6 +2405,20 @@ class NewsGather():
                                 f"{article_dict['id_article']}: {e}"
                             )
                     else:
+                        # Mark as enriched (has description/content) or failed (−1)
+                        has_desc = bool((article_dict.get('description') or '').strip())
+                        has_cont = bool((article_dict.get('content') or '').strip())
+                        is_enriched_val = 1 if (has_desc or has_cont) else -1
+                        try:
+                            async with self.db_lock:
+                                with self.eng.begin() as conn:
+                                    conn.execute(sa_text("""
+                                        UPDATE gm_articles
+                                        SET is_enriched=:val
+                                        WHERE id_article=:id
+                                    """), {'val': is_enriched_val, 'id': article_dict['id_article']})
+                        except Exception as e:
+                            self.logger.error(f"Backfill failed-update error: {e}")
                         failed += 1
 
                     await asyncio.sleep(BACKFILL_DELAY)
@@ -2621,6 +2637,13 @@ class NewsGather():
         import translatev1 as tv
         tv._load_language_rules.cache_clear()
 
+        # Start both translation subprocesses eagerly so they are warm before
+        # any article needs translating.  Both sit idle on their request queues
+        # until called.  Google subprocess starts in milliseconds; NLLB takes
+        # ~40 s to load the model onto the GPU.
+        tv._google.start()
+        tv._nllb.start()
+
         self.logger.info(
             f"🌐 Translation backfill started — batch={TRANSLATE_BATCH_SIZE}, "
             f"delay={TRANSLATE_DELAY}s, cycle={TRANSLATE_CYCLE_INTERVAL}s"
@@ -2694,17 +2717,12 @@ class NewsGather():
                     description = row[3] or ''
                     content     = row[4] or ''
 
-                    # Run translations in executor (blocking I/O, non-async)
-                    loop = asyncio.get_event_loop()
-                    t_title, ok_t = await loop.run_in_executor(
-                        None, tv.translate_article, title, lang
-                    )
-                    t_desc, ok_d = await loop.run_in_executor(
-                        None, tv.translate_article, description, lang
-                    ) if description else ('', False)
-                    t_cont, ok_c = await loop.run_in_executor(
-                        None, tv.translate_article, content, lang
-                    ) if content else ('', False)
+                    # Translate all three fields; NLLB subprocess used as fallback
+                    # when Google fails — fully async, does not block the event loop.
+                    (t_title, ok_t), (t_desc, ok_d), (t_cont, ok_c) = \
+                        await tv.translate_article_fields_async(
+                            title, description, content, lang
+                        )
 
                     any_translated = ok_t or ok_d or ok_c
 
@@ -2838,6 +2856,10 @@ class NewsGather():
                         gather.gm_articles.c.publishedAt,
                         gather.gm_articles.c.published_at_gmt,
                         gather.gm_articles.c.inserted_at_ms,
+                        gather.gm_articles.c.translated_title,
+                        gather.gm_articles.c.translated_description,
+                        gather.gm_articles.c.translated_content,
+                        gather.gm_articles.c.is_translated,
                     )
                     .where(gather.gm_articles.c.inserted_at_ms > since)
                     .where(gather.gm_articles.c.inserted_at_ms <= current_time_ms)
@@ -2859,6 +2881,8 @@ class NewsGather():
                         'title': r[3], 'description': r[4], 'url': r[5],
                         'urlToImage': r[6], 'publishedAt': r[7],
                         'published_at_gmt': r[8], 'inserted_at_ms': r[9],
+                        'translated_title': r[10], 'translated_description': r[11],
+                        'translated_content': r[12], 'is_translated': r[13],
                     }
                     for r in rows
                 ]

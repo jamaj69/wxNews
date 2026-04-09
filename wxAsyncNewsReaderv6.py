@@ -762,6 +762,12 @@ class NewsPanel(wx.Panel):
         url = article.get('url', '#')
         url_to_image = article.get('urlToImage', None)
         published_at_gmt = article.get('published_at_gmt', None)
+        is_translated = article.get('is_translated', 0) or 0
+        # Use translated fields when available; do NOT fall back to original
+        # untranslated text for description/content when is_translated=1
+        if is_translated == 1:
+            title = article.get('translated_title') or title
+            description = article.get('translated_description')  # None if not translated
         
         # Get source name
         source_name = self.sources.get(source_id, {}).get('name', source_id)
@@ -783,6 +789,8 @@ class NewsPanel(wx.Panel):
         
         # Build display text: prefer content when description is absent or very short
         content = article.get('content', None)
+        if is_translated == 1:
+            content = article.get('translated_content')  # None if not translated
         description_html = ""
         content_html = ""
         if description:
@@ -802,6 +810,8 @@ class NewsPanel(wx.Panel):
         if author:
             html += f'<span class="article-author">✍️ {author}</span>'
         html += f'<span class="article-date">📅 {date_str}</span>'
+        if is_translated == 1:
+            html += '<span style="color:#0b9ac4;font-size:13px;font-weight:500;">🌐 Traduzido</span>'
         html += '</div>'
 
         # Show main article image
@@ -1788,6 +1798,15 @@ class NewsPanel(wx.Panel):
             url_to_image = article[6] if len(article) > 6 and article[6] and article[6].strip() else None
             published_at = article[7] if article[7] else None
             published_at_gmt = article[9] if len(article) > 9 and article[9] else None
+            is_translated = (article[16] if len(article) > 16 else 0) or 0
+            translated_title = article[13] if len(article) > 13 and article[13] and article[13].strip() else None
+            translated_description = article[14] if len(article) > 14 and article[14] and article[14].strip() else None
+            translated_content = article[15] if len(article) > 15 and article[15] and article[15].strip() else None
+            # Use translated text when available; do NOT fall back to original
+            # untranslated text for description/content when is_translated=1
+            if is_translated == 1:
+                title = translated_title or title
+                description = translated_description  # None if not translated
             
             # Get source name
             source_name = self.sources.get(source_id, {}).get('name', source_id)
@@ -1829,6 +1848,8 @@ class NewsPanel(wx.Panel):
             if description:
                 description_html = sanitize_html_content(description)
             content = article[8] if len(article) > 8 and article[8] and article[8].strip() else None
+            if is_translated == 1:
+                content = translated_content  # None if not translated
             if content:
                 content_html = sanitize_html_content(content)
 
@@ -1844,6 +1865,8 @@ class NewsPanel(wx.Panel):
             if author:
                 html += f'<span class="article-author">✍️ {author}</span>'
             html += f'<span class="article-date">📅 {date_str}</span>'
+            if is_translated == 1:
+                html += '<span style="color:#0b9ac4;font-size:13px;font-weight:500;">🌐 Traduzido</span>'
             html += '</div>'
 
             # Show main article image if available
@@ -2007,6 +2030,17 @@ class NewsPanel(wx.Panel):
             url_to_image = article[6] if len(article) > 6 and article[6] and article[6].strip() else None
             published_at = article[7] if article[7] else None
             published_at_gmt = article[9] if len(article) > 9 and article[9] else None
+            is_translated = (article[16] if len(article) > 16 else 0) or 0
+            translated_title = article[13] if len(article) > 13 and article[13] and article[13].strip() else None
+            translated_description = article[14] if len(article) > 14 and article[14] and article[14].strip() else None
+            translated_content = article[15] if len(article) > 15 and article[15] and article[15].strip() else None
+            content = article[8] if len(article) > 8 and article[8] and article[8].strip() else None
+            # Use translated text when available; do NOT fall back to original
+            # untranslated text for description/content when is_translated=1
+            if is_translated == 1:
+                title = translated_title or title
+                description = translated_description  # None if not translated
+                content = translated_content  # None if not translated
             
             # Format date - prefer GMT time
             date_str = None
@@ -2037,11 +2071,18 @@ class NewsPanel(wx.Panel):
             if author:
                 author = author.replace('<', '&lt;').replace('>', '&gt;')
             
-            # Sanitize HTML description (keep images and structure, remove classes/styles)
+            # Sanitize HTML description and content
             description_html = ""
+            content_html = ""
             if description:
                 description_html = sanitize_html_content(description)
-            
+            if content:
+                content_html = sanitize_html_content(content)
+
+            # Use content as body when description is absent or just a short teaser
+            desc_text_len = len(re.sub(r'<[^>]+>', '', description_html)) if description_html else 0
+            use_content = content_html and desc_text_len < 200
+
             # Build article card
             html += '<div class="article">'
             html += f'<div class="article-title"><a href="{url}">{title}</a></div>'
@@ -2049,14 +2090,30 @@ class NewsPanel(wx.Panel):
             if author:
                 html += f'<span class="article-author">✍️ {author}</span>'
             html += f'<span class="article-date">📅 {date_str}</span>'
+            if is_translated == 1:
+                html += '<span style="color:#0b9ac4;font-size:13px;font-weight:500;">🌐 Traduzido</span>'
             html += '</div>'
             
             # Show main article image if available (from urlToImage field)
             if url_to_image and url_to_image.startswith(('http://', 'https://')):
                 html += f'<img src="{url_to_image}" alt="Article image" onerror="this.style.display=\'none\'" style="max-width: 100%; width: 100%; height: auto; display: block; margin: 10px 0; border-radius: 4px; clear: both;">'
-            
-            # Show sanitized description HTML (includes images and content structure)
-            if description_html:
+
+            if use_content:
+                if description_html:
+                    html += f'<div class="article-content">{description_html}</div>'
+                uid = abs(hash(article_id or url)) % 10000000
+                preview = content_html[:600]
+                rest = content_html[600:]
+                html += f'<div class="article-content">{preview}'
+                if rest:
+                    html += (f'<span id="more-{uid}" style="display:none">{rest}</span>'
+                             f'<a href="#" onclick="var m=document.getElementById(\'more-{uid}\');'
+                             f'var t=document.getElementById(\'tog-{uid}\');'
+                             f'm.style.display=m.style.display==\'none\'?\'inline\':\'none\';'
+                             f't.textContent=m.style.display==\'inline\'?\'Read less\':\'Read more\';'
+                             f'return false;" id="tog-{uid}" style="margin-left:6px;font-size:0.85em;">Read more</a>')
+                html += '</div>'
+            elif description_html:
                 html += f'<div class="article-content">{description_html}</div>'
             
             html += '</div>'  # Close article div

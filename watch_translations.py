@@ -17,10 +17,23 @@ def query():
     con = sqlite3.connect(f"file:{DB_PATH}?mode=ro", uri=True)
     try:
         cur = con.cursor()
-        cur.execute("SELECT COUNT(*) FROM gm_articles WHERE is_translated=1")
-        translated = cur.fetchone()[0]
+        # ── Totais gerais ──────────────────────────────────────────────────
+        cur.execute("SELECT COUNT(*) FROM gm_articles")
+        total_articles = cur.fetchone()[0]
+        cur.execute("SELECT COUNT(*) FROM gm_articles WHERE is_enriched = 1")
+        enriched = cur.fetchone()[0]
+        cur.execute("SELECT COUNT(*) FROM gm_articles WHERE is_enriched = 0")
+        not_enriched = cur.fetchone()[0]
+        cur.execute("SELECT COUNT(*) FROM gm_articles WHERE is_enriched = -1")
+        enrich_failed = cur.fetchone()[0]
+        # ── Estado pipeline ────────────────────────────────────────────────
+        cur.execute("SELECT COUNT(*) FROM v_articles_pending_enrichment")
+        pending_enrich = cur.fetchone()[0]
         cur.execute("SELECT COUNT(*) FROM v_articles_pending_translation")
-        pending = cur.fetchone()[0]
+        pending_trans = cur.fetchone()[0]
+        cur.execute("SELECT COUNT(*) FROM gm_articles WHERE is_translated = 1")
+        translated = cur.fetchone()[0]
+        # ── Top idiomas pendentes tradução ─────────────────────────────────
         cur.execute("""
             SELECT detected_language, language_name, target_language, COUNT(*) AS n
             FROM v_articles_pending_translation
@@ -31,7 +44,8 @@ def query():
         top = cur.fetchall()
     finally:
         con.close()
-    return translated, pending, top
+    return total_articles, enriched, not_enriched, enrich_failed, \
+           pending_enrich, pending_trans, translated, top
 
 def clear_screen():
     # Move cursor to top-left and clear screen
@@ -52,12 +66,15 @@ def main():
     print("\033[?25l", end="")  # ocultar cursor
     try:
         while True:
-            translated, pending, top = query()
-            total = translated + pending
-            pct = (translated / total * 100) if total else 0
+            total_articles, enriched, not_enriched, enrich_failed, \
+                pending_enrich, pending_trans, translated, top = query()
+
+            pct_enrich = (enriched / total_articles * 100) if total_articles else 0
+            total_pipeline = pending_enrich + pending_trans + translated
+            pct_trans = (translated / total_pipeline * 100) if total_pipeline else 0
             now = time.time()
 
-            # Calcular taxa
+            # Calcular taxa de tradução
             if prev_translated is not None:
                 delta = translated - prev_translated
                 rates.append(delta)
@@ -65,7 +82,7 @@ def main():
                     rates.pop(0)
                 rate_per_s = sum(rates) / (len(rates) * INTERVAL)
                 rate_per_h = rate_per_s * 3600
-                eta_s = (pending / rate_per_s) if rate_per_s > 0 else None
+                eta_s = (pending_trans / rate_per_s) if rate_per_s > 0 else None
                 if eta_s and eta_s > 0:
                     h, rem = divmod(int(eta_s), 3600)
                     m, s = divmod(rem, 60)
@@ -80,20 +97,30 @@ def main():
 
             clear_screen()
             print("━" * 52)
-            print("  📊  MONITOR DE TRADUÇÕES")
+            print("  📊  MONITOR DE ARTIGOS & TRADUÇÕES")
             print("━" * 52)
-            print(f"  Pendentes por idioma:")
-            print(f"  {'lang':<6} {'nome':<18} → {'destino':<6} {'qtd':>7}")
-            print("  " + "─" * 44)
-            for lang, name, target, n in top:
-                print(f"  {str(lang):<6} {str(name):<18} → {str(target):<6} {n:>7,}")
+            print(f"  {'ARTIGOS':38}")
+            print(f"  Total       : {total_articles:>10,}")
+            print(f"  Enriquecidos: \033[32m{enriched:>10,}\033[0m  {bar(enriched, total_articles)}  {pct_enrich:.1f}%")
+            print(f"  Não enriq.  : \033[33m{not_enriched:>10,}\033[0m")
+            print(f"  Falha enriq.: \033[31m{enrich_failed:>10,}\033[0m")
             print("━" * 52)
-            print(f"  Traduzidos : \033[32m{translated:>8,}\033[0m")
-            print(f"  Pendentes  : \033[33m{pending:>8,}\033[0m")
-            print(f"  Total      :   {total:>8,}")
-            print(f"  Progresso  :   {bar(translated, total)}  {pct:.1f}%")
-            print(f"  Ritmo      :   ~{rate_per_h:,.0f} artigos/hora")
-            print(f"  ETA        :   {eta_str}")
+            print(f"  {'PIPELINE':38}")
+            print(f"  Pend. enriq.: \033[33m{pending_enrich:>10,}\033[0m")
+            print(f"  Pend. trad. : \033[33m{pending_trans:>10,}\033[0m")
+            print(f"  Traduzidos  : \033[32m{translated:>10,}\033[0m")
+            print(f"  Total (pipe): {total_pipeline:>10,}")
+            print(f"  Trad. prog. : {bar(translated, total_pipeline)}  {pct_trans:.1f}%")
+            print("━" * 52)
+            if top:
+                print(f"  Pendentes por idioma (tradução):")
+                print(f"  {'lang':<6} {'nome':<18} → {'destino':<6} {'qtd':>7}")
+                print("  " + "─" * 44)
+                for lang, name, target, n in top:
+                    print(f"  {str(lang):<6} {str(name):<18} → {str(target):<6} {n:>7,}")
+                print("━" * 52)
+            print(f"  Ritmo trad. :   ~{rate_per_h:,.0f} artigos/hora")
+            print(f"  ETA trad.   :   {eta_str}")
             print("━" * 52)
             elapsed = int(now - start_time)
             h, rem = divmod(elapsed, 3600)
