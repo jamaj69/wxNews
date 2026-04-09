@@ -2053,25 +2053,60 @@ class NewsGather():
         """
         Continuously backfill articles that have no content yet.
 
-        Each cycle:
-          1. Bulk-close articles belonging to blocked sources.
-          2. Fetch a batch of articles with missing content.
-          3. Enqueue all articles in the batch to EnrichmentWorker.
-          4. Collect results from output_queue and write DB updates.
-          5. Sleep BACKFILL_CYCLE_INTERVAL before the next batch.
+        Architecture: decoupled producer + consumer.
 
-        Up to ENRICH_CONCURRENCY articles are fetched in parallel.
-        BACKFILL_DELAY is no longer used (parallelism replaces the delay).
+        Producer (_backfill_producer):
+          - Fetches pending articles from DB.
+          - Acquires one inflight semaphore slot per article before enqueueing.
+          - Blocks naturally when BACKFILL_BATCH_SIZE articles are in-flight.
+          - As soon as any slot is freed by the consumer it immediately enqueues
+            the next article — no article ever waits for slower ones.
+
+        Consumer (_backfill_consumer):
+          - Drains output_queue continuously.
+          - Writes DB result immediately when each article finishes.
+          - Releases the inflight slot so the producer can enqueue the next one.
+
+        This replaces the old batch-then-drain model where one slow Playwright
+        fetch would block all completed results from being persisted.
         """
         if not BACKFILL_ENABLED:
             self.logger.info("⏭️  Backfill disabled (BACKFILL_ENABLED=False)")
             return
 
         self.logger.info(
-            f"🔁 Backfill started — batch={BACKFILL_BATCH_SIZE}, "
+            f"🔁 Backfill started — max_inflight={BACKFILL_BATCH_SIZE}, "
             f"concurrency={ENRICH_CONCURRENCY}, cycle={BACKFILL_CYCLE_INTERVAL}s"
         )
 
+        # Semaphore caps in-flight articles.
+        # Producer acquires before enqueuing; consumer releases after DB write.
+        inflight: asyncio.Semaphore = asyncio.Semaphore(BACKFILL_BATCH_SIZE)
+
+        # IDs of articles currently in the enrichment pipeline (enqueued but
+        # not yet consumed).  Prevents re-fetching the same article on the next
+        # DB query while it is still being processed.  Safe to share between
+        # the two coroutines because asyncio is single-threaded.
+        processing_ids: set[int] = set()
+
+        await asyncio.gather(
+            self._backfill_producer(inflight, processing_ids),
+            self._backfill_consumer(inflight, processing_ids),
+            return_exceptions=True,
+        )
+
+    async def _backfill_producer(
+        self,
+        inflight: asyncio.Semaphore,
+        processing_ids: set[int],
+    ) -> None:
+        """
+        Fetch pending articles from DB and enqueue them to the EnrichmentWorker.
+
+        Blocks on the semaphore when BACKFILL_BATCH_SIZE articles are already
+        in-flight.  Sleeps BACKFILL_CYCLE_INTERVAL only when the DB returns no
+        new rows.
+        """
         from sqlalchemy import text as sa_text
 
         while not self.shutdown_flag:
@@ -2092,139 +2127,167 @@ class NewsGather():
                               )
                         """))
 
-                # ── 1. Find articles pending enrichment ───────────────────
+                # ── 1. Fetch a larger slice so that after excluding in-flight
+                #       articles we still have enough work to fill free slots. ─
+                fetch_limit = BACKFILL_BATCH_SIZE + len(processing_ids)
                 async with self.db_lock:
                     with self.eng.connect() as conn:
                         rows = conn.execute(sa_text("""
-                            SELECT id_article, id_source, url, author,
-                                   description, content, urlToImage
-                            FROM v_articles_pending_enrichment
+                            SELECT a.id_article, a.id_source, a.url, a.author,
+                                   a.description, a.content, a.urlToImage,
+                                   s.name AS source_name
+                            FROM v_articles_pending_enrichment a
+                            LEFT JOIN gm_sources s ON s.id_source = a.id_source
                             LIMIT :batch
-                        """), {"batch": BACKFILL_BATCH_SIZE}).fetchall()
+                        """), {"batch": fetch_limit}).fetchall()
+
+                # Exclude articles already queued / being processed
+                rows = [r for r in rows if r[0] not in processing_ids]
 
                 if not rows:
                     self.logger.info(
-                        f"✅ Backfill: no articles need content — "
-                        f"sleeping {BACKFILL_CYCLE_INTERVAL}s"
+                        f"✅ Backfill: no new articles — "
+                        f"sleeping {BACKFILL_CYCLE_INTERVAL}s "
+                        f"(in-flight={len(processing_ids)})"
                     )
                     await asyncio.sleep(BACKFILL_CYCLE_INTERVAL)
                     continue
 
                 self.logger.info(
-                    f"🔁 Backfill: enqueueing {len(rows)} articles "
-                    f"(concurrency={ENRICH_CONCURRENCY})…"
+                    f"🔁 Backfill: {len(rows)} articles to enqueue "
+                    f"(in-flight={len(processing_ids)}, "
+                    f"max={BACKFILL_BATCH_SIZE})…"
                 )
 
-                # ── 2. Build article dicts and look up source names ────────
-                articles: list[dict] = []
                 for row in rows:
-                    source_id = row[1] or ''
-                    source_name = source_id
-                    try:
-                        async with self.db_lock:
-                            with self.eng.connect() as conn:
-                                sn = conn.execute(
-                                    select(self.gm_sources.c.name)
-                                    .where(self.gm_sources.c.id_source == source_id)
-                                ).scalar()
-                                if sn:
-                                    source_name = sn
-                    except Exception:
-                        pass
+                    if self.shutdown_flag:
+                        return
 
-                    articles.append({
+                    # Block here until a slot is free — this is the back-
+                    # pressure mechanism.  Fast articles free their slots
+                    # quickly; slow ones (Playwright) hold theirs longer,
+                    # but that only limits the *number* in flight, not the
+                    # speed at which already-finished articles are persisted.
+                    await inflight.acquire()
+
+                    article = {
                         'id_article':  row[0],
-                        'id_source':   source_id,
-                        'source_name': source_name,
+                        'id_source':   row[1] or '',
+                        'source_name': row[7] or row[1] or '',
                         'url':         row[2],
                         'author':      row[3],
                         'description': row[4],
                         'content':     row[5],
-                        'urlToImage':  row[6] if len(row) > 6 else None,
-                    })
-
-                # ── 3. Enqueue all articles ────────────────────────────────
-                for article in articles:
+                        'urlToImage':  row[6],
+                    }
+                    processing_ids.add(article['id_article'])
                     await self._enrichment_worker.enqueue(article)
 
-                # ── 4. Collect results ─────────────────────────────────────
-                enriched_count = 0
-                failed_count = 0
-                received = 0
-                total = len(articles)
-
-                while received < total and not self.shutdown_flag:
-                    article_dict, ok = await self._enrichment_worker.output_queue.get()
-                    received += 1
-                    source_name = article_dict.get('source_name', '')
-                    source_id = article_dict.get('id_source', '')
-
-                    # Persist any blocking error back to the DB
-                    error_code = article_dict.pop('_error_code', None)
-                    if error_code and source_id:
-                        await self._increment_blocked_count(source_id, source_name, error_code)
-
-                    if ok:
-                        try:
-                            async with self.db_lock:
-                                with self.eng.begin() as conn:
-                                    conn.execute(sa_text("""
-                                        UPDATE gm_articles
-                                        SET author=:author,
-                                            description=:description,
-                                            content=:content,
-                                            is_enriched=1,
-                                            urlToImage=COALESCE(:urlToImage, urlToImage)
-                                        WHERE id_article=:id_article
-                                    """), {
-                                        'author':      article_dict.get('author'),
-                                        'description': article_dict.get('description'),
-                                        'content':     article_dict.get('content'),
-                                        'urlToImage':  article_dict.get('urlToImage'),
-                                        'id_article':  article_dict['id_article'],
-                                    })
-                            enriched_count += 1
-                            self.logger.debug(
-                                f"✅ Backfill saved: [{source_name}] "
-                                f"{article_dict['id_article']}"
-                            )
-                        except Exception as exc:
-                            self.logger.error(
-                                f"Backfill DB write failed for "
-                                f"{article_dict['id_article']}: {exc}"
-                            )
-                    else:
-                        has_desc = bool((article_dict.get('description') or '').strip())
-                        has_cont = bool((article_dict.get('content') or '').strip())
-                        is_enriched_val = 1 if (has_desc or has_cont) else -1
-                        try:
-                            async with self.db_lock:
-                                with self.eng.begin() as conn:
-                                    conn.execute(sa_text("""
-                                        UPDATE gm_articles
-                                        SET is_enriched=:val
-                                        WHERE id_article=:id
-                                    """), {
-                                        'val': is_enriched_val,
-                                        'id':  article_dict['id_article'],
-                                    })
-                        except Exception as exc:
-                            self.logger.error(f"Backfill failed-update error: {exc}")
-                        failed_count += 1
-
-                self.logger.info(
-                    f"🔁 Backfill cycle done — enriched={enriched_count}, "
-                    f"failed/skipped={failed_count} — "
-                    f"sleeping {BACKFILL_CYCLE_INTERVAL}s"
-                )
-                await asyncio.sleep(BACKFILL_CYCLE_INTERVAL)
+                # Yield to let the consumer (and other tasks) run
+                await asyncio.sleep(0)
 
             except asyncio.CancelledError:
-                self.logger.info("🏁 Backfill task cancelled")
+                self.logger.info("🏁 Backfill producer cancelled")
                 return
             except Exception as exc:
-                self.logger.error(f"Backfill unexpected error: {exc}", exc_info=True)
-                await asyncio.sleep(60)  # back off before retrying
+                self.logger.error(f"Backfill producer error: {exc}", exc_info=True)
+                await asyncio.sleep(60)
+
+    async def _backfill_consumer(
+        self,
+        inflight: asyncio.Semaphore,
+        processing_ids: set[int],
+    ) -> None:
+        """
+        Drain the EnrichmentWorker output_queue and persist results to the DB
+        immediately as each article finishes — no waiting for the whole batch.
+        Releases the inflight semaphore slot so the producer can enqueue more.
+        """
+        from sqlalchemy import text as sa_text
+
+        enriched_total = 0
+        failed_total = 0
+
+        while not self.shutdown_flag:
+            try:
+                try:
+                    article_dict, ok = await asyncio.wait_for(
+                        self._enrichment_worker.output_queue.get(),
+                        timeout=5.0,
+                    )
+                except asyncio.TimeoutError:
+                    continue
+
+                article_id  = article_dict['id_article']
+                source_id   = article_dict.get('id_source', '')
+                source_name = article_dict.get('source_name', '')
+
+                # Remove from tracking set and free the inflight slot
+                processing_ids.discard(article_id)
+                inflight.release()
+
+                # Persist blocking error to the DB
+                error_code = article_dict.pop('_error_code', None)
+                if error_code and source_id:
+                    await self._increment_blocked_count(source_id, source_name, error_code)
+
+                if ok:
+                    try:
+                        async with self.db_lock:
+                            with self.eng.begin() as conn:
+                                conn.execute(sa_text("""
+                                    UPDATE gm_articles
+                                    SET author=:author,
+                                        description=:description,
+                                        content=:content,
+                                        is_enriched=1,
+                                        urlToImage=COALESCE(:urlToImage, urlToImage)
+                                    WHERE id_article=:id_article
+                                """), {
+                                    'author':      article_dict.get('author'),
+                                    'description': article_dict.get('description'),
+                                    'content':     article_dict.get('content'),
+                                    'urlToImage':  article_dict.get('urlToImage'),
+                                    'id_article':  article_id,
+                                })
+                        enriched_total += 1
+                        self.logger.debug(
+                            f"✅ Backfill saved: [{source_name}] {article_id} "
+                            f"(enriched={enriched_total})"
+                        )
+                    except Exception as exc:
+                        self.logger.error(
+                            f"Backfill DB write failed for {article_id}: {exc}"
+                        )
+                else:
+                    has_desc = bool((article_dict.get('description') or '').strip())
+                    has_cont = bool((article_dict.get('content') or '').strip())
+                    is_enriched_val = 1 if (has_desc or has_cont) else -1
+                    try:
+                        async with self.db_lock:
+                            with self.eng.begin() as conn:
+                                conn.execute(sa_text("""
+                                    UPDATE gm_articles
+                                    SET is_enriched=:val
+                                    WHERE id_article=:id
+                                """), {'val': is_enriched_val, 'id': article_id})
+                    except Exception as exc:
+                        self.logger.error(f"Backfill failed-update error: {exc}")
+                    failed_total += 1
+                    self.logger.debug(
+                        f"⚠️  Backfill no-data: [{source_name}] {article_id} "
+                        f"(failed={failed_total})"
+                    )
+
+            except asyncio.CancelledError:
+                self.logger.info(
+                    f"🏁 Backfill consumer cancelled "
+                    f"(enriched={enriched_total}, failed={failed_total})"
+                )
+                return
+            except Exception as exc:
+                self.logger.error(f"Backfill consumer error: {exc}", exc_info=True)
+                await asyncio.sleep(1)
 
     async def enrich_article_content(self, article_dict, source_name='', source_id=''):
         """
