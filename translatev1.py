@@ -11,6 +11,7 @@ Fallback backend: NLLB-200 local GPU (_nllb  — nllb_worker   subprocess)
 """
 
 import asyncio
+import itertools
 import multiprocessing
 import re
 import threading
@@ -236,10 +237,57 @@ class _NLLBProcessTranslator(_ProcessTranslator):
 _google = _GoogleProcessTranslator()
 _nllb   = _NLLBProcessTranslator()
 
+# Round-robin backend selector — alternates each article between Google and NLLB.
+_backend_cycle = itertools.cycle(['google', 'nllb'])
+_backend_lock  = threading.Lock()
+
+def _next_backend() -> str:
+    with _backend_lock:
+        return next(_backend_cycle)
+
 
 # ---------------------------------------------------------------------------
 # Translation orchestration (Google primary → NLLB fallback)
 # ---------------------------------------------------------------------------
+
+
+def _translate_via_google_sync(
+    fields: list[str],
+    non_empty: list[tuple[int, str]],
+    target: str,
+) -> list[tuple[str, bool]] | None:
+    """Send all fields as a single batched request to the Google subprocess.
+    Returns the results list, or None if the backend failed."""
+    combined = _FIELD_SEP.join(text for _, text in non_empty)
+    translated_combined = _google.translate_sync(combined, 'auto', target)
+    if not translated_combined:
+        return None
+    parts = re.split(r'\s*<<<SEP>>>\s*', translated_combined)
+    results: list[tuple[str, bool]] = [(f, False) for f in fields]
+    for idx, (field_idx, original) in enumerate(non_empty):
+        translated = parts[idx].strip() if idx < len(parts) else ''
+        was_translated = bool(translated) and translated != original
+        results[field_idx] = (translated if translated else fields[field_idx], was_translated)
+    return results
+
+
+def _translate_via_nllb_sync(
+    fields: list[str],
+    non_empty: list[tuple[int, str]],
+    source_language_code: str | None,
+    target: str,
+) -> list[tuple[str, bool]] | None:
+    """Send each field as a separate request to the NLLB subprocess.
+    Returns the results list, or None if all fields failed."""
+    src = source_language_code or 'auto'
+    results: list[tuple[str, bool]] = [(f, False) for f in fields]
+    any_translated = False
+    for field_idx, original in non_empty:
+        translated = _nllb.translate_sync(original, src, target)
+        if translated and translated != original:
+            results[field_idx] = (translated, True)
+            any_translated = True
+    return results if any_translated else None
 
 
 def translate_article_fields(
@@ -249,53 +297,40 @@ def translate_article_fields(
     source_language_code: str | None,
 ) -> tuple[tuple[str, bool], tuple[str, bool], tuple[str, bool]]:
     """
-    Translate title, description, and content in a **single** API call by
-    concatenating them with a unique separator, translating the whole block,
-    then splitting the result.
+    Translate title, description and content, alternating between Google
+    and NLLB backends on each call.  If the selected backend fails,
+    the other backend is used as fallback.
 
     Returns:
         ((t_title, ok_t), (t_desc, ok_d), (t_cont, ok_c))
     """
-    # Resolve translation rules once
     rules = get_language_rules(source_language_code) if source_language_code else None
-
     if rules is not None and not rules['translate']:
-        # Language known and not translatable (en/pt/etc.) → skip all fields
         return (title, False), (description, False), (content, False)
 
     target = rules['translate_to'] if rules else AUTO_FALLBACK_TARGET
-
-    # Build the list of non-empty fields to translate, keeping their index
     fields = [title, description, content]
-    non_empty = [(i, _strip_html(f)[:MAX_TRANSLATE_CHARS]) for i, f in enumerate(fields) if f and f.strip()]
-
+    non_empty = [
+        (i, _strip_html(f)[:MAX_TRANSLATE_CHARS])
+        for i, f in enumerate(fields)
+        if f and f.strip()
+    ]
     if not non_empty:
         return (title, False), (description, False), (content, False)
 
-    # Concatenate into one request
-    combined = _FIELD_SEP.join(text for _, text in non_empty)
+    backend = _next_backend()
 
-    translated_combined = _google.translate_sync(combined, 'auto', target)
+    if backend == 'google':
+        results = _translate_via_google_sync(fields, non_empty, target)
+        if results is None:
+            results = _translate_via_nllb_sync(fields, non_empty, source_language_code, target)
+    else:
+        results = _translate_via_nllb_sync(fields, non_empty, source_language_code, target)
+        if results is None:
+            results = _translate_via_google_sync(fields, non_empty, target)
 
-    if not translated_combined:
-        # Google failed — fall back to NLLB subprocess
-        src = source_language_code or 'auto'
-        results: list[tuple[str, bool]] = [(f, False) for f in fields]
-        for field_idx, original in non_empty:
-            translated = _nllb.translate_sync(original, src, target)
-            if translated and translated != original:
-                results[field_idx] = (translated, True)
-        return tuple(results)  # type: ignore[return-value]
-
-    # Split translated result back by separator (Google may add spaces around it)
-    parts = re.split(r'\s*<<<SEP>>>\s*', translated_combined)
-
-    results = [(f, False) for f in fields]
-    for idx, (field_idx, original) in enumerate(non_empty):
-        translated = parts[idx].strip() if idx < len(parts) else ''
-        was_translated = bool(translated) and translated != original
-        results[field_idx] = (translated if translated else fields[field_idx], was_translated)
-
+    if results is None:
+        return (title, False), (description, False), (content, False)
     return tuple(results)  # type: ignore[return-value]
 
 
@@ -308,10 +343,11 @@ async def translate_article_fields_async(
     """
     Fully async version of translate_article_fields.
 
-    * Google Translate is called in a thread-pool executor (it's blocking IO).
-    * If Google fails, the NLLB subprocess is used via translate_async() —
-      all non-empty fields are sent concurrently, so total latency is
-      max(field_latencies) rather than their sum.
+    Alternates between Google and NLLB backends on each call.
+    If the selected backend fails, the other is used as fallback.
+
+    Google: all fields batched in one request (fast, single round-trip).
+    NLLB:   each field sent as a separate request, all concurrent via asyncio.gather.
     """
     rules = get_language_rules(source_language_code) if source_language_code else None
     if rules is not None and not rules['translate']:
@@ -327,27 +363,44 @@ async def translate_article_fields_async(
     if not non_empty:
         return (title, False), (description, False), (content, False)
 
-    # ── Google Translate subprocess (batch, single request) ──────────────
-    combined = _FIELD_SEP.join(text for _, text in non_empty)
-    translated_combined: str | None = await _google.translate_async(combined, 'auto', target)
+    backend = _next_backend()
+    src     = source_language_code or 'auto'
 
-    if translated_combined:
+    async def _via_google() -> list[tuple[str, bool]] | None:
+        combined = _FIELD_SEP.join(text for _, text in non_empty)
+        translated_combined = await _google.translate_async(combined, 'auto', target)
+        if not translated_combined:
+            return None
         parts = re.split(r'\s*<<<SEP>>>\s*', translated_combined)
-        results: list[tuple[str, bool]] = [(f, False) for f in fields]
+        res: list[tuple[str, bool]] = [(f, False) for f in fields]
         for idx, (field_idx, original) in enumerate(non_empty):
             translated = parts[idx].strip() if idx < len(parts) else ''
             was_translated = bool(translated) and translated != original
-            results[field_idx] = (translated or fields[field_idx], was_translated)
-        return tuple(results)  # type: ignore[return-value]
+            res[field_idx] = (translated or fields[field_idx], was_translated)
+        return res
 
-    # ── NLLB fallback (concurrent async requests to the GPU subprocess) ───
-    src = source_language_code or 'auto'
-    tasks = [_nllb.translate_async(original, src, target) for _, original in non_empty]
-    translated_list = await asyncio.gather(*tasks)
-    results = [(f, False) for f in fields]
-    for (field_idx, original), translated in zip(non_empty, translated_list):
-        if translated and translated != original:
-            results[field_idx] = (translated, True)
+    async def _via_nllb() -> list[tuple[str, bool]] | None:
+        tasks = [_nllb.translate_async(original, src, target) for _, original in non_empty]
+        translated_list = await asyncio.gather(*tasks)
+        res: list[tuple[str, bool]] = [(f, False) for f in fields]
+        any_translated = False
+        for (field_idx, original), translated in zip(non_empty, translated_list):
+            if translated and translated != original:
+                res[field_idx] = (translated, True)
+                any_translated = True
+        return res if any_translated else None
+
+    if backend == 'google':
+        results = await _via_google()
+        if results is None:
+            results = await _via_nllb()
+    else:
+        results = await _via_nllb()
+        if results is None:
+            results = await _via_google()
+
+    if results is None:
+        return (title, False), (description, False), (content, False)
     return tuple(results)  # type: ignore[return-value]
 
 
