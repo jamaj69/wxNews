@@ -21,7 +21,7 @@ import uuid
 import google_worker
 import nllb_worker
 from lang_rules import AUTO_FALLBACK_TARGET, _load_language_rules, get_language_rules
-from text_utils import MAX_TRANSLATE_CHARS, _strip_html
+from text_utils import GOOGLE_MAX_CHARS, MAX_TRANSLATE_CHARS, _strip_html
 
 logger = logging.getLogger(__name__)
 
@@ -254,27 +254,62 @@ def _next_backend() -> str:
 # ---------------------------------------------------------------------------
 
 
+def _chunk_text(text: str, max_chars: int) -> list[str]:
+    """Split *text* into chunks of at most *max_chars*, preferring paragraph
+    then sentence boundaries so translations stay coherent."""
+    if len(text) <= max_chars:
+        return [text]
+    chunks: list[str] = []
+    while text:
+        if len(text) <= max_chars:
+            chunks.append(text)
+            break
+        # Prefer paragraph split (\n\n)
+        split_at = text.rfind('\n\n', 0, max_chars)
+        if split_at == -1:
+            # Fall back to sentence boundary
+            split_at = text.rfind('. ', 0, max_chars)
+        if split_at == -1:
+            split_at = max_chars
+        else:
+            split_at += 2  # include the delimiter
+        chunk = text[:split_at].strip()
+        if chunk:
+            chunks.append(chunk)
+        text = text[split_at:].strip()
+    return [c for c in chunks if c]
+
+
 def _translate_via_google_sync(
     fields: list[str],
     non_empty: list[tuple[int, str]],
     target: str,
 ) -> list[tuple[str, bool]] | None:
-    """Send all fields as a single batched request to the Google subprocess.
-    Returns the results list, or None if the backend failed."""
-    combined = _FIELD_SEP.join(text for _, text in non_empty)
-    logger.debug("[google-sync] → src=auto tgt=%s text=%r", target, combined[:120])
-    translated_combined = _google.translate_sync(combined, 'auto', target)
-    if not translated_combined:
-        logger.debug("[google-sync] ← no result (backend failed)")
-        return None
-    logger.debug("[google-sync] ← %r", translated_combined[:120])
-    parts = re.split(r'\s*<<<SEP>>>\s*', translated_combined)
+    """Send each field as one or more chunked requests to the Google subprocess.
+    Returns the results list, or None if every field failed."""
     results: list[tuple[str, bool]] = [(f, False) for f in fields]
-    for idx, (field_idx, original) in enumerate(non_empty):
-        translated = parts[idx].strip() if idx < len(parts) else ''
-        was_translated = bool(translated) and translated != original
-        results[field_idx] = (translated if translated else fields[field_idx], was_translated)
-    return results
+    any_translated = False
+    for field_idx, original in non_empty:
+        chunks = _chunk_text(original, GOOGLE_MAX_CHARS)
+        translated_parts: list[str] = []
+        ok = True
+        for chunk in chunks:
+            logger.debug("[google-sync] → auto→%s [%d chars] %r", target, len(chunk), chunk[:120])
+            part = _google.translate_sync(chunk, 'auto', target)
+            if part:
+                logger.debug("[google-sync] ← %r", part[:120])
+                translated_parts.append(part)
+            else:
+                logger.debug("[google-sync] ← no result for chunk")
+                ok = False
+                break
+        if ok and translated_parts:
+            translated = ' '.join(translated_parts)
+            was_translated = translated != original
+            results[field_idx] = (translated, was_translated)
+            if was_translated:
+                any_translated = True
+    return results if any_translated else None
 
 
 def _translate_via_nllb_sync(
@@ -289,8 +324,9 @@ def _translate_via_nllb_sync(
     results: list[tuple[str, bool]] = [(f, False) for f in fields]
     any_translated = False
     for field_idx, original in non_empty:
-        logger.debug("[nllb-sync]   → src=%s tgt=%s text=%r", src, target, original[:120])
-        translated = _nllb.translate_sync(original, src, target)
+        text = original[:MAX_TRANSLATE_CHARS]  # NLLB context limited to ~512 tokens
+        logger.debug("[nllb-sync]   → src=%s tgt=%s text=%r", src, target, text[:120])
+        translated = _nllb.translate_sync(text, src, target)
         if translated and translated != original:
             logger.debug("[nllb-sync]   ← %r", translated[:120])
             results[field_idx] = (translated, True)
@@ -321,7 +357,7 @@ def translate_article_fields(
     target = rules['translate_to'] if rules else AUTO_FALLBACK_TARGET
     fields = [title, description, content]
     non_empty = [
-        (i, _strip_html(f)[:MAX_TRANSLATE_CHARS])
+        (i, _strip_html(f))
         for i, f in enumerate(fields)
         if f and f.strip()
     ]
@@ -369,7 +405,7 @@ async def translate_article_fields_async(
     target   = rules['translate_to'] if rules else AUTO_FALLBACK_TARGET
     fields   = [title, description, content]
     non_empty = [
-        (i, _strip_html(f)[:MAX_TRANSLATE_CHARS])
+        (i, _strip_html(f))
         for i, f in enumerate(fields)
         if f and f.strip()
     ]
@@ -381,29 +417,40 @@ async def translate_article_fields_async(
     logger.debug("[translate-async] backend=%s lang=%s→%s", backend, source_language_code, target)
 
     async def _via_google() -> list[tuple[str, bool]] | None:
-        combined = _FIELD_SEP.join(text for _, text in non_empty)
-        logger.debug("[google-async] → src=auto tgt=%s text=%r", target, combined[:120])
-        translated_combined = await _google.translate_async(combined, 'auto', target)
-        if not translated_combined:
-            logger.debug("[google-async] ← no result (backend failed)")
-            return None
-        logger.debug("[google-async] ← %r", translated_combined[:120])
-        parts = re.split(r'\s*<<<SEP>>>\s*', translated_combined)
         res: list[tuple[str, bool]] = [(f, False) for f in fields]
-        for idx, (field_idx, original) in enumerate(non_empty):
-            translated = parts[idx].strip() if idx < len(parts) else ''
-            was_translated = bool(translated) and translated != original
-            res[field_idx] = (translated or fields[field_idx], was_translated)
-        return res
+        any_translated = False
+
+        async def _translate_field(field_idx: int, original: str) -> None:
+            chunks = _chunk_text(original, GOOGLE_MAX_CHARS)
+            translated_parts: list[str] = []
+            for chunk in chunks:
+                logger.debug("[google-async] → auto→%s [%d chars] %r", target, len(chunk), chunk[:120])
+                part = await _google.translate_async(chunk, 'auto', target)
+                if part:
+                    logger.debug("[google-async] ← %r", part[:120])
+                    translated_parts.append(part)
+                else:
+                    logger.debug("[google-async] ← no result for chunk")
+                    return
+            if translated_parts:
+                translated = ' '.join(translated_parts)
+                if translated != original:
+                    res[field_idx] = (translated, True)
+                    nonlocal any_translated
+                    any_translated = True
+
+        await asyncio.gather(*[_translate_field(fi, orig) for fi, orig in non_empty])
+        return res if any_translated else None
 
     async def _via_nllb() -> list[tuple[str, bool]] | None:
-        for _, original in non_empty:
+        nllb_non_empty = [(fi, orig[:MAX_TRANSLATE_CHARS]) for fi, orig in non_empty]
+        for _, original in nllb_non_empty:
             logger.debug("[nllb-async]  → src=%s tgt=%s text=%r", src, target, original[:120])
-        tasks = [_nllb.translate_async(original, src, target) for _, original in non_empty]
+        tasks = [_nllb.translate_async(original, src, target) for _, original in nllb_non_empty]
         translated_list = await asyncio.gather(*tasks)
         res: list[tuple[str, bool]] = [(f, False) for f in fields]
         any_translated = False
-        for (field_idx, original), translated in zip(non_empty, translated_list):
+        for (field_idx, original), translated in zip(nllb_non_empty, translated_list):
             if translated and translated != original:
                 logger.debug("[nllb-async]  ← %r", translated[:120])
                 res[field_idx] = (translated, True)
