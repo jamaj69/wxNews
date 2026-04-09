@@ -42,7 +42,7 @@ from html_utils import sanitize_html_content, extract_and_remove_first_image
 # ---------------------------------------------------------------------------
 
 ENRICH_CONCURRENCY: int = int(config('ENRICH_CONCURRENCY', default=32))
-ENRICH_TIMEOUT: int = int(config('ENRICH_TIMEOUT', default=10))
+ENRICH_TIMEOUT: int = int(config('ENRICH_TIMEOUT', default=20))
 
 # Consecutive HTTP errors before a source is considered blocked in-memory.
 # The authoritative threshold lives in wxAsyncNewsGather._increment_blocked_count;
@@ -50,7 +50,7 @@ ENRICH_TIMEOUT: int = int(config('ENRICH_TIMEOUT', default=10))
 _BLOCKED_THRESHOLD: int = 3
 
 # HTTP error codes that indicate a source should be (eventually) blocked.
-_BLOCKING_ERROR_CODES = {401, 402, 403, 406, 410, 500, 503, 'TIMEOUT'}
+_BLOCKING_ERROR_CODES = {401, 402, 403, 406, 410, 500, 503}
 
 ArticleDict = Dict[str, Any]
 
