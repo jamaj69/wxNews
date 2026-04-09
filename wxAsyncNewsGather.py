@@ -2997,14 +2997,21 @@ class NewsGather():
 
 
 if __name__ == '__main__':
+    import argparse
+    parser = argparse.ArgumentParser(description='wxAsyncNewsGather news collector')
+    parser.add_argument('--debug', action='store_true', help='Enable DEBUG logging (shows translator input/output)')
+    args = parser.parse_args()
+
+    log_level = logging.DEBUG if args.debug else logging.INFO
+
     root = logging.getLogger()
-    root.setLevel(logging.INFO)
+    root.setLevel(log_level)
 
     formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 
     # stdout handler (captured by journald when running under systemd)
     handler = logging.StreamHandler(sys.stdout)
-    handler.setLevel(logging.INFO)
+    handler.setLevel(log_level)
     handler.setFormatter(formatter)
     root.addHandler(handler)
 
@@ -3014,7 +3021,7 @@ if __name__ == '__main__':
     file_handler = logging.handlers.RotatingFileHandler(
         _log_path, maxBytes=10 * 1024 * 1024, backupCount=3, encoding='utf-8'
     )
-    file_handler.setLevel(logging.INFO)
+    file_handler.setLevel(log_level)
     file_handler.setFormatter(formatter)
     root.addHandler(file_handler)
     

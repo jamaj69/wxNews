@@ -12,6 +12,7 @@ Fallback backend: NLLB-200 local GPU (_nllb  — nllb_worker   subprocess)
 
 import asyncio
 import itertools
+import logging
 import multiprocessing
 import re
 import threading
@@ -21,6 +22,8 @@ import google_worker
 import nllb_worker
 from lang_rules import AUTO_FALLBACK_TARGET, _load_language_rules, get_language_rules
 from text_utils import MAX_TRANSLATE_CHARS, _strip_html
+
+logger = logging.getLogger(__name__)
 
 # Separator used to batch multiple article fields in a single backend call.
 # Chosen to be visually distinct and very unlikely to appear in article text.
@@ -259,9 +262,12 @@ def _translate_via_google_sync(
     """Send all fields as a single batched request to the Google subprocess.
     Returns the results list, or None if the backend failed."""
     combined = _FIELD_SEP.join(text for _, text in non_empty)
+    logger.debug("[google-sync] → src=auto tgt=%s text=%r", target, combined[:120])
     translated_combined = _google.translate_sync(combined, 'auto', target)
     if not translated_combined:
+        logger.debug("[google-sync] ← no result (backend failed)")
         return None
+    logger.debug("[google-sync] ← %r", translated_combined[:120])
     parts = re.split(r'\s*<<<SEP>>>\s*', translated_combined)
     results: list[tuple[str, bool]] = [(f, False) for f in fields]
     for idx, (field_idx, original) in enumerate(non_empty):
@@ -283,10 +289,14 @@ def _translate_via_nllb_sync(
     results: list[tuple[str, bool]] = [(f, False) for f in fields]
     any_translated = False
     for field_idx, original in non_empty:
+        logger.debug("[nllb-sync]   → src=%s tgt=%s text=%r", src, target, original[:120])
         translated = _nllb.translate_sync(original, src, target)
         if translated and translated != original:
+            logger.debug("[nllb-sync]   ← %r", translated[:120])
             results[field_idx] = (translated, True)
             any_translated = True
+        else:
+            logger.debug("[nllb-sync]   ← no result")
     return results if any_translated else None
 
 
@@ -319,14 +329,17 @@ def translate_article_fields(
         return (title, False), (description, False), (content, False)
 
     backend = _next_backend()
+    logger.debug("[translate-sync] backend=%s lang=%s→%s", backend, source_language_code, target)
 
     if backend == 'google':
         results = _translate_via_google_sync(fields, non_empty, target)
         if results is None:
+            logger.debug("[translate-sync] google failed, falling back to nllb")
             results = _translate_via_nllb_sync(fields, non_empty, source_language_code, target)
     else:
         results = _translate_via_nllb_sync(fields, non_empty, source_language_code, target)
         if results is None:
+            logger.debug("[translate-sync] nllb failed, falling back to google")
             results = _translate_via_google_sync(fields, non_empty, target)
 
     if results is None:
@@ -365,12 +378,16 @@ async def translate_article_fields_async(
 
     backend = _next_backend()
     src     = source_language_code or 'auto'
+    logger.debug("[translate-async] backend=%s lang=%s→%s", backend, source_language_code, target)
 
     async def _via_google() -> list[tuple[str, bool]] | None:
         combined = _FIELD_SEP.join(text for _, text in non_empty)
+        logger.debug("[google-async] → src=auto tgt=%s text=%r", target, combined[:120])
         translated_combined = await _google.translate_async(combined, 'auto', target)
         if not translated_combined:
+            logger.debug("[google-async] ← no result (backend failed)")
             return None
+        logger.debug("[google-async] ← %r", translated_combined[:120])
         parts = re.split(r'\s*<<<SEP>>>\s*', translated_combined)
         res: list[tuple[str, bool]] = [(f, False) for f in fields]
         for idx, (field_idx, original) in enumerate(non_empty):
@@ -380,23 +397,30 @@ async def translate_article_fields_async(
         return res
 
     async def _via_nllb() -> list[tuple[str, bool]] | None:
+        for _, original in non_empty:
+            logger.debug("[nllb-async]  → src=%s tgt=%s text=%r", src, target, original[:120])
         tasks = [_nllb.translate_async(original, src, target) for _, original in non_empty]
         translated_list = await asyncio.gather(*tasks)
         res: list[tuple[str, bool]] = [(f, False) for f in fields]
         any_translated = False
         for (field_idx, original), translated in zip(non_empty, translated_list):
             if translated and translated != original:
+                logger.debug("[nllb-async]  ← %r", translated[:120])
                 res[field_idx] = (translated, True)
                 any_translated = True
+            else:
+                logger.debug("[nllb-async]  ← no result")
         return res if any_translated else None
 
     if backend == 'google':
         results = await _via_google()
         if results is None:
+            logger.debug("[translate-async] google failed, falling back to nllb")
             results = await _via_nllb()
     else:
         results = await _via_nllb()
         if results is None:
+            logger.debug("[translate-async] nllb failed, falling back to google")
             results = await _via_google()
 
     if results is None:
