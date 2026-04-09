@@ -62,10 +62,18 @@ def worker(
         result = None
 
         if text and text.strip():
+            print(
+                f"[google-worker] → {src_code}→{tgt_code} | {text.strip()[:120]!r}",
+                flush=True,
+            )
             try:
                 result = GoogleTranslator(
                     source=src_code, target=tgt_code
                 ).translate(text.strip())
+                print(
+                    f"[google-worker] ← {(result or '').strip()[:120]!r}",
+                    flush=True,
+                )
             except LanguageNotSupportedException as e:
                 print(
                     f"[google-worker] Language not supported {src_code}→{tgt_code}: {e}",

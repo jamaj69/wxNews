@@ -123,6 +123,10 @@ def worker(
             src_nllb = lang_map.get((src_code or "").lower())
             tgt_nllb = target_map.get(tgt_code) or lang_map.get(tgt_code)
             if src_nllb and tgt_nllb:
+                print(
+                    f"[nllb-worker] → {src_code}({src_nllb})→{tgt_nllb} | {text.strip()[:120]!r}",
+                    flush=True,
+                )
                 try:
                     import torch
                     tokenizer.src_lang = src_nllb
@@ -140,6 +144,10 @@ def worker(
                         )
                     translated = tokenizer.batch_decode(output_ids, skip_special_tokens=True)[0]
                     result = translated.strip() or None
+                    print(
+                        f"[nllb-worker] ← {(result or '').strip()[:120]!r}",
+                        flush=True,
+                    )
                 except Exception as e:
                     print(f"[nllb-worker] Inference error: {str(e)[:200]}", flush=True)
             else:
