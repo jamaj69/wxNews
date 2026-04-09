@@ -130,6 +130,12 @@ TRANSLATE_BATCH_SIZE = int(config('TRANSLATE_BATCH_SIZE', default=10))      # ar
 TRANSLATE_DELAY = float(config('TRANSLATE_DELAY', default=2.0))             # seconds between articles
 TRANSLATE_CYCLE_INTERVAL = int(config('TRANSLATE_CYCLE_INTERVAL', default=3600))  # 1 hour between cycles
 
+# Blocked-source probing — periodically re-tests blocked sources and unblocks survivors
+PROBE_ENABLED = config('PROBE_ENABLED', default=True, cast=bool)
+PROBE_CYCLE_INTERVAL = int(config('PROBE_CYCLE_INTERVAL', default=3600))  # 1 hour between full cycles
+PROBE_DELAY = float(config('PROBE_DELAY', default=2.0))                   # seconds between individual probes
+PROBE_TIMEOUT = int(config('PROBE_TIMEOUT', default=15))                  # fetch timeout per probe
+
 # Basic browser-like headers improve compatibility with feeds/CDNs
 BROWSER_USER_AGENT = (
     "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
@@ -2463,6 +2469,122 @@ class NewsGather():
         except Exception as e:
             self.logger.debug(f"Could not update blocked_count for {source_name}: {e}")
 
+    async def probe_blocked_sources(self):
+        """
+        Periodically re-tests blocked sources by fetching a recent article URL.
+
+        Sources are probed in ascending blocked_count order (lowest first) so
+        that transiently blocked sources — those that hit the threshold due to
+        a brief outage — are retried before persistently unresponsive ones.
+
+        On success:
+          - source is unblocked (fetch_blocked=0, blocked_count=0)
+          - all non-enriched articles for that source are reset to is_enriched=0
+            so the backfill pipeline picks them up again
+
+        Cycle interval: PROBE_CYCLE_INTERVAL (default 1 h)
+        Delay between probes: PROBE_DELAY (default 2 s)
+        Configurable via env: PROBE_ENABLED, PROBE_CYCLE_INTERVAL, PROBE_DELAY,
+                              PROBE_TIMEOUT
+        """
+        if not PROBE_ENABLED:
+            self.logger.info("⏭️  Probe blocked sources disabled (PROBE_ENABLED=False)")
+            return
+
+        self.logger.info(
+            f"🔍 Probe blocked sources started — "
+            f"cycle={PROBE_CYCLE_INTERVAL}s, delay={PROBE_DELAY}s, "
+            f"timeout={PROBE_TIMEOUT}s"
+        )
+
+        while True:
+            try:
+                # ── Collect blocked sources ────────────────────────────────
+                async with self.db_lock:
+                    with self.eng.connect() as conn:
+                        rows = conn.execute(text("""
+                            SELECT s.id_source, s.name, s.blocked_count,
+                                   a.url AS sample_url
+                            FROM gm_sources s
+                            JOIN gm_articles a ON a.id_article = (
+                                SELECT MAX(id_article)
+                                FROM gm_articles
+                                WHERE id_source = s.id_source
+                                  AND url IS NOT NULL AND url != ''
+                            )
+                            WHERE s.fetch_blocked = 1
+                            ORDER BY s.blocked_count ASC, s.name
+                        """)).fetchall()
+
+                if not rows:
+                    self.logger.debug("🔍 Probe: no blocked sources — sleeping")
+                    await asyncio.sleep(PROBE_CYCLE_INTERVAL)
+                    continue
+
+                self.logger.info(f"🔍 Probe: testing {len(rows)} blocked source(s)…")
+                unblocked_count = 0
+
+                for row in rows:
+                    source_id   = row[0]
+                    source_name = row[1] or source_id
+                    count       = row[2]
+                    url         = row[3]
+
+                    try:
+                        # Run the synchronous fetch in a thread so we don't
+                        # block the event loop during the HTTP request.
+                        result = await asyncio.get_event_loop().run_in_executor(
+                            None,
+                            lambda u=url: fetch_article_content(u, PROBE_TIMEOUT),
+                        )
+
+                        if result and result.get('success'):
+                            self.logger.info(
+                                f"✅ [{source_name}] probe succeeded — "
+                                f"unblocking (was {count} errors)"
+                            )
+                            async with self.db_lock:
+                                with self.eng.connect() as conn:
+                                    conn.execute(text("""
+                                        UPDATE gm_sources
+                                        SET fetch_blocked = 0, blocked_count = 0
+                                        WHERE id_source = :sid
+                                    """), {"sid": source_id})
+                                    res = conn.execute(text("""
+                                        UPDATE gm_articles
+                                        SET is_enriched = 0
+                                        WHERE id_source = :sid
+                                          AND is_enriched != 1
+                                    """), {"sid": source_id})
+                                    conn.commit()
+                            self.logger.info(
+                                f"   ↩  {res.rowcount} article(s) re-queued for enrichment"
+                            )
+                            unblocked_count += 1
+                        else:
+                            ec = result.get('error_code') if result else 'no data'
+                            self.logger.debug(
+                                f"🚫 [{source_name}] still blocked ({count} errors, {ec})"
+                            )
+
+                    except Exception as e:
+                        self.logger.debug(f"🔍 Probe error for [{source_name}]: {e}")
+
+                    await asyncio.sleep(PROBE_DELAY)
+
+                self.logger.info(
+                    f"🔍 Probe cycle complete — unblocked {unblocked_count}/{len(rows)} source(s). "
+                    f"Sleeping {PROBE_CYCLE_INTERVAL}s…"
+                )
+
+            except asyncio.CancelledError:
+                self.logger.info("🔍 Probe blocked sources cancelled")
+                return
+            except Exception as e:
+                self.logger.error(f"🔍 Probe blocked sources error: {e}", exc_info=True)
+
+            await asyncio.sleep(PROBE_CYCLE_INTERVAL)
+
     async def backfill_translations(self):
         """
         Continuously translate articles whose is_translated=0 and whose
@@ -2909,6 +3031,7 @@ if __name__ == '__main__':
         app.logger.info(f"   • MediaStack: every {MEDIASTACK_CYCLE_INTERVAL}s ({MEDIASTACK_CYCLE_INTERVAL//60} min)")
         app.logger.info(f"   • Backfill content: every {BACKFILL_CYCLE_INTERVAL}s ({BACKFILL_CYCLE_INTERVAL//60} min), batch={BACKFILL_BATCH_SIZE}, concurrency={ENRICH_CONCURRENCY}")
         app.logger.info(f"   • Translate: every {TRANSLATE_CYCLE_INTERVAL}s ({TRANSLATE_CYCLE_INTERVAL//60} min), batch={TRANSLATE_BATCH_SIZE}")
+        app.logger.info(f"   • Probe blocked sources: every {PROBE_CYCLE_INTERVAL}s ({PROBE_CYCLE_INTERVAL//60} min)")
 
         # Create tasks for all collectors + translation + API server
         tasks = [
@@ -2918,6 +3041,7 @@ if __name__ == '__main__':
             loop.create_task(app._enrichment_worker.run()),
             loop.create_task(app.backfill_content()),
             loop.create_task(app.backfill_translations()),
+            loop.create_task(app.probe_blocked_sources()),
             loop.create_task(app.serve_api()),
         ]
         
