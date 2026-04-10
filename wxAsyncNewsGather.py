@@ -2800,29 +2800,34 @@ class NewsGather():
 
         from sqlalchemy import update as sa_update, and_, or_, text as sa_text
 
-        # ── One-time bulk mark: articles in non-translatable languages → -1 ──
-        # Languages with translate=0 (en, pt, pt-BR) never need translation.
-        # Mark them all at once so they don't clog the per-article loop.
-        try:
-            async with self.db_lock:
-                with self.eng.begin() as conn:
-                    result = conn.execute(sa_text("""
-                        UPDATE gm_articles
-                        SET is_translated = -1
-                        WHERE is_translated = 0
-                          AND detected_language IN (
-                              SELECT language_code FROM languages WHERE translate = 0
-                          )
-                    """))
-                    if result.rowcount:
-                        self.logger.info(
-                            f"🌐 Translation: bulk-skipped {result.rowcount} articles "
-                            f"in non-translatable languages (en/pt/etc.)"
-                        )
-        except Exception as e:
-            self.logger.warning(f"Translation bulk-skip failed (non-critical): {e}")
-
         while not self.shutdown_flag:
+            # ── Bulk-skip: mark articles that don't need translation → -1 ────
+            # Runs every cycle so new articles inserted since startup are caught.
+            # Two cases:
+            #   a) detected_language has translate=0 in the languages table (en, pt, …)
+            #   b) detected_language is set but references no row in languages at all
+            #      (unsupported/unknown language code)
+            # Articles with NULL detected_language are left alone — language
+            # detection may still run and set a translatable language later.
+            try:
+                async with self.db_lock:
+                    with self.eng.begin() as conn:
+                        result = conn.execute(sa_text("""
+                            UPDATE gm_articles
+                            SET is_translated = -1
+                            WHERE is_translated = 0
+                              AND detected_language IS NOT NULL
+                              AND detected_language NOT IN (
+                                  SELECT language_code FROM languages WHERE translate = 1
+                              )
+                        """))
+                        if result.rowcount:
+                            self.logger.info(
+                                f"🌐 Translation: bulk-skipped {result.rowcount} articles "
+                                f"(translate=0 or unsupported language)"
+                            )
+            except Exception as e:
+                self.logger.warning(f"Translation bulk-skip failed (non-critical): {e}")
             try:
                 # ── 1. Find articles that need translation ─────────────────
                 # Uses the optimised view v_articles_pending_translation which
