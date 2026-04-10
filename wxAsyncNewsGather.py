@@ -80,13 +80,27 @@ except ImportError:
 
 # Language detection
 try:
-    from langdetect import detect, LangDetectException  # type: ignore
+    from langdetect import detect, detect_langs, LangDetectException  # type: ignore
     LANGDETECT_AVAILABLE = True
 except ImportError:
     LANGDETECT_AVAILABLE = False
     detect = None  # type: ignore
+    detect_langs = None  # type: ignore
     LangDetectException = Exception  # type: ignore
     logging.warning("⚠️  langdetect not available - language detection disabled. Install with: pip install langdetect")
+
+# Languages that are unlikely to appear in news feeds but that langdetect
+# commonly produces as false positives for short English/Latin-script text.
+_LANGDETECT_LOW_PRIOR_LANGS = frozenset({
+    'cy',   # Welsh — frequent false positive for English headlines
+    'mt',   # Maltese
+    'la',   # Latin
+    'af',   # Afrikaans (often confused with English/Dutch)
+    'so',   # Somali false-positive on some English patterns
+})
+# Minimum probability required to trust a low-prior language detection.
+# Below this threshold the runner-up language (if any) is used instead.
+_LOW_PRIOR_MIN_PROB = 0.90
 
 # NewsAPI Configuration
 API_KEY1 = str(config('NEWS_API_KEY_1', cast=str))
@@ -214,10 +228,11 @@ def detect_article_language(title, description=None, content=None):
     
     # Assertion for type checker - at this point, detect and LangDetectException are available
     assert detect is not None, "detect should be available when LANGDETECT_AVAILABLE is True"
-    
+    assert detect_langs is not None, "detect_langs should be available when LANGDETECT_AVAILABLE is True"
+
     # Build detection text (prefer longer text for better accuracy)
     detection_text = ""
-    
+
     if content and len(content.strip()) > 100:
         detection_text = content[:500]  # Use first 500 chars of content
     elif description and len(description.strip()) > 50:
@@ -226,18 +241,33 @@ def detect_article_language(title, description=None, content=None):
         detection_text = title  # Fallback to title
     else:
         return None, 0.0
-    
+
     # Clean HTML tags if present
     detection_text = re.sub(r'<[^>]+>', '', detection_text).strip()
-    
+
     if len(detection_text) < 10:
         return None, 0.0
-    
+
     try:
-        lang_code = detect(detection_text)
-        # langdetect doesn't provide confidence, so we use 0.85 as default
-        return lang_code, 0.85
-    except (LangDetectException, Exception) as e:
+        probs = detect_langs(detection_text)  # list of Language(lang, prob), sorted desc
+        if not probs:
+            return None, 0.0
+        top = probs[0]
+        lang_code, confidence = top.lang, top.prob
+
+        # langdetect frequently mis-classifies short English/Latin-script news
+        # headlines as Welsh (cy) and a few other rare languages.  If the top
+        # result is one of those low-prior languages and its probability is
+        # below the threshold, fall back to the next candidate (if any) so we
+        # don't waste translation resources on a phantom Welsh article.
+        if lang_code in _LANGDETECT_LOW_PRIOR_LANGS and confidence < _LOW_PRIOR_MIN_PROB:
+            if len(probs) > 1:
+                lang_code, confidence = probs[1].lang, probs[1].prob
+            else:
+                return None, 0.0
+
+        return lang_code, round(confidence, 4)
+    except (LangDetectException, Exception):
         # Detection failed (text too short, unknown language, etc.)
         return None, 0.0
 
