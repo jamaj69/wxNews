@@ -75,8 +75,9 @@ class _ProcessFetcher:
     _PROCESS_NAME = 'fetcher'
     _PUMP_NAME    = 'fetcher-pump'
 
-    def __init__(self) -> None:
-        self._process:      multiprocessing.Process | None = None
+    def __init__(self, pool_size: int = 1) -> None:
+        self._pool_size    = pool_size
+        self._processes:    list[multiprocessing.Process] = []
         self._req_q:        'multiprocessing.Queue | None' = None
         self._resp_q:       'multiprocessing.Queue | None' = None
         self._async_pending: dict[str, 'asyncio.Future'] = {}
@@ -104,8 +105,10 @@ class _ProcessFetcher:
             ctx          = multiprocessing.get_context('spawn')
             self._req_q  = ctx.Queue()
             self._resp_q = ctx.Queue()
-            self._process = self._make_process(ctx, self._req_q, self._resp_q)
-            self._process.start()
+            for i in range(self._pool_size):
+                p = self._make_process(ctx, self._req_q, self._resp_q)
+                p.start()
+                self._processes.append(p)
             try:
                 self._loop = asyncio.get_event_loop()
             except RuntimeError:
@@ -145,14 +148,16 @@ class _ProcessFetcher:
         self._shutdown.set()
         if self._req_q is not None:
             try:
-                self._req_q.put_nowait(None)
+                # One sentinel per worker process so each wakes up and exits
+                for _ in self._processes:
+                    self._req_q.put_nowait(None)
             except Exception:
                 pass
-        if self._process is not None:
-            self._process.join(timeout=10)
-            if self._process.is_alive():
-                self._process.terminate()
-                self._process.join(timeout=3)
+        for p in self._processes:
+            p.join(timeout=10)
+            if p.is_alive():
+                p.terminate()
+                p.join(timeout=3)
         if self._pump_thread is not None:
             self._pump_thread.join(timeout=3)
         with self._lock:
@@ -258,9 +263,13 @@ class _PlaywrightFetcher(_ProcessFetcher):
 
 
 # Module-level singletons — started lazily on first use.
-_cffi       = _CffiFetcher()
-_requests   = _RequestsFetcher()
-_playwright = _PlaywrightFetcher()
+# pool_size controls how many worker processes run per backend:
+#   cffi      — fast HTTP/TLS, I/O-bound → 4 workers
+#   requests  — stdlib fallback           → 2 workers
+#   playwright — headless Chrome, RAM-heavy → 2 workers
+_cffi       = _CffiFetcher(pool_size=4)
+_requests   = _RequestsFetcher(pool_size=2)
+_playwright = _PlaywrightFetcher(pool_size=2)
 
 
 def start_all() -> None:
@@ -474,6 +483,89 @@ class ArticleContentFetcher:
     def sanitize_url(url: str) -> str:
         return _sanitize_url(url)
 
+    async def fetch_async(self, url: str) -> dict:
+        """
+        Fully async fetch — no threads, no run_in_executor for HTTP.
+        Uses fetch_async() on each backend (IPC Future resolved by pump thread).
+        HTML parsing (lxml) runs in the default executor to avoid CPU blocking.
+        """
+        result: dict = {
+            'author': None, 'published_time': None,
+            'description': None, 'content': None,
+            'success': False, 'error_code': None,
+            'error_type': None, 'sanitized_url': None,
+        }
+
+        sanitized = _sanitize_url(url)
+        if sanitized != url:
+            logger.info("URL sanitized: %s -> %s", url, sanitized)
+            result['sanitized_url'] = sanitized
+        if not sanitized or not sanitized.startswith(('http://', 'https://')):
+            logger.warning("Invalid URL: %s", url)
+            result['error_code'] = 'INVALID_URL'
+            result['error_type'] = ERROR_PERMANENT
+            return result
+
+        # Primary backend
+        primary = await _cffi.fetch_async(sanitized, self.timeout)
+        if not primary['success'] and primary['error_code'] == 'UNAVAILABLE':
+            primary = await _requests.fetch_async(sanitized, self.timeout)
+
+        best = primary
+
+        # Playwright fallback
+        try_pw = (
+            primary['error_code'] in _BOT_BLOCKED_CODES
+            or (not primary['success'] and primary['error_type'] == ERROR_TEMPORARY)
+            or (primary['success'] and not _html_has_content(primary.get('html')))
+        )
+        if try_pw:
+            logger.debug("[fetch-async] playwright fallback (primary=%s): %s",
+                         primary['error_code'] or 'no content', sanitized)
+            pw = await _playwright.fetch_async(sanitized, self.timeout)
+            if pw['success']:
+                best = pw
+            elif not primary['success'] and pw['error_type'] == ERROR_PERMANENT:
+                best = pw
+
+        # Parse HTML in executor (lxml is CPU-bound C extension)
+        html = best.get('html')
+        if best['success'] and html:
+            loop = asyncio.get_running_loop()
+            soup = await loop.run_in_executor(None, _parse_html, html, sanitized)
+            if soup:
+                fields = _soup_to_fields(soup)
+                paywall_detected = fields.pop('_paywall', False)
+                result.update(fields)
+                result['success'] = True
+                logger.debug("[fetch-async] OK %s", sanitized)
+
+                if paywall_detected:
+                    logger.debug("[fetch-async] nojs retry after paywall: %s", sanitized)
+                    nojs = await _playwright.fetch_async(
+                        sanitized, self.timeout, options={'nojs': True}
+                    )
+                    if nojs.get('success') and nojs.get('html'):
+                        nojs_soup = await loop.run_in_executor(
+                            None, _parse_html, nojs['html'], sanitized
+                        )
+                        if nojs_soup:
+                            nojs_fields = _soup_to_fields(nojs_soup)
+                            nojs_fields.pop('_paywall', None)
+                            if nojs_fields.get('content'):
+                                result.update(nojs_fields)
+                                logger.debug("[fetch-async] nojs content retrieved: %s", sanitized)
+            else:
+                result['error_code'] = 'PARSE_ERROR'
+                result['error_type'] = ERROR_TEMPORARY
+        else:
+            result['error_code'] = best['error_code']
+            result['error_type'] = best['error_type']
+            logger.debug("[fetch-async] failed (%s/%s): %s",
+                         best['error_code'], best['error_type'], sanitized)
+
+        return result
+
     def fetch(self, url: str) -> dict:
         """
         Fetch article content from *url*.
@@ -567,8 +659,14 @@ class ArticleContentFetcher:
 # ---------------------------------------------------------------------------
 
 def fetch_article_content(url: str, timeout: int = 10) -> dict:
-    """Fetch article content. Returns same dict as ArticleContentFetcher.fetch()."""
+    """Fetch article content (sync). Returns same dict as ArticleContentFetcher.fetch()."""
     return ArticleContentFetcher(timeout).fetch(url)
+
+
+async def fetch_article_content_async(url: str, timeout: int = 10) -> dict:
+    """Fetch article content (async). No threads — uses IPC futures directly.
+    Drop-in async replacement for fetch_article_content()."""
+    return await ArticleContentFetcher(timeout).fetch_async(url)
 
 
 # ---------------------------------------------------------------------------

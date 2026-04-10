@@ -45,7 +45,7 @@ import pytz
 from decouple import config
 
 # Import article content fetcher
-from article_fetcher import fetch_article_content, ERROR_PERMANENT
+from article_fetcher import fetch_article_content, fetch_article_content_async, ERROR_PERMANENT
 import signal
 
 # Shared HTML utilities (also used by enrichment_worker)
@@ -141,9 +141,9 @@ BACKFILL_DELAY = float(config('BACKFILL_DELAY', default=1.0))           # second
 BACKFILL_CYCLE_INTERVAL = int(config('BACKFILL_CYCLE_INTERVAL', default=10))  # seconds between cycles
 
 TRANSLATE_ENABLED = config('TRANSLATE_ENABLED', default=True, cast=bool)
-TRANSLATE_BATCH_SIZE = int(config('TRANSLATE_BATCH_SIZE', default=10))      # articles per batch
+TRANSLATE_BATCH_SIZE = int(config('TRANSLATE_BATCH_SIZE', default=100))     # articles per batch
 TRANSLATE_DELAY = float(config('TRANSLATE_DELAY', default=2.0))             # seconds between articles
-TRANSLATE_CYCLE_INTERVAL = int(config('TRANSLATE_CYCLE_INTERVAL', default=3600))  # 1 hour between cycles
+TRANSLATE_CYCLE_INTERVAL = int(config('TRANSLATE_CYCLE_INTERVAL', default=60))    # 60s between cycles
 
 # Blocked-source probing — periodically re-tests blocked sources and unblocks survivors
 PROBE_ENABLED = config('PROBE_ENABLED', default=True, cast=bool)
@@ -1083,7 +1083,8 @@ class NewsGather():
                 return None
 
             try:
-                feed = feedparser.parse(content)
+                _loop = asyncio.get_event_loop()
+                feed = await _loop.run_in_executor(None, feedparser.parse, content)
             except (AssertionError, ValueError, Exception) as parse_err:
                 # feedparser can raise AssertionError on malformed HTML/XML
                 self.logger.debug(f"Parser error for {rss_url}: {parse_err}")
@@ -1645,7 +1646,8 @@ class NewsGather():
                 return
 
             try:
-                feed = feedparser.parse(content)
+                _loop = asyncio.get_event_loop()
+                feed = await _loop.run_in_executor(None, feedparser.parse, content)
             except (AssertionError, ValueError, Exception) as parse_err:
                 # feedparser can raise AssertionError on malformed HTML/XML in marked sections
                 self.logger.debug(f"⚠️  [{source_name}] Parser error (malformed feed): {parse_err}")
@@ -2499,14 +2501,7 @@ class NewsGather():
         try:
             self.logger.debug(f"🔍 [{source_name}] Attempting to fetch missing content from URL...")
             
-            # Run fetch in thread pool to avoid blocking async loop
-            loop = asyncio.get_event_loop()
-            result = await loop.run_in_executor(
-                None,  # Use default executor
-                fetch_article_content,
-                url,
-                ENRICH_TIMEOUT
-            )
+            result = await fetch_article_content_async(url, ENRICH_TIMEOUT)
             
             # Only permanently-blocked requests count against the source.
             # Temporary errors (timeouts, 500/503) do not cause blocking.
@@ -2716,12 +2711,7 @@ class NewsGather():
                     url         = row[3]
 
                     try:
-                        # Run the synchronous fetch in a thread so we don't
-                        # block the event loop during the HTTP request.
-                        result = await asyncio.get_event_loop().run_in_executor(
-                            None,
-                            lambda u=url: fetch_article_content(u, PROBE_TIMEOUT),
-                        )
+                        result = await fetch_article_content_async(url, PROBE_TIMEOUT)
 
                         if result and result.get('success'):
                             self.logger.info(

@@ -27,7 +27,6 @@ persisting any fields that were updated in article_dict.
 from __future__ import annotations
 
 import asyncio
-import concurrent.futures
 import logging
 import re
 from typing import Dict, Any, Optional
@@ -35,7 +34,7 @@ from urllib.parse import urlparse
 
 from decouple import config
 
-from article_fetcher import fetch_article_content
+from article_fetcher import fetch_article_content, fetch_article_content_async
 from html_utils import sanitize_html_content, extract_and_remove_first_image
 
 # ---------------------------------------------------------------------------
@@ -51,7 +50,9 @@ ENRICH_TIMEOUT: int = int(config('ENRICH_TIMEOUT', default=20))
 _BLOCKED_THRESHOLD: int = 3
 
 # HTTP error codes that indicate a source should be (eventually) blocked.
-_BLOCKING_ERROR_CODES = {401, 402, 403, 406, 410, 500, 503}
+# Only PERMANENT errors count — 500/503 are temporary server-side outages
+# and must NOT push a domain toward a permanent block.
+_BLOCKING_ERROR_CODES = {401, 402, 403, 406, 410}
 
 ArticleDict = Dict[str, Any]
 
@@ -95,9 +96,6 @@ class EnrichmentWorker:
         self.output_queue: asyncio.Queue[tuple[ArticleDict, bool]] = asyncio.Queue()
 
         self._semaphore: asyncio.Semaphore = asyncio.Semaphore(concurrency)
-        self._executor: concurrent.futures.ThreadPoolExecutor = (
-            concurrent.futures.ThreadPoolExecutor(max_workers=concurrency)
-        )
 
         # domain → consecutive error count (in-memory only).
         # Keyed by URL *domain* (not source_id) so aggregator feeds are never
@@ -145,7 +143,6 @@ class EnrichmentWorker:
             self.logger.info("🏁 EnrichmentWorker cancelled")
             raise
         finally:
-            self._executor.shutdown(wait=False)
             self.logger.info("🏁 EnrichmentWorker stopped")
 
     # ------------------------------------------------------------------
@@ -198,10 +195,7 @@ class EnrichmentWorker:
             self.logger.debug(
                 f"🔍 [{source_name}] Fetching missing content …"
             )
-            loop = asyncio.get_event_loop()
-            result: Optional[dict] = await loop.run_in_executor(
-                self._executor,
-                fetch_article_content,
+            result: Optional[dict] = await fetch_article_content_async(
                 url,
                 self.timeout,
             )
@@ -288,8 +282,9 @@ class EnrichmentWorker:
                 self._record_error(source_id, source_name, error_code)
                 article['_error_code'] = error_code
 
+            exc_desc = str(exc) or type(exc).__name__
             self.logger.warning(
-                f"⚠️  [{source_name}] Enrichment error: {exc}"
+                f"⚠️  [{source_name}] Enrichment error: {exc_desc}"
             )
             return False
 
