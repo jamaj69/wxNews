@@ -139,6 +139,34 @@ python diagnose_feeds.py
 cat broken_rss_urls.txt
 ```
 
+### Debug dos Fetchers IPC (article_fetcher + workers)
+```bash
+# Testar o orquestrador completo (smoke test)
+python article_fetcher.py https://www.reuters.com/world/
+
+# Testar worker cffi isolado
+python - <<'EOF'
+import multiprocessing, cffi_worker
+ctx = multiprocessing.get_context('spawn')
+req_q, resp_q = ctx.Queue(), ctx.Queue()
+p = ctx.Process(target=cffi_worker.worker, args=(req_q, resp_q)); p.start()
+req_q.put(('t1', 'https://www.reuters.com/world/', 10))
+print(resp_q.get(timeout=15))
+req_q.put(None); p.join()
+EOF
+
+# Ver logs dos workers em tempo real
+journalctl -u wxAsyncNewsGather.service -f | grep -E 'cffi|requests|playwright|fetcher|TIMEOUT|blocked'
+
+# Verificar fontes bloqueadas por erros permanentes
+sqlite3 predator_news.db "SELECT source_name, blocked_count FROM gm_sources WHERE fetch_blocked=1;"
+
+# Desbloquear todas as fontes (após diagnosticar)
+sqlite3 predator_news.db "UPDATE gm_sources SET fetch_blocked=0, blocked_count=0;"
+```
+
+> Ver **[ARCHITECTURE.md](ARCHITECTURE.md) § 9** para playbook completo de debug dos fetchers.
+
 ### Ver Logs em Tempo Real
 ```bash
 # Via systemd journal
@@ -179,7 +207,16 @@ pyTweeter/
 ├── wxAsyncNewsGather.py          # 🚀 ARQUIVO PRINCIPAL (FastAPI + Coletor + Backfill + Tradução)
 ├── wxAsyncNewsGatherAPI.py       # ⚠️  LEGADO — não usado pelo serviço systemd
 ├── wxAsyncNewsReaderv6.py        # 📱 Interface gráfica moderna
-├── article_fetcher.py            # 📄 Fetcher de conteúdo de artigos
+│
+├── article_fetcher.py            # 📄 Orquestrador IPC de busca de conteúdo
+├── cffi_worker.py                # 🔀 Subprocess — curl_cffi Chrome TLS
+├── requests_worker.py            # 🔀 Subprocess — requests com headers de browser
+├── playwright_worker.py          # 🔀 Subprocess — Chromium headless (Playwright)
+│
+├── translatev1.py                # 🌐 Orquestrador IPC de tradução
+├── google_worker.py              # 🔀 Subprocess — Google Translate
+├── nllb_worker.py                # 🔀 Subprocess — modelo NLLB offline
+│
 ├── async_tickdb.py               # ⏰ Sistema de agendamento
 │
 ├── predator_news.db              # 💾 Banco de dados SQLite (~55k artigos)
@@ -258,10 +295,19 @@ pyTweeter/
   - `content`: Conteúdo completo do artigo (quando disponível)
   - `use_timezone`: Flag indicando se usa sistema de timezone
 
-#### ⚙️ article_fetcher.py
-- **Função**: Busca conteúdo completo de artigos
-- **Método**: `fetch_article_content(url, user_agent)`
-- **Usado por**: wxAsyncNewsGather durante coleta
+#### ⚙️ article_fetcher.py (Orquestrador IPC de conteúdo)
+- **Função**: Orquestrador de busca de conteúdo de artigos via IPC
+- **Arquitetura**: base `_ProcessFetcher` + 3 subclasses que spawnam subprocessos
+- **Workers**:
+  - `cffi_worker.py` — `curl_cffi` com fingerprint Chrome TLS (JA3/JA4), bypass Cloudflare
+  - `requests_worker.py` — `requests` com headers de browser (fallback se cffi indisponível)
+  - `playwright_worker.py` — Chromium headless via Playwright (fallback final: JS, bot-block)
+- **Protocolo IPC**: `(req_id, url, timeout)` → `(req_id, {html, success, error_code, error_type})`
+- **Lógica de orquestração**: cffi → requests → playwright (somente se 403/406, erro temporário, ou HTML sem conteúdo)
+- **API pública**: `fetch_article_content(url, timeout=10)`, `ArticleContentFetcher.sanitize_url(url)`
+- **Usado por**: `wxAsyncNewsGather.py` (backfill_content), `enrichment_worker.py`
+
+> Ver **[ARCHITECTURE.md](ARCHITECTURE.md) § 3** para diagrama detalhado, protocolo e playbook de debug.
 
 #### 🕐 async_tickdb.py
 - **Função**: Sistema de agendamento assíncrono

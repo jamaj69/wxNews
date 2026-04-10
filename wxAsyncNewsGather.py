@@ -45,7 +45,7 @@ import pytz
 from decouple import config
 
 # Import article content fetcher
-from article_fetcher import fetch_article_content
+from article_fetcher import fetch_article_content, ERROR_PERMANENT
 import signal
 
 # Shared HTML utilities (also used by enrichment_worker)
@@ -2508,8 +2508,9 @@ class NewsGather():
                 ENRICH_TIMEOUT
             )
             
-            # Check for blocking error codes (401 Unauthorized, 402 Payment, 403 Forbidden, 406 Not Acceptable, 410 Gone, 500 Internal Error, 503 Unavailable, TIMEOUT)
-            if result and result.get('error_code') in [401, 402, 403, 406, 410, 500, 503, 'TIMEOUT']:
+            # Only permanently-blocked requests count against the source.
+            # Temporary errors (timeouts, 500/503) do not cause blocking.
+            if result and result.get('error_type') == ERROR_PERMANENT:
                 if source_id:
                     await self._increment_blocked_count(source_id, source_name, result.get('error_code'))
             
@@ -2558,19 +2559,6 @@ class NewsGather():
                 return False
                 
         except Exception as e:
-            error_msg = str(e)
-            # Check if it's a blocking error (402 Payment Required, 403 Forbidden, 406 Not Acceptable, 410 Gone)
-            if any(code in error_msg for code in ['402', 'Payment Required', '403', 'Forbidden', '406', 'Not Acceptable', '410', 'Gone']):
-                if source_id:
-                    # Try to extract actual error code from message
-                    error_code = 403  # default
-                    if '402' in error_msg or 'Payment Required' in error_msg:
-                        error_code = 402
-                    elif '406' in error_msg or 'Not Acceptable' in error_msg:
-                        error_code = 406
-                    elif '410' in error_msg or 'Gone' in error_msg:
-                        error_code = 410
-                    await self._increment_blocked_count(source_id, source_name, error_code)
             self.logger.warning(f"⚠️  [{source_name}] Error fetching content: {e}")
             return False
     

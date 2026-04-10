@@ -4,7 +4,7 @@
 [![FastAPI](https://img.shields.io/badge/FastAPI-0.109+-green.svg)](https://fastapi.tiangolo.com/)
 [![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
-Modern async news aggregation system with FastAPI backend, SQLite database, and wxPython GUI. Collects news from NewsAPI, RSS feeds, and MediaStack with automatic timezone detection, full-text content enrichment via headless browser fallback, and a real-time wxPython GUI reader.
+Modern async news aggregation system with FastAPI backend, SQLite database, and wxPython GUI. Collects news from NewsAPI, RSS feeds, and MediaStack with automatic timezone detection, full-text content enrichment via IPC-isolated fetcher subprocesses (curl_cffi / requests / Playwright), and a real-time wxPython GUI reader.
 
 ---
 
@@ -116,7 +116,10 @@ sudo systemctl stop wxAsyncNewsGather.service
 - Provides **REST API** on port 8765 via built-in FastAPI server
 - Automatic Swagger documentation at `/docs`
 - Systemd service with auto-restart
-- Playwright headless browser fallback for JS-rendered pages and bot-blocking (403/406)
+- **IPC-based content fetcher** with three isolated subprocesses (`cffi_worker`, `requests_worker`, `playwright_worker`) communicating via `multiprocessing.Queue`
+  - `curl_cffi` worker (primary): Chrome TLS fingerprint, bypasses Cloudflare
+  - `requests` worker (primary fallback): browser headers
+  - Playwright worker (final fallback): headless Chromium for JS-rendered pages and bot-blocking (403/406)
 
 **Configuration**: `/etc/systemd/system/wxAsyncNewsGather.service`
 
@@ -376,8 +379,11 @@ See [docs/USE_TIMEZONE_SYSTEM.md](docs/USE_TIMEZONE_SYSTEM.md) for details.
 
 ### Content Enrichment
 
-- Full article content fetching via `requests` + BeautifulSoup
-- **Playwright headless Chromium fallback** for JS-rendered pages and 403/406 bot-blocking
+- **IPC-based fetcher** with three isolated subprocesses communicating via `multiprocessing.Queue`:
+  - `cffi_worker` — `curl_cffi` Chrome TLS fingerprint (bypasses Cloudflare)
+  - `requests_worker` — `requests` with browser headers (fallback when cffi unavailable)
+  - `playwright_worker` — headless Chromium (final fallback: bot-block 403/406, JS pages)
+- Orchestration logic in `article_fetcher.py` picks the best result automatically
 - Full text extraction up to 50,000 characters (all paragraphs, no hard cap)
 - Image URL extraction from `urlToImage` field or from RSS `<img>` tags in description
 - HTML description parsing and sanitization
@@ -469,6 +475,7 @@ sqlite3 predator_news.db "REINDEX;"
 
 ## 📖 Documentation
 
+- [ARCHITECTURE.md](ARCHITECTURE.md) - **Architecture reference** (IPC fetchers, data flow, debug playbook)
 - [copilot-instructions.md](copilot-instructions.md) - System operation guide
 - [FASTAPI_DOCUMENTATION.md](FASTAPI_DOCUMENTATION.md) - FastAPI architecture details
 - [FASTAPI_README.md](FASTAPI_README.md) - FastAPI migration summary
@@ -537,20 +544,34 @@ pyTweeter/
 ├── wxAsyncNewsGather.py          # 🚀 Main service (Collector + FastAPI + Backfill)
 ├── wxAsyncNewsGather.service     # ⚙️  Systemd service file
 ├── wxAsyncNewsReaderv6.py        # 🖥️  GUI application (News Feed reader)
-├── wxAsyncNewsReader.py          # 🖥️  Classic GUI application (with auto-enrichment)
-├── article_fetcher.py            # 📄 Content fetcher (requests + Playwright fallback)
+│
+├── article_fetcher.py            # 📄 IPC orchestrator — picks backend, parses HTML
+├── cffi_worker.py                # 🔀 Subprocess — curl_cffi Chrome TLS impersonation
+├── requests_worker.py            # 🔀 Subprocess — requests with browser headers
+├── playwright_worker.py          # 🔀 Subprocess — headless Chromium (Playwright)
+│
+├── translatev1.py                # 🌐 IPC orchestrator — translation
+├── google_worker.py              # 🔀 Subprocess — Google Translate
+├── nllb_worker.py                # 🔀 Subprocess — NLLB offline model
+│
+├── language_service.py           # 🏷️  Language detection helpers
+├── lang_rules.py                 # 🏷️  Rule-based language overrides
+├── async_tickdb.py               # ⏰ Async scheduler
+│
 ├── predator_news.db              # 💾 SQLite database
 ├── .env                          # 🔐 Configuration
 ├── requirements-fastapi.txt      # 📦 FastAPI dependencies
 ├── requirements.txt              # 📦 All dependencies
+│
+├── ARCHITECTURE.md               # 🏗️  Architecture reference (start here for debug)
 ├── copilot-instructions.md       # 📘 Operations guide
 ├── README.md                     # 📖 This file
-└── docs/                         # 📚 Documentation
+└── docs/                         # 📚 Additional documentation
     ├── README.md
     ├── FASTAPI_DOCUMENTATION.md
     ├── USE_TIMEZONE_SYSTEM.md
     ├── SQLITE_MIGRATION.md
-    └── [28 more .md files]
+    └── [more .md files]
 ```
 
 ---

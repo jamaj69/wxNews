@@ -1,474 +1,592 @@
 #!/usr/bin/env python3
+# -*- coding: utf-8 -*-
 """
-Article content fetcher module.
-Fetches missing article content, author, and publication time from article URLs.
+Article content fetcher — IPC-based orchestrator.
+
+Each HTTP backend runs as a persistent subprocess and communicates via
+multiprocessing Queues (same pattern as google_worker / nllb_worker).
+
+Workers
+-------
+  cffi_worker.py       — curl_cffi with Chrome TLS fingerprint (primary)
+  requests_worker.py   — stdlib requests with browser headers (primary fallback)
+  playwright_worker.py — headless Chromium for JS-rendered pages (final fallback)
+
+Orchestration logic (fetch())
+------------------------------
+  1. Primary: cffi (if available) else requests
+  2. Playwright fallback when:
+       a. primary was bot-blocked (403/406)
+       b. primary had a temporary error (network/timeout)
+       c. primary succeeded but returned a JS skeleton with no real content
+  3. Parse HTML  →  extract author/time/description/content
+
+Public API
+----------
+  fetch_article_content(url, timeout=10)  →  dict
+  ArticleContentFetcher(timeout).fetch(url)  →  dict
+
+  result dict keys:
+    author, published_time, description, content,
+    success (bool), error_code, error_type ('permanent'|'temporary'|None),
+    sanitized_url
 """
 
-import requests
-from bs4 import BeautifulSoup
-import re
-from datetime import datetime
+import asyncio
 import logging
+import multiprocessing
+import re
+import threading
+import uuid
+
+from bs4 import BeautifulSoup
+
+import cffi_worker
+import requests_worker
+import playwright_worker
 
 logger = logging.getLogger(__name__)
 
-# curl_cffi impersonates browser TLS fingerprints (JA3/JA4), bypassing Cloudflare and
-# similar bot-blocking that rejects plain requests even with browser-like headers.
-try:
-    import curl_cffi.requests as _cffi_requests
-    from curl_cffi.requests import exceptions as _cffi_exc
-    _CURL_CFFI_AVAILABLE = True
-except ImportError:
-    _cffi_requests = None  # type: ignore[assignment]
-    _cffi_exc = None       # type: ignore[assignment]
-    _CURL_CFFI_AVAILABLE = False
-    logger.debug("curl_cffi not installed — TLS fingerprint bypass disabled")
+# ── Error-type constants ──────────────────────────────────────────────────────
+ERROR_PERMANENT = 'permanent'
+ERROR_TEMPORARY = 'temporary'
 
-# Combined exception tuples — catch both requests and curl_cffi variants.
-# Built at import time so except-clauses work normally.
-if _CURL_CFFI_AVAILABLE and _cffi_exc is not None:
-    _EXC_HTTP_ERROR      = (requests.HTTPError,      _cffi_exc.HTTPError)
-    _EXC_TIMEOUT         = (requests.Timeout,         _cffi_exc.Timeout)
-    _EXC_REQUEST         = (requests.RequestException, _cffi_exc.RequestException)
-else:
-    _EXC_HTTP_ERROR      = (requests.HTTPError,)
-    _EXC_TIMEOUT         = (requests.Timeout,)
-    _EXC_REQUEST         = (requests.RequestException,)
+_BOT_BLOCKED_CODES = frozenset({403, 406})
 
-# Playwright is used as a headless-browser fallback for JS-rendered pages.
-try:
-    from playwright.sync_api import sync_playwright
-    _PLAYWRIGHT_AVAILABLE = True
-except ImportError:
-    sync_playwright = None  # type: ignore[assignment]
-    _PLAYWRIGHT_AVAILABLE = False
-    logger.debug("playwright not installed — headless fallback disabled")
 
+# ---------------------------------------------------------------------------
+# Generic subprocess fetcher (shared by all three backends)
+# ---------------------------------------------------------------------------
+
+class _ProcessFetcher:
+    """
+    Subprocess wrapper for a fetcher backend worker.
+
+    Subclasses implement ``_make_process()`` only.  All queue management,
+    pump thread, lifecycle, and sync/async call interface live here.
+
+    Worker protocol
+    ---------------
+    request:  ``(req_id: str, url: str, timeout: int)``
+            | ``None``   ← shutdown sentinel
+    response: ``(req_id: str, result: dict)``
+    """
+
+    _PROCESS_NAME = 'fetcher'
+    _PUMP_NAME    = 'fetcher-pump'
+
+    def __init__(self) -> None:
+        self._process:      multiprocessing.Process | None = None
+        self._req_q:        'multiprocessing.Queue | None' = None
+        self._resp_q:       'multiprocessing.Queue | None' = None
+        self._async_pending: dict[str, 'asyncio.Future'] = {}
+        self._sync_pending:  dict[str, list]             = {}
+        self._lock         = threading.Lock()
+        self._pump_thread: threading.Thread | None = None
+        self._loop:        asyncio.AbstractEventLoop | None = None
+        self._started      = False
+        self._shutdown     = threading.Event()
+
+    def _make_process(self, ctx, req_q, resp_q) -> multiprocessing.Process:
+        raise NotImplementedError
+
+    # ── lifecycle ─────────────────────────────────────────────────────────────
+
+    def start(self) -> None:
+        self._ensure_started()
+
+    def _ensure_started(self) -> None:
+        if self._started:
+            return
+        with self._lock:
+            if self._started:
+                return
+            ctx          = multiprocessing.get_context('spawn')
+            self._req_q  = ctx.Queue()
+            self._resp_q = ctx.Queue()
+            self._process = self._make_process(ctx, self._req_q, self._resp_q)
+            self._process.start()
+            try:
+                self._loop = asyncio.get_event_loop()
+            except RuntimeError:
+                self._loop = None
+            self._pump_thread = threading.Thread(
+                target=self._pump_responses,
+                daemon=True,
+                name=self._PUMP_NAME,
+            )
+            self._pump_thread.start()
+            self._started = True
+            import atexit
+            atexit.register(self.shutdown)
+
+    def _pump_responses(self) -> None:
+        assert self._resp_q is not None
+        while not self._shutdown.is_set():
+            try:
+                item = self._resp_q.get(timeout=0.5)
+            except Exception:
+                continue
+            req_id, result = item
+            with self._lock:
+                fut       = self._async_pending.pop(req_id, None)
+                sync_slot = self._sync_pending.get(req_id)
+            if fut is not None and self._loop is not None:
+                self._loop.call_soon_threadsafe(
+                    lambda f=fut, r=result: f.set_result(r) if not f.done() else None
+                )
+            elif sync_slot is not None:
+                sync_slot[1] = result
+                sync_slot[0].set()
+
+    def shutdown(self) -> None:
+        if not self._started or self._shutdown.is_set():
+            return
+        self._shutdown.set()
+        if self._req_q is not None:
+            try:
+                self._req_q.put_nowait(None)
+            except Exception:
+                pass
+        if self._process is not None:
+            self._process.join(timeout=10)
+            if self._process.is_alive():
+                self._process.terminate()
+                self._process.join(timeout=3)
+        if self._pump_thread is not None:
+            self._pump_thread.join(timeout=3)
+        with self._lock:
+            if self._loop is not None:
+                for fut in self._async_pending.values():
+                    if not fut.done():
+                        self._loop.call_soon_threadsafe(
+                            fut.set_result,
+                            {'html': None, 'success': False,
+                             'error_code': 'SHUTDOWN', 'error_type': ERROR_TEMPORARY},
+                        )
+            for slot in self._sync_pending.values():
+                slot[1] = {'html': None, 'success': False,
+                           'error_code': 'SHUTDOWN', 'error_type': ERROR_TEMPORARY}
+                slot[0].set()
+            self._async_pending.clear()
+            self._sync_pending.clear()
+
+    # ── call interface ────────────────────────────────────────────────────────
+
+    def fetch_sync(self, url: str, timeout: int = 10,
+                   options: dict | None = None) -> dict:
+        """Blocking fetch — safe to call from any thread."""
+        if self._shutdown.is_set():
+            return {'html': None, 'success': False,
+                    'error_code': 'SHUTDOWN', 'error_type': ERROR_TEMPORARY}
+        self._ensure_started()
+        req_id = str(uuid.uuid4())
+        event  = threading.Event()
+        slot: list = [event, None]
+        with self._lock:
+            self._sync_pending[req_id] = slot
+        assert self._req_q is not None
+        self._req_q.put((req_id, url, timeout, options or {}))
+        event.wait(timeout=timeout + 30)     # subprocess timeout + grace period
+        with self._lock:
+            self._sync_pending.pop(req_id, None)
+        if slot[1] is None:
+            return {'html': None, 'success': False,
+                    'error_code': 'TIMEOUT', 'error_type': ERROR_TEMPORARY}
+        return slot[1]
+
+    async def fetch_async(self, url: str, timeout: int = 10,
+                          options: dict | None = None) -> dict:
+        """Non-blocking fetch for use inside an asyncio event loop."""
+        if self._shutdown.is_set():
+            return {'html': None, 'success': False,
+                    'error_code': 'SHUTDOWN', 'error_type': ERROR_TEMPORARY}
+        self._ensure_started()
+        loop = asyncio.get_running_loop()
+        if self._loop is None:
+            self._loop = loop
+        req_id = str(uuid.uuid4())
+        fut: asyncio.Future = loop.create_future()
+        with self._lock:
+            self._async_pending[req_id] = fut
+        assert self._req_q is not None
+        self._req_q.put((req_id, url, timeout, options or {}))
+        return await asyncio.wait_for(fut, timeout=timeout + 30)
+
+
+# ---------------------------------------------------------------------------
+# Concrete backends
+# ---------------------------------------------------------------------------
+
+class _CffiFetcher(_ProcessFetcher):
+    _PROCESS_NAME = 'cffi-fetch'
+    _PUMP_NAME    = 'cffi-pump'
+
+    def _make_process(self, ctx, req_q, resp_q):
+        return ctx.Process(
+            target=cffi_worker.worker,
+            args=(req_q, resp_q),
+            daemon=True,
+            name=self._PROCESS_NAME,
+        )
+
+
+class _RequestsFetcher(_ProcessFetcher):
+    _PROCESS_NAME = 'requests-fetch'
+    _PUMP_NAME    = 'requests-pump'
+
+    def _make_process(self, ctx, req_q, resp_q):
+        return ctx.Process(
+            target=requests_worker.worker,
+            args=(req_q, resp_q),
+            daemon=True,
+            name=self._PROCESS_NAME,
+        )
+
+
+class _PlaywrightFetcher(_ProcessFetcher):
+    _PROCESS_NAME = 'playwright-fetch'
+    _PUMP_NAME    = 'playwright-pump'
+
+    def _make_process(self, ctx, req_q, resp_q):
+        return ctx.Process(
+            target=playwright_worker.worker,
+            args=(req_q, resp_q),
+            daemon=True,
+            name=self._PROCESS_NAME,
+        )
+
+
+# Module-level singletons — started lazily on first use.
+_cffi       = _CffiFetcher()
+_requests   = _RequestsFetcher()
+_playwright = _PlaywrightFetcher()
+
+
+def start_all() -> None:
+    """Eagerly start all fetcher subprocesses (call at service startup)."""
+    _cffi.start()
+    _requests.start()
+    _playwright.start()
+
+
+def shutdown_all() -> None:
+    """Gracefully stop all fetcher subprocesses."""
+    _cffi.shutdown()
+    _requests.shutdown()
+    _playwright.shutdown()
+
+
+# ---------------------------------------------------------------------------
+# HTML parsing helpers (run in the orchestrator process, not in workers)
+# ---------------------------------------------------------------------------
+
+def _html_has_content(html: str | None) -> bool:
+    """Quick heuristic: ≥2 real paragraphs → page has readable content."""
+    if not html:
+        return False
+    soup = BeautifulSoup(html[:15000], 'html.parser')
+    paras = [p.get_text().strip() for p in soup.find_all('p')
+             if len(p.get_text().strip()) > 50]
+    return len(paras) >= 2
+
+
+def _parse_html(html: str, url: str = '') -> 'BeautifulSoup | None':
+    for parser in ('lxml', 'html.parser'):
+        try:
+            return BeautifulSoup(html, parser)
+        except Exception as e:
+            if parser == 'html.parser':
+                logger.debug("All HTML parsers failed for %s: %s", url, e)
+    return None
+
+
+def _extract_author(soup) -> str | None:
+    for meta_attr in [
+        {'property': 'article:author'},
+        {'name': 'author'},
+        {'property': 'og:article:author'},
+    ]:
+        tag = soup.find('meta', attrs=meta_attr)
+        if tag and tag.get('content'):
+            return tag.get('content').strip()
+    author_tag = soup.find(attrs={'itemprop': 'author'})
+    if author_tag:
+        name_tag = author_tag.find(attrs={'itemprop': 'name'})
+        if name_tag:
+            return name_tag.get_text().strip()
+        return author_tag.get_text().strip()
+    for class_name in ['author', 'article-author', 'byline', 'author-name']:
+        tag = soup.find(class_=re.compile(class_name, re.I))
+        if tag:
+            text = re.sub(r'^by\s+', '', tag.get_text().strip(), flags=re.I)
+            if text and len(text) < 100:
+                return text
+    return None
+
+
+def _extract_time(soup) -> str | None:
+    for meta_attr in [
+        {'property': 'article:published_time'},
+        {'name': 'publishdate'},
+        {'property': 'og:published_time'},
+        {'name': 'date'},
+    ]:
+        tag = soup.find('meta', attrs=meta_attr)
+        if tag and tag.get('content'):
+            return tag.get('content').strip()
+    time_tag = soup.find('time')
+    if time_tag:
+        return time_tag.get('datetime') or time_tag.get_text().strip()
+    time_tag = soup.find(attrs={'itemprop': 'datePublished'})
+    if time_tag:
+        return time_tag.get('content') or time_tag.get_text().strip()
+    return None
+
+
+def _extract_description(soup) -> str | None:
+    og = soup.find('meta', property='og:description')
+    if og and og.get('content'):
+        return og.get('content').strip()
+    meta = soup.find('meta', attrs={'name': 'description'})
+    if meta and meta.get('content'):
+        return meta.get('content').strip()
+    for class_name in ['article-summary', 'article-lead', 'lead', 'summary', 'article-description']:
+        tag = soup.find(class_=re.compile(class_name, re.I))
+        if tag:
+            text = tag.get_text().strip()
+            if len(text) > 20:
+                return text
+    return None
+
+
+def _extract_content(soup) -> str | None:
+    paragraphs = []
+    for selector in [
+        {'class_': re.compile(r'article-content|article-body|entry-content|post-content', re.I)},
+        {'attrs': {'itemprop': 'articleBody'}},
+        {'name': 'article'},
+    ]:
+        container = soup.find(**selector)
+        if container:
+            p_tags = container.find_all('p', recursive=True)
+            paragraphs = [p.get_text().strip() for p in p_tags
+                          if len(p.get_text().strip()) > 30]
+            if paragraphs:
+                break
+    if not paragraphs:
+        paragraphs = [p.get_text().strip() for p in soup.find_all('p')
+                      if len(p.get_text().strip()) > 50]
+    if paragraphs:
+        return '\n\n'.join(paragraphs)[:50000]
+    return None
+
+
+_PAYWALL_PHRASES = (
+    'subscribe now to read',
+    'subscribe to read',
+    'subscribe to continue',
+    'subscribe for full access',
+    'you can save this article by registering',
+    'sign in to read',
+    'sign up to read',
+    'create a free account to read',
+    'create an account to read',
+    'log in to read',
+    'login to read',
+    'to read this article',
+    'to continue reading',
+    'unlock this article',
+    'already a subscriber',
+    'become a subscriber',
+    'purchase a subscription',
+)
+
+
+def _is_paywall_content(text: str | None) -> bool:
+    """Return True if the text appears to be a paywall / subscription gate."""
+    if not text:
+        return False
+    sample = text[:600].lower()
+    return any(phrase in sample for phrase in _PAYWALL_PHRASES)
+
+
+def _soup_to_fields(soup) -> dict:
+    content = _extract_content(soup)
+    description = _extract_description(soup)
+    paywall = _is_paywall_content(content) or _is_paywall_content(description)
+    if paywall:
+        logger.debug("[fetch] paywall content detected — discarding")
+        content = None
+        description = None
+    return {
+        'author':         _extract_author(soup),
+        'published_time': _extract_time(soup),
+        'description':    description,
+        'content':        content,
+        '_paywall':       paywall,
+    }
+
+
+# ---------------------------------------------------------------------------
+# URL sanitization (unchanged — pure string logic, orchestrator only)
+# ---------------------------------------------------------------------------
+
+def _sanitize_url(url: str) -> str:
+    if not url or not isinstance(url, str):
+        return url
+    url = url.strip()
+    for param in ('?u=', '&u=', '?url=', '&url='):
+        if param in url:
+            inner = url.split(param, 1)[1].split('&', 1)[0]
+            inner = re.sub(r'^(https?:/)(?!/)', r'\1/', inner)
+            if inner.startswith(('http://', 'https://')):
+                url = inner
+            break
+    if '*http://' in url or '*https://' in url:
+        if '*https://' in url:
+            url = 'https://' + url.split('*https://', 1)[1]
+        elif '*http://' in url:
+            url = 'http://' + url.split('*http://', 1)[1]
+    if '://' in url:
+        protocol, rest = url.split('://', 1)
+        rest = re.sub(r'/+', '/', rest)
+        url = f'{protocol}://{rest}'
+    return url
+
+
+# ---------------------------------------------------------------------------
+# Orchestrator
+# ---------------------------------------------------------------------------
 
 class ArticleContentFetcher:
-    """Fetch additional article content from URLs when RSS feed data is incomplete."""
-    
-    def __init__(self, timeout=10):
+    """
+    Orchestrator: picks the right backend(s), parses HTML, returns fields.
+
+    All heavy work (HTTP, browser) happens in isolated worker subprocesses.
+    """
+
+    def __init__(self, timeout: int = 10) -> None:
         self.timeout = timeout
-        # Don't explicitly set Accept-Encoding - let requests handle it automatically
-        # with gzip/deflate which works reliably. Explicit br/zstd can cause issues.
-        self.default_headers = {
-            'User-Agent': 'Mozilla/5.0 (X11; Linux x86_64; rv:140.0) Gecko/20100101 Firefox/140.0',
-            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-            'Accept-Language': 'pt-BR,pt;q=0.8,en-US;q=0.5,en;q=0.3',
-            'Connection': 'keep-alive',
-            'Upgrade-Insecure-Requests': '1',
-            'Sec-Fetch-Dest': 'document',
-            'Sec-Fetch-Mode': 'navigate',
-            'Sec-Fetch-Site': 'none',
-            'DNT': '1',
-            'Sec-GPC': '1',
-            'TE': 'trailers',
-        }
-    
+
+    # Expose for backwards compatibility (used in wxAsyncNewsGather parsing helpers)
     @staticmethod
-    def sanitize_url(url):
-        """
-        Sanitize and normalize URL to fix common issues.
-        
-        - Remove double slashes in path (but preserve protocol://)
-        - Remove redirect chain prefixes
-        - Strip whitespace
-        - Validate basic URL structure
-        """
-        if not url or not isinstance(url, str):
-            return url
-        
-        # Strip whitespace
-        url = url.strip()
+    def sanitize_url(url: str) -> str:
+        return _sanitize_url(url)
 
-        # Handle redirect wrappers with a query-parameter target URL
-        # Pattern: http://site.com/api/redirect?u=http:/target.com/path
-        # The inner URL often has a malformed single-slash protocol (http:/ instead of http://)
-        for param in ('?u=', '&u=', '?url=', '&url='):
-            if param in url:
-                inner = url.split(param, 1)[1].split('&', 1)[0]
-                # Fix missing slash: http:/host -> http://host  (but not http://host)
-                inner = re.sub(r'^(https?:/)(?!/)', r'\1/', inner)
-                if inner.startswith(('http://', 'https://')):
-                    url = inner
-                break
-
-        # Handle redirect chains (e.g., folha.com.br redirects)
-        # Pattern: http://redirect.site/*http://actual.site
-        if '*http://' in url or '*https://' in url:
-            # Extract the actual target URL after the * marker
-            if '*https://' in url:
-                url = url.split('*https://', 1)[1]
-                url = 'https://' + url
-            elif '*http://' in url:
-                url = url.split('*http://', 1)[1]
-                url = 'http://' + url
-        
-        # Fix double slashes in path (but preserve protocol://)
-        # Pattern: https://domain.com/path//with//double -> https://domain.com/path/with/double
-        if '://' in url:
-            protocol, rest = url.split('://', 1)
-            # Replace multiple consecutive slashes with single slash
-            rest = re.sub(r'/+', '/', rest)
-            url = f'{protocol}://{rest}'
-        
-        return url
-    
-    def _get_headers_for_url(self, url):
-        """Get appropriate headers for the given URL based on domain."""
-        # NDTV Profit requires special User-Agent to avoid 403 errors
-        if 'ndtvprofit.com' in url.lower():
-            return {
-                'User-Agent': 'FeedReader/1.0 (Linux)',
-                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-                'Accept-Language': 'en-US,en;q=0.5',
-                'Referer': 'https://www.ndtvprofit.com/',
-                'Connection': 'keep-alive',
-            }
-        
-        # Default headers for all other sites
-        return self.default_headers.copy()
-    
-    def fetch(self, url):
+    def fetch(self, url: str) -> dict:
         """
-        Fetch article content from URL.
-        
+        Fetch article content from *url*.
+
         Returns dict with:
-        - author: Author name if found
-        - published_time: Publication time if found
-        - description: Article summary/description
-        - content: First few paragraphs of article text
-        - success: Boolean indicating if content was fetched
-        - error_code: HTTP error code if request failed (403, 404, etc.)
-        - sanitized_url: The sanitized URL used for fetching (if different from input)
+          author, published_time, description, content,
+          success, error_code, error_type, sanitized_url
         """
-        result = {
-            'author': None,
-            'published_time': None,
-            'description': None,
-            'content': None,
-            'success': False,
-            'error_code': None,
-            'sanitized_url': None
+        result: dict = {
+            'author': None, 'published_time': None,
+            'description': None, 'content': None,
+            'success': False, 'error_code': None,
+            'error_type': None, 'sanitized_url': None,
         }
-        
-        # Initialize sanitized_url to original URL (will be updated if sanitization changes it)
-        sanitized_url = url
-        
-        try:
-            # Sanitize URL to fix common issues
-            sanitized_url = self.sanitize_url(url)
-            
-            # Track if URL was modified
-            if sanitized_url != url:
-                logger.info(f"URL sanitized: {url} -> {sanitized_url}")
-                result['sanitized_url'] = sanitized_url
-            
-            # Basic URL validation
-            if not sanitized_url or not sanitized_url.startswith(('http://', 'https://')):
-                logger.warning(f"Invalid URL format: {url}")
-                result['error_code'] = 'INVALID_URL'
-                return result
-            
-            logger.debug(f"Fetching content from: {sanitized_url}")
-            if _CURL_CFFI_AVAILABLE:
-                # Impersonate Chrome TLS fingerprint — bypasses Cloudflare and most bot-blocking
-                assert _cffi_requests is not None
-                response = _cffi_requests.get(
-                    sanitized_url,
-                    impersonate='chrome120',
-                    headers={'Accept-Language': 'pt-BR,pt;q=0.8,en-US;q=0.5,en;q=0.3'},
-                    timeout=self.timeout,
-                )
+
+        # Sanitize + validate
+        sanitized = _sanitize_url(url)
+        if sanitized != url:
+            logger.info("URL sanitized: %s -> %s", url, sanitized)
+            result['sanitized_url'] = sanitized
+        if not sanitized or not sanitized.startswith(('http://', 'https://')):
+            logger.warning("Invalid URL: %s", url)
+            result['error_code'] = 'INVALID_URL'
+            result['error_type'] = ERROR_PERMANENT
+            return result
+
+        # Primary backend: cffi → requests
+        primary = _cffi.fetch_sync(sanitized, self.timeout)
+        if not primary['success'] and primary['error_code'] == 'UNAVAILABLE':
+            primary = _requests.fetch_sync(sanitized, self.timeout)
+
+        best = primary
+
+        # Playwright fallback
+        try_pw = (
+            primary['error_code'] in _BOT_BLOCKED_CODES
+            or (not primary['success'] and primary['error_type'] == ERROR_TEMPORARY)
+            or (primary['success'] and not _html_has_content(primary.get('html')))
+        )
+        if try_pw:
+            logger.debug("[fetch] playwright fallback (primary=%s): %s",
+                         primary['error_code'] or 'no content', sanitized)
+            pw = _playwright.fetch_sync(sanitized, self.timeout)
+            if pw['success']:
+                best = pw
+            elif not primary['success'] and pw['error_type'] == ERROR_PERMANENT:
+                best = pw
+
+        # Parse HTML
+        html = best.get('html')
+        if best['success'] and html:
+            soup = _parse_html(html, sanitized)
+            if soup:
+                fields = _soup_to_fields(soup)
+                paywall_detected = fields.pop('_paywall', False)
+                result.update(fields)
+                result['success'] = True
+                logger.debug("[fetch] OK %s", sanitized)
+
+                # Paywall gate detected — retry with JavaScript disabled.
+                # Many soft paywalls are client-side only: the server returns
+                # the full article in SSR HTML; JS then hides it. With nojs,
+                # we receive the raw SSR and extract the real content.
+                if paywall_detected:
+                    logger.debug("[fetch] nojs retry after paywall: %s", sanitized)
+                    nojs = _playwright.fetch_sync(
+                        sanitized, self.timeout, options={'nojs': True}
+                    )
+                    if nojs.get('success') and nojs.get('html'):
+                        nojs_soup = _parse_html(nojs['html'], sanitized)
+                        if nojs_soup:
+                            nojs_fields = _soup_to_fields(nojs_soup)
+                            nojs_fields.pop('_paywall', None)
+                            if nojs_fields.get('content'):
+                                result.update(nojs_fields)
+                                logger.debug("[fetch] nojs content retrieved: %s", sanitized)
             else:
-                headers = self._get_headers_for_url(sanitized_url)
-                response = requests.get(sanitized_url, headers=headers, timeout=self.timeout)
-            response.raise_for_status()
-            
-            # Try to get text with proper encoding handling
-            try:
-                html_text = response.text
-            except (UnicodeDecodeError, LookupError) as e:
-                # If encoding detection fails, try common encodings
-                logger.debug(f"Encoding error, trying fallback encodings: {e}")
-                for encoding in ['utf-8', 'latin-1', 'iso-8859-1', 'cp1252']:
-                    try:
-                        html_text = response.content.decode(encoding)
-                        break
-                    except (UnicodeDecodeError, LookupError):
-                        continue
-                else:
-                    # Last resort: decode with error handling
-                    html_text = response.content.decode('utf-8', errors='ignore')
-            
-            # Try lxml parser first (faster and more robust for most sites)
-            # Fall back to html.parser if lxml fails
-            soup = None
-            for parser in ['lxml', 'html.parser']:
-                try:
-                    soup = BeautifulSoup(html_text, parser)
-                    break
-                except Exception as e:
-                    if parser == 'html.parser':
-                        # Both parsers failed, re-raise the exception
-                        raise
-                    logger.debug(f"Parser {parser} failed for {url}, trying next parser")
-            
-            if soup is None:
-                raise Exception("All parsers failed")
-            
-            # Extract author
-            result['author'] = self._extract_author(soup)
-            
-            # Extract publication time
-            result['published_time'] = self._extract_time(soup)
-            
-            # Extract description
-            result['description'] = self._extract_description(soup)
-            
-            # Extract content (first few paragraphs)
-            result['content'] = self._extract_content(soup)
-            
-            result['success'] = True
-            logger.debug(f"Successfully extracted content from {sanitized_url}")
+                result['error_code'] = 'PARSE_ERROR'
+                result['error_type'] = ERROR_TEMPORARY
+        else:
+            result['error_code'] = best['error_code']
+            result['error_type'] = best['error_type']
+            logger.debug("[fetch] failed (%s/%s): %s",
+                         best['error_code'], best['error_type'], sanitized)
 
-            # ── Playwright fallback ──────────────────────────────────────────
-            # If requests got a response but yielded no useful content, the page
-            # is likely JS-rendered. Re-fetch with a real headless browser.
-            if not self._has_useful_content(result) and _PLAYWRIGHT_AVAILABLE:
-                logger.debug(f"No content from requests — retrying with headless browser: {sanitized_url}")
-                pw_html = self._fetch_with_playwright(sanitized_url)
-                if pw_html:
-                    pw_soup = BeautifulSoup(pw_html, 'html.parser')
-                    result['author'] = result['author'] or self._extract_author(pw_soup)
-                    result['published_time'] = result['published_time'] or self._extract_time(pw_soup)
-                    result['description'] = result['description'] or self._extract_description(pw_soup)
-                    result['content'] = result['content'] or self._extract_content(pw_soup)
-                    if self._has_useful_content(result):
-                        logger.debug(f"Headless browser enrichment succeeded for {sanitized_url}")
-            # ────────────────────────────────────────────────────────────────
-            
-        except _EXC_HTTP_ERROR as e:
-            # Capture HTTP error code (403, 404, etc.)
-            resp = getattr(e, 'response', None)
-            result['error_code'] = getattr(resp, 'status_code', None)
-            # For bot-blocking errors (403/406), try headless browser before logging anything
-            if result['error_code'] in (403, 406) and _PLAYWRIGHT_AVAILABLE:
-                logger.debug(f"HTTP {result['error_code']} — retrying with headless browser: {sanitized_url}")
-                pw_html = self._fetch_with_playwright(sanitized_url)
-                if pw_html:
-                    pw_soup = BeautifulSoup(pw_html, 'html.parser')
-                    result['author'] = self._extract_author(pw_soup)
-                    result['published_time'] = self._extract_time(pw_soup)
-                    result['description'] = self._extract_description(pw_soup)
-                    result['content'] = self._extract_content(pw_soup)
-                    if self._has_useful_content(result):
-                        result['success'] = True
-                        result['error_code'] = None
-                        logger.debug(f"Headless browser recovered content after HTTP {result['error_code']} for {sanitized_url}")
-                        return result
-            # Only log as ERROR if all fallbacks failed
-            logger.error(f"HTTP {result['error_code']} error for {sanitized_url}: {e}")
-        except _EXC_TIMEOUT as e:
-            # Connection or read timeout
-            result['error_code'] = 'TIMEOUT'
-            logger.warning(f"Timeout fetching {sanitized_url}: {e}")
-        except _EXC_REQUEST as e:
-            result['error_code'] = 'REQUEST_ERROR'
-            logger.error(f"Request error for {sanitized_url}: {e}")
-        except Exception as e:
-            result['error_code'] = 'PARSE_ERROR'
-            logger.error(f"Parse error for {sanitized_url}: {e}")
-        
         return result
-    
-    def _fetch_with_playwright(self, url):
-        """
-        Fetch page HTML using a headless Chromium browser.
-        Used as fallback when requests returns a JS-rendered skeleton.
-        Returns the rendered HTML string, or None on failure.
-        """
-        if not _PLAYWRIGHT_AVAILABLE:
-            return None
-        assert sync_playwright is not None  # narrowed for static analysis
-        try:
-            with sync_playwright() as pw:
-                browser = pw.chromium.launch(headless=True)
-                context = browser.new_context(
-                    user_agent='Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 '
-                               '(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
-                    locale='pt-BR',
-                    java_script_enabled=True,
-                )
-                page = context.new_page()
-                # Block images/fonts to speed things up
-                page.route('**/*.{png,jpg,jpeg,gif,webp,svg,woff,woff2,ttf,otf}',
-                           lambda route: route.abort())
-                page.goto(url, wait_until='domcontentloaded',
-                          timeout=self.timeout * 1000)
-                # Wait a moment for lazy-loaded content
-                page.wait_for_timeout(1500)
-                html = page.content()
-                browser.close()
-                return html
-        except Exception as e:
-            logger.debug(f"Playwright fetch failed for {url}: {e}")
-            return None
-
-    def _has_useful_content(self, result):
-        """Return True if the result already contains meaningful content.
-        
-        A description that ends with '...' is considered a truncated RSS teaser,
-        not real content — we still want Playwright to try fetching the full text.
-        """
-        content = (result.get('content') or '').strip()
-        if content:
-            return True
-        description = (result.get('description') or '').strip()
-        # Truncated teasers end with ellipsis variants — treat as insufficient
-        if description and not description.rstrip().endswith(('...', '…')):
-            return True
-        return False
-
-    def _extract_author(self, soup):
-        """Extract author name from various common locations."""
-        # Try meta tags
-        for meta_attr in [
-            {'property': 'article:author'},
-            {'name': 'author'},
-            {'property': 'og:article:author'},
-        ]:
-            tag = soup.find('meta', attrs=meta_attr)
-            if tag and tag.get('content'):
-                return tag.get('content').strip()
-        
-        # Try structured data
-        author_tag = soup.find(attrs={'itemprop': 'author'})
-        if author_tag:
-            name_tag = author_tag.find(attrs={'itemprop': 'name'})
-            if name_tag:
-                return name_tag.get_text().strip()
-            return author_tag.get_text().strip()
-        
-        # Try common class names
-        for class_name in ['author', 'article-author', 'byline', 'author-name']:
-            tag = soup.find(class_=re.compile(class_name, re.I))
-            if tag:
-                text = tag.get_text().strip()
-                # Clean up "By Author Name" patterns
-                text = re.sub(r'^by\s+', '', text, flags=re.I)
-                if text and len(text) < 100:  # Sanity check
-                    return text
-        
-        return None
-    
-    def _extract_time(self, soup):
-        """Extract publication time from various common locations."""
-        # Try meta tags
-        for meta_attr in [
-            {'property': 'article:published_time'},
-            {'name': 'publishdate'},
-            {'property': 'og:published_time'},
-            {'name': 'date'},
-        ]:
-            tag = soup.find('meta', attrs=meta_attr)
-            if tag and tag.get('content'):
-                return tag.get('content').strip()
-        
-        # Try <time> element
-        time_tag = soup.find('time')
-        if time_tag:
-            return time_tag.get('datetime') or time_tag.get_text().strip()
-        
-        # Try structured data
-        time_tag = soup.find(attrs={'itemprop': 'datePublished'})
-        if time_tag:
-            return time_tag.get('content') or time_tag.get_text().strip()
-        
-        return None
-    
-    def _extract_description(self, soup):
-        """Extract article description/summary."""
-        # Try Open Graph description
-        og_desc = soup.find('meta', property='og:description')
-        if og_desc and og_desc.get('content'):
-            return og_desc.get('content').strip()
-        
-        # Try standard meta description
-        meta_desc = soup.find('meta', attrs={'name': 'description'})
-        if meta_desc and meta_desc.get('content'):
-            return meta_desc.get('content').strip()
-        
-        # Try article summary/lead paragraph
-        for class_name in ['article-summary', 'article-lead', 'lead', 'summary', 'article-description']:
-            tag = soup.find(class_=re.compile(class_name, re.I))
-            if tag:
-                text = tag.get_text().strip()
-                if len(text) > 20:
-                    return text
-        
-        return None
-    
-    def _extract_content(self, soup):
-        """Extract main article content (all paragraphs up to 50000 chars)."""
-        paragraphs = []
-        
-        # Try to find article body with common selectors
-        for selector in [
-            {'class_': re.compile(r'article-content|article-body|entry-content|post-content', re.I)},
-            {'attrs': {'itemprop': 'articleBody'}},
-            {'name': 'article'},
-        ]:
-            container = soup.find(**selector)
-            if container:
-                p_tags = container.find_all('p', recursive=True)
-                paragraphs = [p.get_text().strip() for p in p_tags if len(p.get_text().strip()) > 30]
-                if paragraphs:
-                    break
-        
-        # Fallback: find all paragraphs on page and filter
-        if not paragraphs:
-            all_p = soup.find_all('p')
-            paragraphs = [p.get_text().strip() for p in all_p if len(p.get_text().strip()) > 50]
-        
-        if paragraphs:
-            full_text = '\n\n'.join(paragraphs)
-            # Cap at 50000 characters to avoid storing enormous pages
-            return full_text[:50000]
-        
-        return None
 
 
-# Convenience function
-def fetch_article_content(url, timeout=10):
-    """
-    Convenience function to fetch article content.
-    Returns dict with author, published_time, description, content, and success flag.
-    """
-    fetcher = ArticleContentFetcher(timeout=timeout)
-    return fetcher.fetch(url)
+# ---------------------------------------------------------------------------
+# Public convenience function
+# ---------------------------------------------------------------------------
 
+def fetch_article_content(url: str, timeout: int = 10) -> dict:
+    """Fetch article content. Returns same dict as ArticleContentFetcher.fetch()."""
+    return ArticleContentFetcher(timeout).fetch(url)
+
+
+# ---------------------------------------------------------------------------
+# CLI smoke test
+# ---------------------------------------------------------------------------
 
 if __name__ == '__main__':
-    # Test
     import sys
-    
-    if len(sys.argv) > 1:
-        test_url = sys.argv[1]
-    else:
-        test_url = "https://www.haaretz.com/opinion/2026-02-27/ty-article-opinion/.premium/the-arab-communitys-democratic-threat-to-the-right/0000019c-9bb4-d5d1-a1fd-dbb6ba7e0000"
-    
-    logging.basicConfig(level=logging.INFO)
-    
-    print("=" * 80)
-    print(f"Testing: {test_url}")
-    print("=" * 80)
-    
-    result = fetch_article_content(test_url)
-    
-    print(f"\n✓ Success: {result['success']}")
-    print(f"✓ Author: {result['author']}")
-    print(f"✓ Published: {result['published_time']}")
-    print(f"✓ Description: {result['description'][:100] if result['description'] else 'None'}...")
-    print(f"✓ Content (first 300 chars): {result['content'][:300] if result['content'] else 'None'}...")
+    logging.basicConfig(level=logging.DEBUG)
+    test_url = sys.argv[1] if len(sys.argv) > 1 else \
+        'https://www.reuters.com/world/'
+    print('=' * 80)
+    print(f'Testing: {test_url}')
+    print('=' * 80)
+    r = fetch_article_content(test_url)
+    print(f"\n✓ success:     {r['success']}")
+    print(f"✓ error_code:  {r['error_code']} ({r['error_type']})")
+    print(f"✓ author:      {r['author']}")
+    print(f"✓ published:   {r['published_time']}")
+    print(f"✓ description: {(r['description'] or '')[:100]}")
+    print(f"✓ content:     {(r['content'] or '')[:200]}")
