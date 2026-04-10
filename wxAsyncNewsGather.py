@@ -1799,9 +1799,10 @@ class NewsGather():
                             new_article['urlToImage']  = row[3] or new_article['urlToImage']
                             new_article['is_enriched'] = 1
 
-                    if new_article['is_enriched'] == 0:
-                        if await self.enrich_article_content(new_article, source_name, source_id):
-                            new_article['is_enriched'] = 1
+                    # Inline enrichment intentionally removed from RSS pipeline:
+                    # asyncio.wait_for (Python 3.11) awaits playwright cleanup on cancel,
+                    # keeping the semaphore slot occupied 3+ minutes per timed-out feed.
+                    # The backfill worker (_backfill_consumer) handles is_enriched=0 articles.
 
                     # Insert article
                     async with self.db_lock:
