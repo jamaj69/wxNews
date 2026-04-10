@@ -1,5 +1,5 @@
 [Unit]
-Description=wxAsyncNewsGather - Async News Collection Service
+Description=wxAsyncNewsGather with FastAPI Integration
 After=network-online.target
 Wants=network-online.target
 StartLimitIntervalSec=500
@@ -8,23 +8,29 @@ StartLimitBurst=5
 [Service]
 Type=simple
 User=jamaj
-Group=jamaj
 WorkingDirectory=/home/jamaj/src/python/pyTweeter
 Environment="PYTHONUNBUFFERED=1"
+Environment="TRANSFORMERS_OFFLINE=1"
+Environment="HF_DATASETS_OFFLINE=1"
 Environment="PATH=/home/python/pyenv/bin:/usr/local/bin:/usr/bin:/bin"
 EnvironmentFile=-/home/jamaj/src/python/pyTweeter/.env
-ExecStart=/home/python/pyenv/bin/python /home/jamaj/src/python/pyTweeter/wxAsyncNewsGather.py
+ExecStart=/home/python/pyenv/bin/python /home/jamaj/src/python/pyTweeter/wxAsyncNewsGather.py --debug
 Restart=on-failure
 RestartSec=30
 StandardOutput=journal
 StandardError=journal
-SyslogIdentifier=wxAsyncNewsGather
+SyslogIdentifier=wxNewsGatherAPI
 
-# Security and resource limits
+# Resource limits — main process + worker pool (cffi×4, playwright×2, google,
+# nllb, etc.) can easily exceed 1-2 GB combined; 4 GB gives ample headroom.
+MemoryMax=4G
+CPUQuota=200%
+
+# Security
 Nice=10
 PrivateTmp=yes
 NoNewPrivileges=true
-LimitNOFILE=4096
+LimitNOFILE=65536
 
 [Install]
 WantedBy=multi-user.target

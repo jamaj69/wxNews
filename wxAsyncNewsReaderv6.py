@@ -534,6 +534,8 @@ class NewsPanel(wx.Panel):
         # Data structures
         self.sources = {}
         self.source_id_map = {}  # Map checkbox index to source_id
+        self._all_sources: list = []          # Full unfiltered source list
+        self._source_check_state: dict = {}   # source_id → bool (persists across filter changes)
         
         # Create main horizontal sizer (sidebar + content)
         main_sizer = wx.BoxSizer(wx.HORIZONTAL)
@@ -572,7 +574,20 @@ class NewsPanel(wx.Panel):
         
         button_panel.SetSizer(button_sizer)
         sidebar_sizer.Add(button_panel, 0, wx.ALL | wx.ALIGN_CENTER, 5)
-        
+
+        # Search / filter bar
+        search_panel = wx.Panel(sidebar_panel)
+        search_panel.SetBackgroundColour(wx.Colour(245, 245, 245))
+        search_sizer = wx.BoxSizer(wx.HORIZONTAL)
+        search_icon = wx.StaticText(search_panel, label="🔍")
+        self.search_ctrl = wx.TextCtrl(search_panel, style=wx.TE_PROCESS_ENTER,
+                                       size=(-1, 28))
+        self.search_ctrl.SetHint("Filter sources (regex)...")
+        search_sizer.Add(search_icon, 0, wx.ALL | wx.ALIGN_CENTER_VERTICAL, 4)
+        search_sizer.Add(self.search_ctrl, 1, wx.ALL | wx.ALIGN_CENTER_VERTICAL, 4)
+        search_panel.SetSizer(search_sizer)
+        sidebar_sizer.Add(search_panel, 0, wx.EXPAND | wx.LEFT | wx.RIGHT | wx.BOTTOM, 5)
+
         # CheckListBox for sources
         self.sources_checklist = wx.CheckListBox(
             sidebar_panel, 
@@ -619,6 +634,7 @@ class NewsPanel(wx.Panel):
         self.load_checked_btn.Bind(wx.EVT_BUTTON, self.OnLoadChecked)
         self.sources_checklist.Bind(wx.EVT_CHECKLISTBOX, self.OnSourceChecked)
         self.sources_checklist.Bind(wx.EVT_LISTBOX, self.OnSourceSelected)
+        self.search_ctrl.Bind(wx.EVT_TEXT, self.OnSearchFilter)
         
         # Bind navigation event to intercept link clicks
         self.html_viewer.Bind(wx.html2.EVT_WEBVIEW_NAVIGATING, self.OnNavigating)
@@ -929,13 +945,17 @@ class NewsPanel(wx.Panel):
                         'article_count': article_count
                     }
                 
+                # Store full list and initialise check-state dict
+                self._all_sources = source_list[:]
+                self._source_check_state = {item['source_id']: True for item in source_list}
+
                 # Update status
                 self.status_text.SetLabel(f"{len(source_list)} sources loaded")
-                
+
                 # Select all sources by default
                 for i in range(self.sources_checklist.GetCount()):
                     self.sources_checklist.Check(i, True)
-                
+
                 checked_count = self.sources_checklist.GetCount()
                 self.status_text.SetLabel(f"{checked_count} sources selected")
                 print(f"✓ Auto-selected all {checked_count} sources")
@@ -1038,19 +1058,66 @@ class NewsPanel(wx.Panel):
         """Select all sources in CheckListBox"""
         for i in range(self.sources_checklist.GetCount()):
             self.sources_checklist.Check(i, True)
-        
-        checked_count = sum(1 for i in range(self.sources_checklist.GetCount()) 
-                          if self.sources_checklist.IsChecked(i))
+            source_id = self.source_id_map.get(i)
+            if source_id:
+                self._source_check_state[source_id] = True
+        checked_count = self.sources_checklist.GetCount()
         self.status_text.SetLabel(f"{checked_count} sources selected")
         print(f"Selected all {checked_count} sources")
-    
+
     def OnDeselectAll(self, event):
         """Deselect all sources in CheckListBox"""
         for i in range(self.sources_checklist.GetCount()):
             self.sources_checklist.Check(i, False)
-        
+            source_id = self.source_id_map.get(i)
+            if source_id:
+                self._source_check_state[source_id] = False
         self.status_text.SetLabel("0 sources selected")
         print("Deselected all sources")
+
+    def OnSearchFilter(self, event):
+        """Filter the sources checklist by the regex in the search bar."""
+        self._apply_search_filter(self.search_ctrl.GetValue())
+
+    def _apply_search_filter(self, pattern: str) -> None:
+        """Rebuild the checklist showing only sources whose name matches *pattern*.
+
+        *pattern* is treated as a case-insensitive regex; on compile error it
+        falls back to a plain substring match.  Check states are preserved.
+        """
+        import re as _re
+        if not self._all_sources:
+            return
+
+        if pattern:
+            try:
+                rx = _re.compile(pattern, _re.IGNORECASE)
+                filtered = [s for s in self._all_sources if rx.search(s['source_name'])]
+            except _re.error:
+                lo = pattern.lower()
+                filtered = [s for s in self._all_sources
+                            if lo in s['source_name'].lower()]
+        else:
+            filtered = self._all_sources[:]
+
+        self.sources_checklist.Clear()
+        self.source_id_map = {}
+
+        for idx, item in enumerate(filtered):
+            source_id = item['source_id']
+            display_name = f"{item['source_name']} ({item['article_count']})"
+            self.sources_checklist.Append(display_name)
+            self.source_id_map[idx] = source_id
+            self.sources_checklist.Check(idx, self._source_check_state.get(source_id, True))
+
+        checked = sum(1 for i in range(self.sources_checklist.GetCount())
+                      if self.sources_checklist.IsChecked(i))
+        total = len(filtered)
+        all_total = len(self._all_sources)
+        if pattern:
+            self.status_text.SetLabel(f"{total}/{all_total} shown · {checked} selected")
+        else:
+            self.status_text.SetLabel(f"{checked} sources selected")
     
     def OnNavigating(self, event):
         """Handle navigation event - intercept article link clicks"""
@@ -1467,17 +1534,24 @@ class NewsPanel(wx.Panel):
         index = event.GetInt()
         is_checked = self.sources_checklist.IsChecked(index)
         source_id = self.source_id_map.get(index)
-        
+
         if source_id:
-            source_name = self.sources[source_id]['name']
+            self._source_check_state[source_id] = is_checked
+            source_name = self.sources.get(source_id, {}).get('name', source_id)
             state = "checked" if is_checked else "unchecked"
             print(f"Source {state}: {source_name}")
-        
+
         # Update status
-        checked_count = sum(1 for i in range(self.sources_checklist.GetCount()) 
-                          if self.sources_checklist.IsChecked(i))
-        self.status_text.SetLabel(f"{checked_count} sources selected")
-        
+        checked_count = sum(1 for i in range(self.sources_checklist.GetCount())
+                            if self.sources_checklist.IsChecked(i))
+        pattern = self.search_ctrl.GetValue() if hasattr(self, 'search_ctrl') else ''
+        total = self.sources_checklist.GetCount()
+        all_total = len(self._all_sources)
+        if pattern:
+            self.status_text.SetLabel(f"{total}/{all_total} shown · {checked_count} selected")
+        else:
+            self.status_text.SetLabel(f"{checked_count} sources selected")
+
         # Auto-load checked sources if any are checked
         if checked_count > 0:
             wx.CallAfter(self.LoadCheckedSources)

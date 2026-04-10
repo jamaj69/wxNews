@@ -115,13 +115,17 @@ RSS_CYCLE_INTERVAL = int(config('RSS_CYCLE_INTERVAL', default=900))  # 15 minute
 
 # MediaStack Configuration
 MEDIASTACK_API_KEY = str(config('MEDIASTACK_API_KEY', cast=str))
+MEDIASTACK_API_KEY_2 = str(config('MEDIASTACK_API_KEY_2', default='', cast=str))
+MEDIASTACK_API_KEY_3 = str(config('MEDIASTACK_API_KEY_3', default='', cast=str))
+MEDIASTACK_API_KEY_4 = str(config('MEDIASTACK_API_KEY_4', default='', cast=str))
+MEDIASTACK_API_KEYS = [k for k in [MEDIASTACK_API_KEY, MEDIASTACK_API_KEY_2, MEDIASTACK_API_KEY_3, MEDIASTACK_API_KEY_4] if k]
 MEDIASTACK_BASE_URL = str(config(
     'MEDIASTACK_BASE_URL',
     default='https://api.mediastack.com/v1/news',
     cast=str,
 ))
 MEDIASTACK_RATE_DELAY = 20  # Delay between requests (seconds) - 3 requests/minute
-MEDIASTACK_CYCLE_INTERVAL = int(config('MEDIASTACK_CYCLE_INTERVAL', default=3600))  # 60 minutes
+MEDIASTACK_CYCLE_INTERVAL = int(config('MEDIASTACK_CYCLE_INTERVAL', default=21600))  # 6 hours — safe for 100 req/month/key with 4 keys rotating (90 req/key/month)
 
 # Content Enrichment Configuration
 ENRICH_MISSING_CONTENT = config('ENRICH_MISSING_CONTENT', default=True, cast=bool)
@@ -600,6 +604,9 @@ class NewsGather():
         # API key rotation for NewsAPI
         self.newsapi_keys = [API_KEY1, API_KEY2]
         self.current_newsapi_key_index = 0
+
+        # API key rotation for MediaStack
+        self.current_mediastack_key_index = 0
    
         self.logger.info("Initializing NewsGather...")
         self.logger.debug("Creating URL queue")
@@ -1567,11 +1574,12 @@ class NewsGather():
                 cycle_count += 1
                 self.logger.info(f"📡 RSS Cycle {cycle_count} starting...")
                 
-                # Get all RSS sources from database
+                # Get all RSS sources from database (skip fetch_blocked sources)
                 rss_sources = []
                 with self.eng.connect() as conn:
                     stmt = select(self.gm_sources).where(
-                        self.gm_sources.c.id_source.like('rss-%')
+                        self.gm_sources.c.id_source.like('rss-%'),
+                        self.gm_sources.c.fetch_blocked != 1
                     )
                     results = conn.execute(stmt).fetchall()
                     for row in results:
@@ -1623,10 +1631,20 @@ class NewsGather():
     
     async def process_rss_feed_with_semaphore(self, session, source, semaphore):
         """
-        Process RSS feed with semaphore control.
+        Process RSS feed with semaphore control and a hard per-feed timeout.
+        The hard timeout (RSS_TIMEOUT * 3) guarantees the batch progresses even
+        if a feed TCP-hangs beyond the inner aiohttp/curl timeouts.
         """
         async with semaphore:
-            return await self.process_rss_feed(session, source)
+            try:
+                return await asyncio.wait_for(
+                    self.process_rss_feed(session, source),
+                    timeout=RSS_TIMEOUT * 3
+                )
+            except asyncio.TimeoutError:
+                self.logger.warning(
+                    f"⏱️  [{source['name']}] Hard timeout ({RSS_TIMEOUT * 3}s) — skipping feed"
+                )
     
     async def process_rss_feed(self, session, source):
         """
@@ -1843,7 +1861,7 @@ class NewsGather():
     async def collect_mediastack(self):
         """
         Collect articles from MediaStack API with rate limiting in continuous loop.
-        Free tier: 500 requests/month, ~3-4 requests/minute
+        Free tier: 100 requests/month per key (~3 keys = 300/month)
         Strategy: Collect PT, ES, IT (EN covered by NewsAPI)
         """
         self.logger.info("🌍 MediaStack collector started")
@@ -1855,7 +1873,10 @@ class NewsGather():
         try:
             while not self.shutdown_flag:
                 cycle_count += 1
-                self.logger.info(f"🌍 MediaStack Cycle {cycle_count} starting...")
+                # Rotate MediaStack key each cycle to spread monthly quota across accounts
+                mediastack_key = MEDIASTACK_API_KEYS[self.current_mediastack_key_index]
+                self.current_mediastack_key_index = (self.current_mediastack_key_index + 1) % len(MEDIASTACK_API_KEYS)
+                self.logger.info(f"🌍 MediaStack Cycle {cycle_count} starting (key #{self.current_mediastack_key_index})...")
                 
                 stats = {
                     'total_fetched': 0,
@@ -1874,7 +1895,7 @@ class NewsGather():
                         try:
                             # Prepare request
                             params = {
-                                'access_key': MEDIASTACK_API_KEY,
+                                'access_key': mediastack_key,
                                 'languages': language,
                                 'limit': 25,  # Collect 25 articles per language
                                 'sort': 'published_desc'
