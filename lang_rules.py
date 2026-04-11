@@ -36,7 +36,8 @@ def _load_language_rules() -> dict:
         con.row_factory = sqlite3.Row
         cur = con.cursor()
         cur.execute("""
-            SELECT language_code, translator_code, translate, translate_to
+            SELECT language_code, translator_code, translate, translate_to,
+                   translate_backend, translate_without_enrichment
             FROM languages
         """)
         for row in cur.fetchall():
@@ -44,6 +45,8 @@ def _load_language_rules() -> dict:
                 'translate': bool(row['translate']),
                 'translate_to': row['translate_to'],
                 'translator_code': row['translator_code'] or row['language_code'],
+                'translate_backend': row['translate_backend'] or 'nllb',
+                'translate_without_enrichment': bool(row['translate_without_enrichment']),
             }
         con.close()
     except Exception as e:

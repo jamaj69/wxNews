@@ -266,10 +266,10 @@ class _PlaywrightFetcher(_ProcessFetcher):
 # pool_size controls how many worker processes run per backend:
 #   cffi      — fast HTTP/TLS, I/O-bound → 4 workers
 #   requests  — stdlib fallback           → 2 workers
-#   playwright — headless Chrome, RAM-heavy → 2 workers
+#   playwright — headless Chrome, RAM-heavy → 4 workers (~300 MB each)
 _cffi       = _CffiFetcher(pool_size=4)
 _requests   = _RequestsFetcher(pool_size=2)
-_playwright = _PlaywrightFetcher(pool_size=2)
+_playwright = _PlaywrightFetcher(pool_size=6)  # 6 headless Chromium workers (~300 MB each)
 
 
 def start_all() -> None:
@@ -291,13 +291,22 @@ def shutdown_all() -> None:
 # ---------------------------------------------------------------------------
 
 def _html_has_content(html: str | None) -> bool:
-    """Quick heuristic: ≥2 real paragraphs → page has readable content."""
+    """Quick heuristic: ≥2 real paragraphs → page has readable content.
+
+    Uses regex instead of BeautifulSoup so we can scan the FULL HTML without
+    the 15 KB truncation that caused false negatives on large news pages
+    (BBC, IndiaToday, FoxNews, etc.) where article text starts after 30-50 KB
+    of <head>, scripts and navigation markup.
+    """
     if not html:
         return False
-    soup = BeautifulSoup(html[:15000], 'html.parser')
-    paras = [p.get_text().strip() for p in soup.find_all('p')
-             if len(p.get_text().strip()) > 50]
-    return len(paras) >= 2
+    count = 0
+    for m in re.finditer(r'<p[^>]*>(.*?)</p>', html, re.S | re.I):
+        if len(re.sub(r'<[^>]+>', '', m.group(1)).strip()) > 50:
+            count += 1
+            if count >= 2:
+                return True
+    return False
 
 
 def _parse_html(html: str, url: str = '') -> 'BeautifulSoup | None':

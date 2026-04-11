@@ -17,6 +17,7 @@ EnvironmentFile=-/home/jamaj/src/python/pyTweeter/.env
 ExecStart=/home/python/pyenv/bin/python /home/jamaj/src/python/pyTweeter/wxAsyncNewsGather.py --debug
 Restart=on-failure
 RestartSec=30
+TimeoutStopSec=10
 StandardOutput=journal
 StandardError=journal
 SyslogIdentifier=wxNewsGatherAPI

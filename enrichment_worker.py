@@ -49,6 +49,12 @@ ENRICH_TIMEOUT: int = int(config('ENRICH_TIMEOUT', default=20))
 # this local threshold only guards the worker's own skip logic.
 _BLOCKED_THRESHOLD: int = 3
 
+# Consecutive *timeouts* before a domain is skipped for the rest of the session.
+# Timeouts are transient (server load, slow connection) so the threshold is
+# intentionally higher than _BLOCKED_THRESHOLD.  No DB write is made — the
+# block is in-memory only and resets on service restart.
+_TIMEOUT_THRESHOLD: int = 5
+
 # HTTP error codes that indicate a source should be (eventually) blocked.
 # Only PERMANENT errors count — 500/503 are temporary server-side outages
 # and must NOT push a domain toward a permanent block.
@@ -101,6 +107,10 @@ class EnrichmentWorker:
         # Keyed by URL *domain* (not source_id) so aggregator feeds are never
         # blocked just because some articles inside them point to paywalled sites.
         self._error_counts: dict[str, int] = {}
+
+        # domain → consecutive timeout count (in-memory only, session-scoped).
+        # Separate from _error_counts so HTTP errors and timeouts don't mix.
+        self._timeout_counts: dict[str, int] = {}
 
         self.logger = logging.getLogger(__name__)
 
@@ -250,6 +260,10 @@ class EnrichmentWorker:
                 updated.append('publishedAt')
 
             if updated:
+                # Successful fetch — reset consecutive timeout counter so a
+                # site that was slow isn't stuck in-memory-blocked this session.
+                if track_key:
+                    self._timeout_counts.pop(track_key, None)
                 self.logger.debug(
                     f"✅ [{source_name}] Enriched: {', '.join(updated)}"
                 )
@@ -258,6 +272,13 @@ class EnrichmentWorker:
             self.logger.debug(
                 f"⚠️  [{source_name}] Fetch OK but no new fields found"
             )
+            return False
+
+        except asyncio.TimeoutError:
+            # Timeout is transient — tracked separately so sites that are
+            # consistently unavailable get skipped for the rest of the session
+            # without writing a permanent DB block.
+            self._record_timeout(track_key, source_name)
             return False
 
         except Exception as exc:
@@ -305,3 +326,28 @@ class EnrichmentWorker:
             self.logger.debug(
                 f"⚠️  [{source_name}] HTTP {error_code} error #{count} (key={key})"
             )
+
+    def _record_timeout(
+        self, key: str, source_name: str
+    ) -> None:
+        """Track consecutive fetch timeouts per domain (in-memory, session-scoped).
+
+        After _TIMEOUT_THRESHOLD hits the domain is promoted into _error_counts
+        at the block threshold so it is skipped for the rest of this session.
+        No DB entry is written — the block resets on service restart.
+        """
+        if not key:
+            return
+        count = self._timeout_counts.get(key, 0) + 1
+        self._timeout_counts[key] = count
+        self.logger.warning(
+            f"⏱️  [{source_name}] Timeout #{count}/{_TIMEOUT_THRESHOLD} (key={key})"
+        )
+        if count >= _TIMEOUT_THRESHOLD:
+            already_blocked = self._error_counts.get(key, 0) >= _BLOCKED_THRESHOLD
+            self._error_counts[key] = _BLOCKED_THRESHOLD
+            if not already_blocked:
+                self.logger.warning(
+                    f"🚫 [{source_name}] In-memory block after {count} consecutive "
+                    f"timeouts (key={key}) — will retry after service restart"
+                )

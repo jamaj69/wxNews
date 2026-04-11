@@ -240,13 +240,15 @@ class _NLLBProcessTranslator(_ProcessTranslator):
 _google = _GoogleProcessTranslator()
 _nllb   = _NLLBProcessTranslator()
 
-# Round-robin backend selector — alternates each article between Google and NLLB.
-_backend_cycle = itertools.cycle(['google', 'nllb'])
-_backend_lock  = threading.Lock()
-
-def _next_backend() -> str:
-    with _backend_lock:
-        return next(_backend_cycle)
+def _backend_for(language_code: str | None) -> str:
+    """Return 'google' or 'nllb' based on the translate_backend column in the
+    languages table.  Falls back to 'nllb' for unknown languages."""
+    if not language_code:
+        return 'nllb'
+    rules = get_language_rules(language_code)
+    if rules and rules.get('translate_backend'):
+        return rules['translate_backend']
+    return 'nllb'
 
 
 # ---------------------------------------------------------------------------
@@ -364,7 +366,7 @@ def translate_article_fields(
     if not non_empty:
         return (title, False), (description, False), (content, False)
 
-    backend = _next_backend()
+    backend = _backend_for(source_language_code)
     logger.debug("[translate-sync] backend=%s lang=%s→%s", backend, source_language_code, target)
 
     if backend == 'google':
@@ -412,7 +414,7 @@ async def translate_article_fields_async(
     if not non_empty:
         return (title, False), (description, False), (content, False)
 
-    backend = _next_backend()
+    backend = _backend_for(source_language_code)
     src     = source_language_code or 'auto'
     logger.debug("[translate-async] backend=%s lang=%s→%s", backend, source_language_code, target)
 
