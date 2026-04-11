@@ -49,6 +49,15 @@ class QueueStats(TypedDict):
     refreshed_at:      int
 
 
+class ArticleStats(TypedDict):
+    """Shape returned by fetch_article_stats() and consumed by /api/stats."""
+    total:         int
+    last_24h:      int
+    last_hour:     int
+    total_sources: int
+    timestamp:     int
+
+
 class GmtUpdate(TypedDict):
     """One row for update_gmt_batch()."""
     article_id:    str
@@ -78,6 +87,12 @@ class NewsDatabase:
         self._conn: Optional[aiosqlite.Connection] = None
         # Serialises multi-statement atomic blocks so coroutines cannot interleave
         self._write_lock = asyncio.Lock()
+        # Cached queue stats — refreshed by refresh_stats_cache() every N seconds
+        self._cached_stats: QueueStats = {
+            "enriched": 0, "enrich_pending": 0, "enrich_failed": 0,
+            "translated": 0, "translate_skipped": 0, "translate_pending": 0,
+            "refreshed_at": 0,
+        }
 
     @classmethod
     async def open(cls, db_path: str) -> "NewsDatabase":
@@ -564,3 +579,53 @@ class NewsDatabase:
             "translate_pending": row[0] if row else 0,
             "refreshed_at":      int(time.time() * 1000),
         }
+
+    @property
+    def cached_stats(self) -> QueueStats:
+        """Return the last cached queue statistics (updated by refresh_stats_cache)."""
+        return self._cached_stats
+
+    async def refresh_stats_cache(self) -> QueueStats:
+        """Fetch fresh stats, store them in the cache, and return them."""
+        stats = await self.fetch_queue_stats()
+        self._cached_stats = stats
+        return stats
+
+    async def fetch_article_stats(self) -> ArticleStats:
+        """Return article/source counts for the /api/stats endpoint."""
+        now_ms = int(time.time() * 1000)
+        async with self._c.execute("SELECT COUNT(*) FROM gm_articles") as cur:
+            total = (await cur.fetchone())[0]
+        async with self._c.execute(
+            "SELECT COUNT(*) FROM gm_articles WHERE inserted_at_ms > ?",
+            (now_ms - 86_400_000,),
+        ) as cur:
+            last_24h = (await cur.fetchone())[0]
+        async with self._c.execute(
+            "SELECT COUNT(*) FROM gm_articles WHERE inserted_at_ms > ?",
+            (now_ms - 3_600_000,),
+        ) as cur:
+            last_hour = (await cur.fetchone())[0]
+        async with self._c.execute("SELECT COUNT(*) FROM gm_sources") as cur:
+            total_sources = (await cur.fetchone())[0]
+        return {
+            "total":         total,
+            "last_24h":      last_24h,
+            "last_hour":     last_hour,
+            "total_sources": total_sources,
+            "timestamp":     now_ms,
+        }
+
+    async def fetch_pending_by_language(self, limit: int = 10) -> list[dict]:
+        """Return pending-translation counts grouped by detected language, descending."""
+        async with self._c.execute(
+            """
+            SELECT detected_language, language_name, target_language, COUNT(*) AS n
+            FROM v_articles_pending_translation
+            GROUP BY detected_language
+            ORDER BY n DESC
+            LIMIT ?
+            """,
+            (limit,),
+        ) as cur:
+            return [dict(r) for r in await cur.fetchall()]

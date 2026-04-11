@@ -666,14 +666,6 @@ class NewsGather():
         # Set of article IDs currently in the enrichment pipeline; updated by
         # backfill_content() and exposed via GET /api/queues.
         self._backfill_processing_ids: set[int] = set()
-
-        # Cached queue/article stats refreshed every 30 s by _refresh_queue_stats().
-        # Avoids blocking the API event loop with slow DB queries.
-        self._queue_stats: dict = {
-            "enriched": 0, "enrich_pending": 0, "enrich_failed": 0,
-            "translated": 0, "translate_skipped": 0, "translate_pending": 0,
-            "refreshed_at": 0,
-        }
     
     async def open_async_db(self) -> None:
         """
@@ -2855,11 +2847,10 @@ class NewsGather():
                 await asyncio.sleep(60)
 
     async def _refresh_queue_stats(self, interval: int = 30) -> None:
-        """Background task: refresh _queue_stats every `interval` seconds."""
+        """Background task: refresh db.cached_stats every `interval` seconds."""
         while not self.shutdown_flag:
             try:
-                stats = await self.db.fetch_queue_stats()
-                self._queue_stats.update(stats)
+                stats = await self.db.refresh_stats_cache()
                 self.logger.debug(
                     f"📊 Queue stats refreshed — enrich_pending={stats['enrich_pending']}, "
                     f"translate_pending={stats['translate_pending']}"
@@ -3031,7 +3022,7 @@ class NewsGather():
                 now_ms = int(time.time() * 1000)
 
                 # Return cached stats — refreshed every 30 s by _refresh_queue_stats()
-                s = gather._queue_stats
+                s = gather.db.cached_stats
                 worker_q  = gather._enrichment_worker.input_queue.qsize()
                 in_flight = len(gather._backfill_processing_ids)
                 total_articles = s["enriched"] + s["enrich_failed"] + s["enrich_pending"]
@@ -3063,20 +3054,36 @@ class NewsGather():
         @api_app.get("/api/stats")
         async def get_stats():
             try:
-                now_ms = int(time.time() * 1000)
-                yesterday_ms = now_ms - 86400_000
-                hour_ago_ms  = now_ms - 3600_000
-                with gather.eng.connect() as conn:
-                    total = conn.execute(select(sa_func.count()).select_from(gather.gm_articles)).scalar()
-                    recent = conn.execute(select(sa_func.count()).select_from(gather.gm_articles)
-                                         .where(gather.gm_articles.c.inserted_at_ms > yesterday_ms)).scalar()
-                    hourly = conn.execute(select(sa_func.count()).select_from(gather.gm_articles)
-                                         .where(gather.gm_articles.c.inserted_at_ms > hour_ago_ms)).scalar()
-                    total_src = conn.execute(select(sa_func.count()).select_from(gather.gm_sources)).scalar()
-                return {'success': True, 'total_articles': total,
-                        'articles_last_24h': recent, 'articles_last_hour': hourly,
-                        'total_sources': total_src,
-                        'timestamp': now_ms}
+                st = await gather.db.fetch_article_stats()
+                return {
+                    'success': True,
+                    'total_articles':    st['total'],
+                    'articles_last_24h': st['last_24h'],
+                    'articles_last_hour':st['last_hour'],
+                    'total_sources':     st['total_sources'],
+                    'timestamp':         st['timestamp'],
+                }
+            except Exception as e:
+                raise _HTTPException(status_code=500, detail=str(e))
+
+        @api_app.get("/api/monitor")
+        async def get_monitor():
+            """Full stats for watch_translations and other dashboards."""
+            try:
+                s    = gather.db.cached_stats
+                total = s['enriched'] + s['enrich_failed'] + s['enrich_pending']
+                pending_by_lang = await gather.db.fetch_pending_by_language()
+                return {
+                    'success':           True,
+                    'total':             total,
+                    'enriched':          s['enriched'],
+                    'not_enriched':      s['enrich_pending'],
+                    'enrich_failed':     s['enrich_failed'],
+                    'enrich_pending':    s['enrich_pending'],
+                    'translated':        s['translated'],
+                    'translate_pending': s['translate_pending'],
+                    'pending_by_language': pending_by_lang,
+                }
             except Exception as e:
                 raise _HTTPException(status_code=500, detail=str(e))
 
