@@ -3072,8 +3072,8 @@ class NewsGather():
                 playwright_fl = len(gather._playwright_ids)
                 total_articles = s["enriched"] + s["enrich_failed"] + s["enrich_pending"]
 
-                # Per-tier pending from DB (lightweight GROUP BY query)
-                pending_by_tier = await gather.db.fetch_enrich_pending_by_tier()
+                # Per-tier pending from cache (updated every 30s — no live DB query)
+                pending_by_tier = s.get("pending_by_tier", {})
 
                 _TIER_NAMES = {0: 'cffi', 1: 'requests', 2: 'playwright'}
                 _fl_map = {'cffi': cffi_fl, 'requests': requests_fl, 'playwright': playwright_fl}
@@ -3137,12 +3137,13 @@ class NewsGather():
             try:
                 s    = gather.db.cached_stats
                 total = s['enriched'] + s['enrich_failed'] + s['enrich_pending']
-                # Snapshot in-flight before awaits
+                # Snapshot in-flight (no awaits needed — all data from cache)
                 cffi_fl       = len(gather._cffi_ids)
                 requests_fl   = len(gather._requests_ids)
                 playwright_fl = len(gather._playwright_ids)
                 pending_by_lang = await gather.db.fetch_pending_by_language()
-                pending_by_tier = await gather.db.fetch_enrich_pending_by_tier()
+                # Per-tier pending from cache (updated every 30s)
+                pending_by_tier = s.get('pending_by_tier', {})
                 _TIER_NAMES = {0: 'cffi', 1: 'requests', 2: 'playwright'}
                 _fl_map = {'cffi': cffi_fl, 'requests': requests_fl, 'playwright': playwright_fl}
                 tiers = [

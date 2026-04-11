@@ -46,6 +46,7 @@ class QueueStats(TypedDict):
     translated:        int
     translate_skipped: int
     translate_pending: int
+    pending_by_tier:   dict  # {enrich_try: count} for is_enriched=0
     refreshed_at:      int
 
 
@@ -91,6 +92,7 @@ class NewsDatabase:
         self._cached_stats: QueueStats = {
             "enriched": 0, "enrich_pending": 0, "enrich_failed": 0,
             "translated": 0, "translate_skipped": 0, "translate_pending": 0,
+            "pending_by_tier": {},
             "refreshed_at": 0,
         }
 
@@ -612,6 +614,11 @@ class NewsDatabase:
         ) as cur:
             row = await cur.fetchone()
 
+        async with self._c.execute(
+            "SELECT enrich_try, COUNT(*) FROM gm_articles WHERE is_enriched = 0 GROUP BY enrich_try"
+        ) as cur:
+            tier_map = {row[0]: row[1] for row in await cur.fetchall()}
+
         return {
             "enriched":          enrich_map.get(1,  0),
             "enrich_pending":    enrich_map.get(0,  0),
@@ -619,6 +626,7 @@ class NewsDatabase:
             "translated":        trans_map.get(1,   0),
             "translate_skipped": trans_map.get(-1,  0),
             "translate_pending": row[0] if row else 0,
+            "pending_by_tier":   tier_map,
             "refreshed_at":      int(time.time() * 1000),
         }
 
@@ -632,13 +640,6 @@ class NewsDatabase:
         stats = await self.fetch_queue_stats()
         self._cached_stats = stats
         return stats
-
-    async def fetch_enrich_pending_by_tier(self) -> dict[int, int]:
-        """Return {enrich_try: count} for articles with is_enriched=0, grouped by tier."""
-        async with self._c.execute(
-            "SELECT enrich_try, COUNT(*) FROM gm_articles WHERE is_enriched = 0 GROUP BY enrich_try"
-        ) as cur:
-            return {row[0]: row[1] for row in await cur.fetchall()}
 
     async def fetch_article_stats(self) -> ArticleStats:
         """Return article/source counts for the /api/stats endpoint."""
