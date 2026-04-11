@@ -2886,7 +2886,7 @@ class NewsGather():
                 self.logger.error(f"Translation backfill unexpected error: {e}", exc_info=True)
                 await asyncio.sleep(60)
 
-    async def _refresh_queue_stats(self, interval: int = 30) -> None:
+    async def _refresh_queue_stats(self, interval: int = 20) -> None:
         """Background task: refresh db.cached_stats every `interval` seconds."""
         while not self.shutdown_flag:
             try:
@@ -3061,7 +3061,7 @@ class NewsGather():
             try:
                 now_ms = int(time.time() * 1000)
 
-                # Return cached stats — refreshed every 30 s by _refresh_queue_stats()
+                # Return cached stats — refreshed every 20 s by _refresh_queue_stats()
                 s = gather.db.cached_stats
                 worker_q  = gather._enrichment_worker.input_queue.qsize()
                 in_flight = len(gather._backfill_processing_ids)
