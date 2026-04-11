@@ -153,6 +153,35 @@ class NewsDatabase:
             """
         )
         logger.debug("✅ Migration: idx_stats_translate_pending ensured")
+        # One-time fix: strip microseconds from published_at_gmt values that were
+        # stored with full microsecond precision (e.g. "2026-04-11T03:41:57.002412+00:00").
+        # The bug was in the fallback branches of normalize_timestamp_to_utc which called
+        # datetime.now(timezone.utc).isoformat() without .replace(microsecond=0).
+        cursor = await self._conn.execute(
+            """
+            SELECT COUNT(*) FROM gm_articles
+            WHERE published_at_gmt LIKE '%.%+%' OR published_at_gmt LIKE '%.%Z'
+            """
+        )
+        row = await cursor.fetchone()
+        affected = row[0] if row else 0
+        if affected > 0:
+            await self._conn.execute(
+                """
+                UPDATE gm_articles
+                SET published_at_gmt =
+                    CASE
+                        WHEN published_at_gmt LIKE '%.%+%' THEN
+                            substr(published_at_gmt, 1, instr(published_at_gmt, '.') - 1)
+                            || substr(published_at_gmt, instr(published_at_gmt, '+'))
+                        WHEN published_at_gmt LIKE '%.%Z' THEN
+                            substr(published_at_gmt, 1, instr(published_at_gmt, '.') - 1) || 'Z'
+                        ELSE published_at_gmt
+                    END
+                WHERE published_at_gmt LIKE '%.%+%' OR published_at_gmt LIKE '%.%Z'
+                """
+            )
+            logger.info(f"✅ Migration: stripped microseconds from {affected} published_at_gmt values")
 
     async def close(self) -> None:
         if self._ro_conn:

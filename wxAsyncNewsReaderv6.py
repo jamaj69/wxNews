@@ -689,10 +689,12 @@ class NewsPanel(wx.Panel):
             
             # Run blocking API call in executor to not block event loop
             loop = asyncio.get_event_loop()
+            # Filter by current source(s) if a specific source is selected
+            poll_source_ids = self.current_source_ids if self.current_source_ids else None
             new_articles = await loop.run_in_executor(
                 None,
                 lambda: self.api_client.poll_new_articles(
-                    source_ids=None,  # Get all sources
+                    source_ids=poll_source_ids,
                     limit=50
                 )
             )
@@ -825,7 +827,7 @@ class NewsPanel(wx.Panel):
         html += f'<span class="article-source">🔖 {source_name}</span>'
         if author:
             html += f'<span class="article-author">✍️ {author}</span>'
-        html += f'<span class="article-date">📅 {date_str}</span>'
+        html += f'<span class="article-date" dir="ltr">📅 {date_str}</span>'
         if is_translated == 1:
             html += '<span style="color:#0b9ac4;font-size:13px;font-weight:500;">🌐 Traduzido</span>'
         html += '</div>'
@@ -2163,7 +2165,7 @@ class NewsPanel(wx.Panel):
             html += f'<div class="article-meta">'
             if author:
                 html += f'<span class="article-author">✍️ {author}</span>'
-            html += f'<span class="article-date">📅 {date_str}</span>'
+            html += f'<span class="article-date" dir="ltr" dir="ltr">📅 {date_str}</span>'
             if is_translated == 1:
                 html += '<span style="color:#0b9ac4;font-size:13px;font-weight:500;">🌐 Traduzido</span>'
             html += '</div>'

@@ -349,7 +349,7 @@ def normalize_timestamp_to_utc(
         - detected_timezone_str: Detected timezone offset (e.g., 'UTC+05:30') or None
     """
     if not timestamp_str or timestamp_str.strip() == '':
-        return datetime.now(timezone.utc).isoformat(), None
+        return datetime.now(timezone.utc).replace(microsecond=0).isoformat(), None
     
     # Mapping of common timezone abbreviations to UTC offsets (in seconds)
     # This prevents UnknownTimezoneWarning from dateutil
@@ -527,7 +527,7 @@ def normalize_timestamp_to_utc(
     except Exception as e:
         # If parsing fails, return current UTC time
         logging.debug(f"Failed to parse timestamp '{timestamp_str}': {e}")
-        return datetime.now(timezone.utc).isoformat(), None
+        return datetime.now(timezone.utc).replace(microsecond=0).isoformat(), None
 
 
 def detect_timezone_from_articles(
@@ -1016,8 +1016,8 @@ class NewsGather():
             Column('url', Text),
             Column('urlToImage' , Text),
             Column('publishedAt', Text),
+            Column('content', Text),
             Column('published_at_gmt', Text),  # Normalized UTC version
-            Column('content', Text)
         )
         gm_articles.create(bind=eng, checkfirst=True)
         self.logger.debug("Table gm_articles ready")
@@ -1179,7 +1179,10 @@ class NewsGather():
                     WHERE a.is_translated = 0
                       AND a.title IS NOT NULL
                       AND a.title != ''
-                      AND a.is_enriched IN (1, -1)
+                      AND (
+                          a.is_enriched IN (1, -1)
+                          OR (l.translate_without_enrichment = 1 AND a.enrich_try >= 3)
+                      )
                 """))
             self.logger.info("✅ View v_articles_pending_translation ready")
         except Exception as e:
