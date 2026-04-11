@@ -108,7 +108,14 @@ def _get(d: dict[str, Any], *keys: str, default: Any = 0) -> Any:
 
 # ─── Display ─────────────────────────────────────────────────────────────────
 
-def print_snapshot(samples: deque, first: "Sample | None", interval_s: float, seq: int) -> None:
+def print_snapshot(
+    samples: deque,
+    first: "Sample | None",
+    wm_pending: int | None,
+    wm_ts: float | None,
+    interval_s: float,
+    seq: int,
+) -> None:
     cur  = samples[-1]
     prev = samples[-2] if len(samples) >= 2 else None
 
@@ -245,26 +252,53 @@ def print_snapshot(samples: deque, first: "Sample | None", interval_s: float, se
             )
 
     # ── ETA global de enriquecimento (média da sessão) ───────────────────────
+    def _fmt_eta(mins: float) -> str:
+        if mins < 60:
+            return _c(GREEN, f"~{mins:.0f}min")
+        elif mins / 60 < 48:
+            return _c(YELLOW, f"~{mins/60:.1f}h")
+        return _c(RED, f"~{mins/60/24:.1f}d")
+
+    has_eta = False
     if sess_rt is not None and sess_re is not None and enr_pend > 0:
-        net = (sess_re or 0) - (sess_rt or 0)   # líquido: enriquece mais do que chega?
+        net = (sess_re or 0) - (sess_rt or 0)
         if net > 0:
-            mins = enr_pend / net
-            if mins < 60:
-                eta_global = _c(GREEN, f"~{mins:.0f}min")
-            elif mins / 60 < 48:
-                eta_global = _c(YELLOW, f"~{mins/60:.1f}h")
-            else:
-                eta_global = _c(RED, f"~{mins/60/24:.1f}d")
-            print(
-                f"\n  {_c(BOLD, 'ETA ENRIQUECIMENTO')}  "
-                f"(ritmo líquido sessão: {_rate(net)})  →  {eta_global}"
-            )
+            eta_sessao = _fmt_eta(enr_pend / net)
+            label_eta1 = _c(DIM, f"sessão ({_rate(net)} líq.)")
         else:
-            print(
-                f"\n  {_c(BOLD, 'ETA ENRIQUECIMENTO')}  "
-                f"{_c(RED, 'chegadas superam enriquecimentos')}  "
-                f"(líquido: {_rate(net)})"
-            )
+            eta_sessao = _c(RED, "∞  (chegadas ≥ enriquecidas)")
+            label_eta1 = _c(DIM, f"sessão ({_rate(net)} líq.)")
+        has_eta = True
+    else:
+        eta_sessao = _c(DIM, "—")
+        label_eta1 = _c(DIM, "sessão")
+
+    # ── ETA por marca-d'água (drain real, ignora bursts de chegadas) ─────────
+    cur_pend = enr_pend
+    if (
+        wm_pending is not None and wm_ts is not None
+        and cur_pend < wm_pending
+        and cur.ts > wm_ts
+    ):
+        drain_span  = cur.ts - wm_ts          # segundos desde o mínimo anterior
+        drain_count = wm_pending - cur_pend   # artigos drenados nesse intervalo
+        drain_pm    = drain_count / drain_span * 60.0
+        if drain_pm > 0:
+            eta_wm    = _fmt_eta(cur_pend / drain_pm)
+            label_eta2 = _c(DIM, f"marca-d'água ({_rate(drain_pm)} drain)")
+        else:
+            eta_wm    = _c(DIM, "—")
+            label_eta2 = _c(DIM, "marca-d'água")
+        has_eta = True
+    else:
+        eta_wm    = _c(DIM, "aguardando progresso…")
+        label_eta2 = _c(DIM, "marca-d'água")
+        wm_info   = f"mín={wm_pending:,}" if wm_pending is not None else "—"
+
+    if has_eta or enr_pend > 0:
+        print(f"\n  {_c(BOLD, 'ETA ENRIQUECIMENTO')}")
+        print(f"    {label_eta1:<50}  →  {eta_sessao}")
+        print(f"    {label_eta2:<50}  →  {eta_wm}")
 
     # ── Rodapé ───────────────────────────────────────────────────────────────
     age_str = f"{stats_age}s" if stats_age is not None else "—"
@@ -290,6 +324,9 @@ def main() -> None:
 
     samples: deque[Sample] = deque(maxlen=max_history)
     first_sample: Sample | None = None
+    # Watermark: lowest pending seen + timestamp when it was recorded
+    wm_pending: int | None = None
+    wm_ts:      float | None = None
     seq = 0
 
     print(_c(BOLD, f"Iniciando monitor · {queues_url} · intervalo={interval_s}s"))
@@ -304,9 +341,15 @@ def main() -> None:
 
             s = Sample(ts, data)
             samples.append(s)
-            if first_sample is None and "_error" not in data:
-                first_sample = s
-            print_snapshot(samples, first_sample, interval_s, seq)
+            if "_error" not in data:
+                if first_sample is None:
+                    first_sample = s
+                # Update watermark only when pending actually decreases
+                cur_pend = _get(data, "articles", "enrich_pending")
+                if wm_pending is None or cur_pend < wm_pending:
+                    wm_pending = cur_pend
+                    wm_ts      = ts
+            print_snapshot(samples, first_sample, wm_pending, wm_ts, interval_s, seq)
 
             elapsed = time.monotonic() - t0
             sleep_s = max(0.0, interval_s - elapsed)
