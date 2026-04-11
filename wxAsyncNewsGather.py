@@ -690,6 +690,16 @@ class NewsGather():
         # Set of article IDs currently in the enrichment pipeline; updated by
         # backfill_content() and exposed via GET /api/queues.
         self._backfill_processing_ids: set[int] = set()
+
+        # Per-tier in-flight sets (populated by backfill_content, read by /api/queues)
+        self._cffi_ids:       set[int] = set()
+        self._requests_ids:   set[int] = set()
+        self._playwright_ids: set[int] = set()
+
+        # Per-tier session counters (since last service start)
+        self._tier_resolved:  dict[str, int] = {'cffi': 0, 'requests': 0, 'playwright': 0}
+        self._tier_advanced:  dict[str, int] = {'cffi': 0, 'requests': 0, 'playwright': 0}
+        self._tier_gave_up:   dict[str, int] = {'cffi': 0, 'requests': 0, 'playwright': 0}
     
     async def open_async_db(self) -> None:
         """
@@ -2293,11 +2303,14 @@ class NewsGather():
             f"playwright(batch={PLAYWRIGHT_BATCH_SIZE}, concur={PLAYWRIGHT_CONCURRENCY}, t={PLAYWRIGHT_TIMEOUT}s)"
         )
 
-        # Shared in-flight tracking (keyed per worker instance)
-        cffi_ids:       set[int] = set()
-        requests_ids:   set[int] = set()
-        playwright_ids: set[int] = set()
-        self._backfill_processing_ids = cffi_ids  # expose largest set for /api/queues
+        # Shared in-flight tracking (keyed per worker instance) — reuse instance sets
+        self._cffi_ids.clear()
+        self._requests_ids.clear()
+        self._playwright_ids.clear()
+        cffi_ids       = self._cffi_ids
+        requests_ids   = self._requests_ids
+        playwright_ids = self._playwright_ids
+        self._backfill_processing_ids = cffi_ids  # legacy alias for /api/queues
 
         cffi_inflight       = asyncio.Semaphore(CFFI_BATCH_SIZE)
         requests_inflight   = asyncio.Semaphore(REQUESTS_BATCH_SIZE)
@@ -2453,6 +2466,10 @@ class NewsGather():
                                 f"{article_id} — advancing to next tier"
                             )
                             await self.db.mark_enrich_attempt_failed(article_id, current_try)
+                            if current_try >= 2:
+                                self._tier_gave_up[worker.backend] = self._tier_gave_up.get(worker.backend, 0) + 1
+                            else:
+                                self._tier_advanced[worker.backend] = self._tier_advanced.get(worker.backend, 0) + 1
                             continue
                         else:
                             enriched_val = 1
@@ -2467,6 +2484,7 @@ class NewsGather():
                         )
                         if enriched_val == 1:
                             enriched_total += 1
+                            self._tier_resolved[worker.backend] = self._tier_resolved.get(worker.backend, 0) + 1
                         self.logger.debug(
                             f"✅ Backfill saved: [{source_name}] {article_id} "
                             f"(enriched={enriched_total}, val={enriched_val})"
@@ -2482,6 +2500,10 @@ class NewsGather():
                     except Exception as exc:
                         self.logger.error(f"Backfill failed-update error: {exc}")
                     failed_total += 1
+                    if current_try >= 2:
+                        self._tier_gave_up[worker.backend] = self._tier_gave_up.get(worker.backend, 0) + 1
+                    else:
+                        self._tier_advanced[worker.backend] = self._tier_advanced.get(worker.backend, 0) + 1
                     next_tier = 'give up (is_enriched=-1)' if current_try >= 2 else f'tier {current_try + 1}'
                     self.logger.debug(
                         f"⚠️  Backfill[{worker.backend}] no-data: [{source_name}] {article_id} "
@@ -3043,7 +3065,31 @@ class NewsGather():
                 s = gather.db.cached_stats
                 worker_q  = gather._enrichment_worker.input_queue.qsize()
                 in_flight = len(gather._backfill_processing_ids)
+
+                # Snapshot in-flight counts before any await (single-threaded asyncio)
+                cffi_fl       = len(gather._cffi_ids)
+                requests_fl   = len(gather._requests_ids)
+                playwright_fl = len(gather._playwright_ids)
                 total_articles = s["enriched"] + s["enrich_failed"] + s["enrich_pending"]
+
+                # Per-tier pending from DB (lightweight GROUP BY query)
+                pending_by_tier = await gather.db.fetch_enrich_pending_by_tier()
+
+                _TIER_NAMES = {0: 'cffi', 1: 'requests', 2: 'playwright'}
+                _fl_map = {'cffi': cffi_fl, 'requests': requests_fl, 'playwright': playwright_fl}
+                tiers = [
+                    {
+                        "tier":      t,
+                        "backend":   _TIER_NAMES.get(t, f"tier{t}"),
+                        "pending":   pending_by_tier.get(t, 0),
+                        "in_flight": _fl_map.get(_TIER_NAMES.get(t, ''), 0),
+                        "resolved":  gather._tier_resolved.get(_TIER_NAMES.get(t, ''), 0),
+                        "advanced":  gather._tier_advanced.get(_TIER_NAMES.get(t, ''), 0),
+                        "gave_up":   gather._tier_gave_up.get(_TIER_NAMES.get(t, ''), 0),
+                    }
+                    for t in range(3)
+                ]
+
                 return {
                     "success": True,
                     "timestamp": now_ms,
@@ -3061,6 +3107,7 @@ class NewsGather():
                         "worker_queue": worker_q,
                         "in_flight": in_flight,
                         "pending_db": s["enrich_pending"],
+                        "tiers": tiers,
                     },
                     "translation": {
                         "pending_db": s["translate_pending"],
@@ -3090,7 +3137,26 @@ class NewsGather():
             try:
                 s    = gather.db.cached_stats
                 total = s['enriched'] + s['enrich_failed'] + s['enrich_pending']
+                # Snapshot in-flight before awaits
+                cffi_fl       = len(gather._cffi_ids)
+                requests_fl   = len(gather._requests_ids)
+                playwright_fl = len(gather._playwright_ids)
                 pending_by_lang = await gather.db.fetch_pending_by_language()
+                pending_by_tier = await gather.db.fetch_enrich_pending_by_tier()
+                _TIER_NAMES = {0: 'cffi', 1: 'requests', 2: 'playwright'}
+                _fl_map = {'cffi': cffi_fl, 'requests': requests_fl, 'playwright': playwright_fl}
+                tiers = [
+                    {
+                        "tier":      t,
+                        "backend":   _TIER_NAMES.get(t, f"tier{t}"),
+                        "pending":   pending_by_tier.get(t, 0),
+                        "in_flight": _fl_map.get(_TIER_NAMES.get(t, ''), 0),
+                        "resolved":  gather._tier_resolved.get(_TIER_NAMES.get(t, ''), 0),
+                        "advanced":  gather._tier_advanced.get(_TIER_NAMES.get(t, ''), 0),
+                        "gave_up":   gather._tier_gave_up.get(_TIER_NAMES.get(t, ''), 0),
+                    }
+                    for t in range(3)
+                ]
                 return {
                     'success':           True,
                     'total':             total,
@@ -3101,6 +3167,7 @@ class NewsGather():
                     'translated':        s['translated'],
                     'translate_pending': s['translate_pending'],
                     'pending_by_language': pending_by_lang,
+                    'enrichment_tiers':  tiers,
                 }
             except Exception as e:
                 raise _HTTPException(status_code=500, detail=str(e))

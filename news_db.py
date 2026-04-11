@@ -633,6 +633,13 @@ class NewsDatabase:
         self._cached_stats = stats
         return stats
 
+    async def fetch_enrich_pending_by_tier(self) -> dict[int, int]:
+        """Return {enrich_try: count} for articles with is_enriched=0, grouped by tier."""
+        async with self._c.execute(
+            "SELECT enrich_try, COUNT(*) FROM gm_articles WHERE is_enriched = 0 GROUP BY enrich_try"
+        ) as cur:
+            return {row[0]: row[1] for row in await cur.fetchall()}
+
     async def fetch_article_stats(self) -> ArticleStats:
         """Return article/source counts for the /api/stats endpoint."""
         now_ms = int(time.time() * 1000)

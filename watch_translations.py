@@ -100,22 +100,48 @@ def render(data: dict[str, Any], state: MonitorState) -> None:
     state.prev_translated = translated
 
     _clear()
-    print("━" * 52)
+    print("━" * 60)
     print("  📊  MONITOR DE ARTIGOS & TRADUÇÕES")
-    print("━" * 52)
+    print("━" * 60)
     print(f"  {'ARTIGOS':38}")
     print(f"  Total       : {total:>10,}")
     print(f"  Enriquecidos: \033[32m{enriched:>10,}\033[0m  {_bar(enriched, total)}  {pct_enrich:.1f}%")
     print(f"  Não enriq.  : \033[33m{not_enriched:>10,}\033[0m")
     print(f"  Falha enriq.: \033[31m{enrich_failed:>10,}\033[0m")
-    print("━" * 52)
+    print("━" * 60)
+
+    # ── Tiers de enriquecimento ──────────────────────────────────────
+    tiers: list[dict] = data.get("enrichment_tiers", [])
+    if tiers:
+        print(f"  {'TIERS DE ENRIQUECIMENTO':38}")
+        print(f"  {'Backend':<12} {'Pendente':>9} {'Em Voo':>7} {'Resolvido':>9} {'Avançado':>9} {'Descartado':>10}")
+        print("  " + "─" * 56)
+        _TIER_COLORS = {'cffi': '\033[36m', 'requests': '\033[35m', 'playwright': '\033[33m'}
+        for tier in tiers:
+            backend  = tier.get("backend",  "?")
+            col      = _TIER_COLORS.get(backend, '')
+            pending  = tier.get("pending",  0)
+            in_fl    = tier.get("in_flight", 0)
+            resolved = tier.get("resolved", 0)
+            advanced = tier.get("advanced", 0)
+            gave_up  = tier.get("gave_up",  0)
+            print(
+                f"  {col}\033[1m{backend:<12}\033[0m"
+                f" \033[33m{pending:>9,}\033[0m"
+                f" \033[36m{in_fl:>7,}\033[0m"
+                f" \033[32m{resolved:>9,}\033[0m"
+                f" \033[2m{advanced:>9,}\033[0m"
+                f" \033[31m{gave_up:>10,}\033[0m"
+            )
+        print("━" * 60)
+
     print(f"  {'PIPELINE':38}")
     print(f"  Pend. enriq.: \033[33m{not_enriched:>10,}\033[0m")
     print(f"  Pend. trad. : \033[33m{trans_pending:>10,}\033[0m")
     print(f"  Traduzidos  : \033[32m{translated:>10,}\033[0m")
     print(f"  Total (pipe): {total_pipeline:>10,}")
     print(f"  Trad. prog. : {_bar(translated, total_pipeline)}  {pct_trans:.1f}%")
-    print("━" * 52)
+    print("━" * 60)
     if top:
         print(f"  Pendentes por idioma (tradução):")
         print(f"  {'lang':<6} {'nome':<18} → {'destino':<6} {'qtd':>7}")
@@ -126,15 +152,15 @@ def render(data: dict[str, Any], state: MonitorState) -> None:
             target = str(row.get("target_language")   or "?")
             n      = int(row.get("n", 0))
             print(f"  {lang:<6} {name:<18} → {target:<6} {n:>7,}")
-        print("━" * 52)
+        print("━" * 60)
     print(f"  Ritmo trad. :   ~{rate_per_h:,.0f} artigos/hora")
     print(f"  ETA trad.   :   {eta_str}")
-    print("━" * 52)
+    print("━" * 60)
     elapsed = int(now - state.start_time)
     h2, rem2 = divmod(elapsed, 3600)
     m2, s2 = divmod(rem2, 60)
     print(f"  Monitorando há {h2}h {m2:02d}m {s2:02d}s  •  Ctrl+C para sair")
-    print("━" * 52)
+    print("━" * 60)
 
 
 # ─── Main loop ─────────────────────────────────────────────────────

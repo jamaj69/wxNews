@@ -165,6 +165,31 @@ def print_snapshot(samples: deque, interval_s: float, seq: int) -> None:
         print(f"    Progresso    : {_bar(enriched, total)}")
     print(f"    Worker fila  : {_c(CYAN, f'{worker_q:>10,}')}   em voo: {_c(CYAN, str(in_flight))}  {_sign(d_ifl) if d_ifl is not None else ''}")
 
+    # ── Por tier de enriquecimento ───────────────────────────────────────────
+    tiers: list[dict] = _get(d, "enrichment", "tiers", default=[])
+    if tiers:
+        _BACKEND_COLOR = {'cffi': CYAN, 'requests': MAGENTA, 'playwright': YELLOW}
+        print(f"\n  {_c(BOLD, 'TIERS DE ENRIQUECIMENTO')}")
+        hdr = f"    {'Backend':<12}  {'Pendente':>9}  {'Em Voo':>7}  {'Resolvido':>9}  {'Avançado':>9}  {'Descartado':>10}"
+        print(_c(DIM, hdr))
+        print(_c(DIM, "    " + "─" * 66))
+        for tier in tiers:
+            backend  = tier.get("backend", "?")
+            col      = _BACKEND_COLOR.get(backend, WHITE)
+            pending  = tier.get("pending",  0)
+            in_fl    = tier.get("in_flight", 0)
+            resolved = tier.get("resolved", 0)
+            advanced = tier.get("advanced", 0)
+            gave_up  = tier.get("gave_up",  0)
+            print(
+                f"    {_c(col+BOLD, f'{backend:<12}')}"
+                f"  {_c(YELLOW, f'{pending:>9,}')}"
+                f"  {_c(CYAN,   f'{in_fl:>7,}')}"
+                f"  {_c(GREEN,  f'{resolved:>9,}')}"
+                f"  {_c(DIM,    f'{advanced:>9,}')}"
+                f"  {_c(RED,    f'{gave_up:>10,}')}"
+            )
+
     # ── Tradução ─────────────────────────────────────────────────────────────
     print(f"\n  {_c(BOLD, 'TRADUÇÃO')}")
     print(f"    Traduzidos   : {_c(BOLD+GREEN, f'{translated:>10,}')}  {_sign(d_transl) if d_transl is not None else ''}  {_rate(r_transl)}")
