@@ -221,15 +221,15 @@ def print_snapshot(samples: deque, first: "Sample | None", interval_s: float, se
         ))
 
     # Linha 2: sessão completa (desde o início)
+    sess_rt: float | None = None
+    sess_re: float | None = None
     if first is not None and first is not cur:
         span_s  = cur.ts - first.ts
         label_s = f"sessão completa ({span_s/60:.1f}min)"
-        rows.append((
-            label_s,
-            _span_rate(first, cur, ["articles", "total"]),
-            _span_rate(first, cur, ["articles", "enriched"]),
-            _span_rate(first, cur, ["articles", "translated"]),
-        ))
+        sess_rt = _span_rate(first, cur, ["articles", "total"])
+        sess_re = _span_rate(first, cur, ["articles", "enriched"])
+        sess_rtr = _span_rate(first, cur, ["articles", "translated"])
+        rows.append((label_s, sess_rt, sess_re, sess_rtr))
 
     if rows:
         print(f"\n  {_c(BOLD, 'VELOCIDADES MÉDIAS')}")
@@ -242,6 +242,28 @@ def print_snapshot(samples: deque, first: "Sample | None", interval_s: float, se
                 f"  {_rate(rt):>12}"
                 f"  {_rate(re):>14}"
                 f"  {_rate(rtr):>12}"
+            )
+
+    # ── ETA global de enriquecimento (média da sessão) ───────────────────────
+    if sess_rt is not None and sess_re is not None and enr_pend > 0:
+        net = (sess_re or 0) - (sess_rt or 0)   # líquido: enriquece mais do que chega?
+        if net > 0:
+            mins = enr_pend / net
+            if mins < 60:
+                eta_global = _c(GREEN, f"~{mins:.0f}min")
+            elif mins / 60 < 48:
+                eta_global = _c(YELLOW, f"~{mins/60:.1f}h")
+            else:
+                eta_global = _c(RED, f"~{mins/60/24:.1f}d")
+            print(
+                f"\n  {_c(BOLD, 'ETA ENRIQUECIMENTO')}  "
+                f"(ritmo líquido sessão: {_rate(net)})  →  {eta_global}"
+            )
+        else:
+            print(
+                f"\n  {_c(BOLD, 'ETA ENRIQUECIMENTO')}  "
+                f"{_c(RED, 'chegadas superam enriquecimentos')}  "
+                f"(líquido: {_rate(net)})"
             )
 
     # ── Rodapé ───────────────────────────────────────────────────────────────
