@@ -34,8 +34,21 @@ from urllib.parse import urlparse
 
 from decouple import config
 
-from article_fetcher import fetch_article_content, fetch_article_content_async
+from article_fetcher import (
+    fetch_article_content,
+    fetch_article_content_async,
+    fetch_cffi_only_async,
+    fetch_requests_only_async,
+    fetch_playwright_only_async,
+)
 from html_utils import sanitize_html_content, extract_and_remove_first_image
+
+# Maps backend name → single-backend fetch function
+_BACKEND_FETCH = {
+    'cffi':       fetch_cffi_only_async,
+    'requests':   fetch_requests_only_async,
+    'playwright': fetch_playwright_only_async,
+}
 
 # ---------------------------------------------------------------------------
 # Configuration
@@ -94,9 +107,14 @@ class EnrichmentWorker:
         self,
         concurrency: int = ENRICH_CONCURRENCY,
         timeout: int = ENRICH_TIMEOUT,
+        backend: str = 'auto',
     ) -> None:
         self.concurrency = concurrency
         self.timeout = timeout
+        # 'auto' uses the full cffi→requests→playwright chain (legacy)
+        # 'cffi' | 'requests' | 'playwright' use a single backend only
+        self.backend = backend
+        self._fetch_fn = _BACKEND_FETCH.get(backend)  # None → auto chain
 
         self.input_queue: asyncio.Queue[Optional[ArticleDict]] = asyncio.Queue()
         self.output_queue: asyncio.Queue[tuple[ArticleDict, bool]] = asyncio.Queue()
@@ -132,8 +150,8 @@ class EnrichmentWorker:
         *concurrency* at a time.  Exits on ``None`` sentinel or cancellation.
         """
         self.logger.info(
-            f"🚀 EnrichmentWorker started — concurrency={self.concurrency}, "
-            f"timeout={self.timeout}s"
+            f"🚀 EnrichmentWorker started — backend={self.backend}, "
+            f"concurrency={self.concurrency}, timeout={self.timeout}s"
         )
         pending: set[asyncio.Task] = set()
 
@@ -205,10 +223,11 @@ class EnrichmentWorker:
             self.logger.debug(
                 f"🔍 [{source_name}] Fetching missing content …"
             )
-            result: Optional[dict] = await fetch_article_content_async(
-                url,
-                self.timeout,
-            )
+            # Use single-backend function if backend is set, else full auto chain
+            if self._fetch_fn is not None:
+                result: Optional[dict] = await self._fetch_fn(url, self.timeout)
+            else:
+                result = await fetch_article_content_async(url, self.timeout)
 
             # Track blocking errors in-memory and surface to caller.
             # Store by domain so _backfill_consumer can persist the domain block.

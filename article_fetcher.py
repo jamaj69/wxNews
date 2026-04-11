@@ -679,6 +679,52 @@ async def fetch_article_content_async(url: str, timeout: int = 10) -> dict:
 
 
 # ---------------------------------------------------------------------------
+# Single-backend async fetchers (used by tiered enrichment pipeline)
+# ---------------------------------------------------------------------------
+
+async def _fetch_and_parse_one(backend: _ProcessFetcher, url: str, timeout: int) -> dict:
+    """
+    Fetch with a single backend subprocess and parse the HTML.
+    Returns the same shape as ArticleContentFetcher.fetch_async() but only
+    attempts the one backend — no fallback chain.
+    """
+    result: dict = {
+        'author': None, 'published_time': None,
+        'description': None, 'content': None,
+        'success': False, 'error_code': None,
+        'error_type': None, 'sanitized_url': None,
+    }
+    sanitized = _sanitize_url(url)
+    raw = await backend.fetch_async(sanitized, timeout)
+    result['error_code'] = raw.get('error_code')
+    result['error_type'] = raw.get('error_type')
+    if raw.get('success') and raw.get('html'):
+        loop = asyncio.get_running_loop()
+        soup = await loop.run_in_executor(None, _parse_html, raw['html'], sanitized)
+        if soup:
+            fields = _soup_to_fields(soup)
+            fields.pop('_paywall', None)
+            result.update(fields)
+            result['success'] = bool(fields.get('content') or fields.get('description'))
+    return result
+
+
+async def fetch_cffi_only_async(url: str, timeout: int = 10) -> dict:
+    """Fetch using only the cffi backend (Chrome TLS fingerprint). No fallback."""
+    return await _fetch_and_parse_one(_cffi, url, timeout)
+
+
+async def fetch_requests_only_async(url: str, timeout: int = 15) -> dict:
+    """Fetch using only the requests backend (browser headers). No fallback."""
+    return await _fetch_and_parse_one(_requests, url, timeout)
+
+
+async def fetch_playwright_only_async(url: str, timeout: int = 30) -> dict:
+    """Fetch using only the playwright backend (headless Chromium). No fallback."""
+    return await _fetch_and_parse_one(_playwright, url, timeout)
+
+
+# ---------------------------------------------------------------------------
 # CLI smoke test
 # ---------------------------------------------------------------------------
 

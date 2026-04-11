@@ -116,8 +116,24 @@ class NewsDatabase:
         await self._conn.execute("PRAGMA journal_mode=WAL")
         await self._conn.execute("PRAGMA synchronous=NORMAL")
         await self._conn.execute("PRAGMA busy_timeout=60000")
+        await self._migrate()
         await self._conn.commit()
         logger.info(f"✅ NewsDatabase connected: {self._db_path}")
+
+    async def _migrate(self) -> None:
+        """Apply incremental schema migrations (idempotent)."""
+        # enrich_try: 0=never tried, 1=cffi tried, 2=requests tried, 3+=playwright tried
+        try:
+            await self._conn.execute(
+                "ALTER TABLE gm_articles ADD COLUMN enrich_try INTEGER NOT NULL DEFAULT 0"
+            )
+            await self._conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_articles_enrich_try "
+                "ON gm_articles(is_enriched, enrich_try)"
+            )
+            logger.info("✅ Migration: added enrich_try column + index")
+        except Exception:
+            pass  # column already exists — ignore
 
     async def close(self) -> None:
         if self._conn:
@@ -300,24 +316,50 @@ class NewsDatabase:
             row = await cur.fetchone()
         return dict(row) if row else None
 
-    async def fetch_pending_enrichment(self, limit: int) -> list[dict]:
+    async def fetch_pending_enrichment(self, limit: int, enrich_try: int = 0) -> list[dict]:
         """
-        Return up to *limit* articles pending enrichment, newest-first.
-        Uses v_articles_pending_enrichment (covered by idx_articles_enriched_translated).
+        Return up to *limit* articles pending enrichment for the given tier,
+        newest-first.  enrich_try selects the pipeline tier:
+          0 = never tried (cffi tier)
+          1 = cffi failed (requests tier)
+          2 = requests failed (playwright tier)
         """
         async with self._c.execute(
             """
             SELECT a.id_article, a.id_source, a.url, a.author,
                    a.description, a.content, a.urlToImage,
+                   a.enrich_try,
                    s.name AS source_name
-            FROM v_articles_pending_enrichment a
+            FROM gm_articles a
             LEFT JOIN gm_sources s ON s.id_source = a.id_source
+            WHERE a.is_enriched = 0
+              AND a.enrich_try = ?
+              AND a.url IS NOT NULL AND a.url != ''
+              AND (s.fetch_blocked IS NULL OR s.fetch_blocked != 1)
             ORDER BY a.published_at_gmt DESC
             LIMIT ?
             """,
-            (limit,),
+            (enrich_try, limit),
         ) as cur:
             return [dict(r) for r in await cur.fetchall()]
+
+    async def mark_enrich_attempt_failed(self, article_id: str, current_try: int) -> None:
+        """
+        Record that the current enrichment tier failed for *article_id*.
+        Increments enrich_try so the article advances to the next tier.
+        If current_try >= 2 (playwright failed) marks is_enriched=-1 (give up).
+        """
+        if current_try >= 2:
+            await self._c.execute(
+                "UPDATE gm_articles SET is_enriched = -1 WHERE id_article = ?",
+                (article_id,),
+            )
+        else:
+            await self._c.execute(
+                "UPDATE gm_articles SET enrich_try = enrich_try + 1 WHERE id_article = ?",
+                (article_id,),
+            )
+        await self._c.commit()
 
     async def save_enriched_article(
         self,

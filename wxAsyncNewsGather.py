@@ -135,6 +135,17 @@ ENRICH_MISSING_CONTENT = config('ENRICH_MISSING_CONTENT', default=True, cast=boo
 ENRICH_TIMEOUT = int(config('ENRICH_TIMEOUT', default=10))
 ENRICH_CONCURRENCY = int(config('ENRICH_CONCURRENCY', default=32))
 
+# Per-tier enrichment tuning (tiered pipeline: cffi → requests → playwright)
+CFFI_CONCURRENCY    = int(config('CFFI_CONCURRENCY',    default=40))
+CFFI_TIMEOUT        = int(config('CFFI_TIMEOUT',        default=12))
+CFFI_BATCH_SIZE     = int(config('CFFI_BATCH_SIZE',     default=80))
+REQUESTS_CONCURRENCY = int(config('REQUESTS_CONCURRENCY', default=20))
+REQUESTS_TIMEOUT     = int(config('REQUESTS_TIMEOUT',     default=15))
+REQUESTS_BATCH_SIZE  = int(config('REQUESTS_BATCH_SIZE',  default=40))
+PLAYWRIGHT_CONCURRENCY = int(config('PLAYWRIGHT_CONCURRENCY', default=6))
+PLAYWRIGHT_TIMEOUT     = int(config('PLAYWRIGHT_TIMEOUT',     default=30))
+PLAYWRIGHT_BATCH_SIZE  = int(config('PLAYWRIGHT_BATCH_SIZE',  default=12))
+
 # API Server Configuration
 API_SERVER_ENABLED = config('API_SERVER_ENABLED', default=True, cast=bool)
 API_PORT = int(config('NEWS_API_PORT', default=8765))
@@ -657,11 +668,24 @@ class NewsGather():
         # Centralised async CRUD layer; opened in open_async_db() at startup.
         self.db: Optional[NewsDatabase] = None
 
-        # Parallel enrichment worker (started as bg task in run())
-        self._enrichment_worker = EnrichmentWorker(
-            concurrency=ENRICH_CONCURRENCY,
-            timeout=ENRICH_TIMEOUT,
+        # Tiered parallel enrichment workers (cffi → requests → playwright)
+        self._cffi_worker = EnrichmentWorker(
+            concurrency=CFFI_CONCURRENCY,
+            timeout=CFFI_TIMEOUT,
+            backend='cffi',
         )
+        self._requests_worker = EnrichmentWorker(
+            concurrency=REQUESTS_CONCURRENCY,
+            timeout=REQUESTS_TIMEOUT,
+            backend='requests',
+        )
+        self._playwright_worker = EnrichmentWorker(
+            concurrency=PLAYWRIGHT_CONCURRENCY,
+            timeout=PLAYWRIGHT_TIMEOUT,
+            backend='playwright',
+        )
+        # Legacy single-worker alias (used by enrich_article_content helper)
+        self._enrichment_worker = self._cffi_worker
 
         # Set of article IDs currently in the enrichment pipeline; updated by
         # backfill_content() and exposed via GET /api/queues.
@@ -2247,48 +2271,45 @@ class NewsGather():
     
     async def backfill_content(self):
         """
-        Continuously backfill articles that have no content yet.
+        Tiered enrichment pipeline: cffi → requests → playwright.
 
-        Architecture: decoupled producer + consumer.
+        Three independent producer+consumer pairs run concurrently, each with
+        its own semaphore, concurrency, and timeout:
+          Tier 0 (cffi)      — enrich_try=0  fast Chrome-TLS fetcher
+          Tier 1 (requests)  — enrich_try=1  browser-headers fallback
+          Tier 2 (playwright)— enrich_try=2  headless Chromium last resort
 
-        Producer (_backfill_producer):
-          - Fetches pending articles from DB.
-          - Acquires one inflight semaphore slot per article before enqueueing.
-          - Blocks naturally when BACKFILL_BATCH_SIZE articles are in-flight.
-          - As soon as any slot is freed by the consumer it immediately enqueues
-            the next article — no article ever waits for slower ones.
-
-        Consumer (_backfill_consumer):
-          - Drains output_queue continuously.
-          - Writes DB result immediately when each article finishes.
-          - Releases the inflight slot so the producer can enqueue the next one.
-
-        This replaces the old batch-then-drain model where one slow Playwright
-        fetch would block all completed results from being persisted.
+        A failure in tier N increments enrich_try so the article moves to tier
+        N+1 on the next cycle.  Playwright failure marks is_enriched=-1 (done).
         """
         if not BACKFILL_ENABLED:
             self.logger.info("⏭️  Backfill disabled (BACKFILL_ENABLED=False)")
             return
 
         self.logger.info(
-            f"🔁 Backfill started — max_inflight={BACKFILL_BATCH_SIZE}, "
-            f"concurrency={ENRICH_CONCURRENCY}, cycle={BACKFILL_CYCLE_INTERVAL}s"
+            f"🔁 Backfill started — "
+            f"cffi(batch={CFFI_BATCH_SIZE}, concur={CFFI_CONCURRENCY}, t={CFFI_TIMEOUT}s) | "
+            f"requests(batch={REQUESTS_BATCH_SIZE}, concur={REQUESTS_CONCURRENCY}, t={REQUESTS_TIMEOUT}s) | "
+            f"playwright(batch={PLAYWRIGHT_BATCH_SIZE}, concur={PLAYWRIGHT_CONCURRENCY}, t={PLAYWRIGHT_TIMEOUT}s)"
         )
 
-        # Semaphore caps in-flight articles.
-        # Producer acquires before enqueuing; consumer releases after DB write.
-        inflight: asyncio.Semaphore = asyncio.Semaphore(BACKFILL_BATCH_SIZE)
+        # Shared in-flight tracking (keyed per worker instance)
+        cffi_ids:       set[int] = set()
+        requests_ids:   set[int] = set()
+        playwright_ids: set[int] = set()
+        self._backfill_processing_ids = cffi_ids  # expose largest set for /api/queues
 
-        # IDs of articles currently in the enrichment pipeline (enqueued but
-        # not yet consumed).  Prevents re-fetching the same article on the next
-        # DB query while it is still being processed.  Safe to share between
-        # the two coroutines because asyncio is single-threaded.
-        processing_ids: set[int] = set()
-        self._backfill_processing_ids = processing_ids  # expose for /api/queues
+        cffi_inflight       = asyncio.Semaphore(CFFI_BATCH_SIZE)
+        requests_inflight   = asyncio.Semaphore(REQUESTS_BATCH_SIZE)
+        playwright_inflight = asyncio.Semaphore(PLAYWRIGHT_BATCH_SIZE)
 
         await asyncio.gather(
-            self._backfill_producer(inflight, processing_ids),
-            self._backfill_consumer(inflight, processing_ids),
+            self._backfill_producer(cffi_inflight,       cffi_ids,       self._cffi_worker,       enrich_try=0, batch=CFFI_BATCH_SIZE),
+            self._backfill_consumer(cffi_inflight,       cffi_ids,       self._cffi_worker,       enrich_try=0),
+            self._backfill_producer(requests_inflight,   requests_ids,   self._requests_worker,   enrich_try=1, batch=REQUESTS_BATCH_SIZE),
+            self._backfill_consumer(requests_inflight,   requests_ids,   self._requests_worker,   enrich_try=1),
+            self._backfill_producer(playwright_inflight, playwright_ids, self._playwright_worker, enrich_try=2, batch=PLAYWRIGHT_BATCH_SIZE),
+            self._backfill_consumer(playwright_inflight, playwright_ids, self._playwright_worker, enrich_try=2),
             return_exceptions=True,
         )
 
@@ -2296,13 +2317,14 @@ class NewsGather():
         self,
         inflight: asyncio.Semaphore,
         processing_ids: set[int],
+        worker,
+        enrich_try: int,
+        batch: int,
     ) -> None:
         """
-        Fetch pending articles from DB and enqueue them to the EnrichmentWorker.
-
-        Blocks on the semaphore when BACKFILL_BATCH_SIZE articles are already
-        in-flight.  Sleeps BACKFILL_CYCLE_INTERVAL only when the DB returns no
-        new rows.
+        Fetch pending articles for *enrich_try* tier from DB and enqueue them.
+        Blocks on the semaphore when *batch* articles are already in-flight.
+        Sleeps BACKFILL_CYCLE_INTERVAL when the DB returns no new rows.
         """
         while not self.shutdown_flag:
             try:
@@ -2311,15 +2333,15 @@ class NewsGather():
 
                 # ── 1. Fetch a larger slice so that after excluding in-flight
                 #       articles we still have enough work to fill free slots. ─
-                fetch_limit = BACKFILL_BATCH_SIZE + len(processing_ids)
-                rows = await self.db.fetch_pending_enrichment(fetch_limit)
+                fetch_limit = batch + len(processing_ids)
+                rows = await self.db.fetch_pending_enrichment(fetch_limit, enrich_try=enrich_try)
 
                 # Exclude articles already queued / being processed
                 rows = [r for r in rows if r['id_article'] not in processing_ids]
 
                 if not rows:
                     self.logger.info(
-                        f"✅ Backfill: no new articles — "
+                        f"✅ Backfill[{worker.backend}]: no new articles — "
                         f"sleeping {BACKFILL_CYCLE_INTERVAL}s "
                         f"(in-flight={len(processing_ids)})"
                     )
@@ -2327,9 +2349,8 @@ class NewsGather():
                     continue
 
                 self.logger.info(
-                    f"🔁 Backfill: {len(rows)} articles to enqueue "
-                    f"(in-flight={len(processing_ids)}, "
-                    f"max={BACKFILL_BATCH_SIZE})…"
+                    f"🔁 Backfill[{worker.backend}]: {len(rows)} articles to enqueue "
+                    f"(in-flight={len(processing_ids)}, max={batch})…"
                 )
 
                 for row in rows:
@@ -2347,29 +2368,31 @@ class NewsGather():
                         'description': row['description'],
                         'content':     row['content'],
                         'urlToImage':  row['urlToImage'],
+                        '_enrich_try': row.get('enrich_try', enrich_try),
                     }
                     processing_ids.add(article['id_article'])
-                    await self._enrichment_worker.enqueue(article)
+                    await worker.enqueue(article)
 
                 # Yield to let the consumer (and other tasks) run
                 await asyncio.sleep(0)
 
             except asyncio.CancelledError:
-                self.logger.info("🏁 Backfill producer cancelled")
+                self.logger.info(f"🏁 Backfill[{worker.backend}] producer cancelled")
                 return
             except Exception as exc:
-                self.logger.error(f"Backfill producer error: {exc}", exc_info=True)
+                self.logger.error(f"Backfill[{worker.backend}] producer error: {exc}", exc_info=True)
                 await asyncio.sleep(60)
 
     async def _backfill_consumer(
         self,
         inflight: asyncio.Semaphore,
         processing_ids: set[int],
+        worker,
+        enrich_try: int,
     ) -> None:
         """
-        Drain the EnrichmentWorker output_queue and persist results to the DB
-        immediately as each article finishes — no waiting for the whole batch.
-        Releases the inflight semaphore slot so the producer can enqueue more.
+        Drain the worker's output_queue and persist results to the DB.
+        On failure, advances the article to the next tier via mark_enrich_attempt_failed().
         """
         enriched_total = 0
         failed_total = 0
@@ -2378,7 +2401,7 @@ class NewsGather():
             try:
                 try:
                     article_dict, ok = await asyncio.wait_for(
-                        self._enrichment_worker.output_queue.get(),
+                        worker.output_queue.get(),
                         timeout=5.0,
                     )
                 except asyncio.TimeoutError:
@@ -2387,6 +2410,7 @@ class NewsGather():
                 article_id  = article_dict['id_article']
                 source_id   = article_dict.get('id_source', '')
                 source_name = article_dict.get('source_name', '')
+                current_try = article_dict.get('_enrich_try', enrich_try)
 
                 # Remove from tracking set and free the inflight slot
                 processing_ids.discard(article_id)
@@ -2422,13 +2446,14 @@ class NewsGather():
                         fetched_description = raw_desc if len(_desc_text) >= 80 else None
 
                         # If the fetch "succeeded" but returned nothing useful,
-                        # leave the article pending so the pipeline retries it.
+                        # advance to next tier (same as a fetch failure).
                         if not fetched_content and not fetched_description:
                             self.logger.debug(
-                                f"⚠️  Backfill: empty result for [{source_name}] "
-                                f"{article_id} — marking pending for retry"
+                                f"⚠️  Backfill[{worker.backend}]: empty result for [{source_name}] "
+                                f"{article_id} — advancing to next tier"
                             )
-                            enriched_val = 0
+                            await self.db.mark_enrich_attempt_failed(article_id, current_try)
+                            continue
                         else:
                             enriched_val = 1
 
@@ -2451,33 +2476,26 @@ class NewsGather():
                             f"Backfill DB write failed for {article_id}: {exc}"
                         )
                 else:
-                    # Fetch genuinely failed (ok=False from EnrichmentWorker).
-                    # Only mark is_enriched=1 if the article already had real
-                    # content in DB before we tried — meaning it was already
-                    # complete and no new fields were needed.
-                    # If content is missing, mark -1 so the article is not
-                    # silently treated as complete; the translation pipeline
-                    # already handles is_enriched=-1 via v_articles_pending_translation.
-                    has_cont = bool((article_dict.get('content') or '').strip())
-                    is_enriched_val = 1 if has_cont else -1
+                    # Fetch failed → advance article to next tier
                     try:
-                        await self.db.save_enrichment_failure(article_id, has_cont)
+                        await self.db.mark_enrich_attempt_failed(article_id, current_try)
                     except Exception as exc:
                         self.logger.error(f"Backfill failed-update error: {exc}")
                     failed_total += 1
+                    next_tier = 'give up (is_enriched=-1)' if current_try >= 2 else f'tier {current_try + 1}'
                     self.logger.debug(
-                        f"⚠️  Backfill no-data: [{source_name}] {article_id} "
-                        f"(failed={failed_total})"
+                        f"⚠️  Backfill[{worker.backend}] no-data: [{source_name}] {article_id} "
+                        f"→ {next_tier} (failed={failed_total})"
                     )
 
             except asyncio.CancelledError:
                 self.logger.info(
-                    f"🏁 Backfill consumer cancelled "
+                    f"🏁 Backfill[{worker.backend}] consumer cancelled "
                     f"(enriched={enriched_total}, failed={failed_total})"
                 )
                 return
             except Exception as exc:
-                self.logger.error(f"Backfill consumer error: {exc}", exc_info=True)
+                self.logger.error(f"Backfill[{worker.backend}] consumer error: {exc}", exc_info=True)
                 await asyncio.sleep(1)
 
     async def enrich_article_content(self, article_dict, source_name='', source_id=''):
@@ -3194,7 +3212,9 @@ if __name__ == '__main__':
         app.logger.info(f"   • NewsAPI: every {NEWSAPI_CYCLE_INTERVAL}s ({NEWSAPI_CYCLE_INTERVAL//60} min)")
         app.logger.info(f"   • RSS Feeds: every {RSS_CYCLE_INTERVAL}s ({RSS_CYCLE_INTERVAL//60} min)")
         app.logger.info(f"   • MediaStack: every {MEDIASTACK_CYCLE_INTERVAL}s ({MEDIASTACK_CYCLE_INTERVAL//60} min)")
-        app.logger.info(f"   • Backfill content: every {BACKFILL_CYCLE_INTERVAL}s ({BACKFILL_CYCLE_INTERVAL//60} min), batch={BACKFILL_BATCH_SIZE}, concurrency={ENRICH_CONCURRENCY}")
+        app.logger.info(f"   • Backfill content: cffi(batch={CFFI_BATCH_SIZE}, concur={CFFI_CONCURRENCY}, t={CFFI_TIMEOUT}s) "
+                         f"| requests(batch={REQUESTS_BATCH_SIZE}, concur={REQUESTS_CONCURRENCY}, t={REQUESTS_TIMEOUT}s) "
+                         f"| playwright(batch={PLAYWRIGHT_BATCH_SIZE}, concur={PLAYWRIGHT_CONCURRENCY}, t={PLAYWRIGHT_TIMEOUT}s)")
         app.logger.info(f"   • Translate: every {TRANSLATE_CYCLE_INTERVAL}s ({TRANSLATE_CYCLE_INTERVAL//60} min), batch={TRANSLATE_BATCH_SIZE}")
         app.logger.info(f"   • Probe blocked sources: every {PROBE_CYCLE_INTERVAL}s ({PROBE_CYCLE_INTERVAL//60} min)")
 
@@ -3203,7 +3223,9 @@ if __name__ == '__main__':
             loop.create_task(app.collect_newsapi()),
             loop.create_task(app.collect_rss_feeds()),
             loop.create_task(app.collect_mediastack()),
-            loop.create_task(app._enrichment_worker.run()),
+            loop.create_task(app._cffi_worker.run()),
+            loop.create_task(app._requests_worker.run()),
+            loop.create_task(app._playwright_worker.run()),
             loop.create_task(app.backfill_content()),
             loop.create_task(app.backfill_translations()),
             loop.create_task(app.probe_blocked_sources()),
