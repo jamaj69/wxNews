@@ -233,16 +233,19 @@ pyTweeter/
 - **Recursos**:
   - FastAPI server na porta 8765
   - Coleta paralela: NewsAPI, RSS feeds, MediaStack
-  - Backfill de conteúdo de artigos (`backfill_content`)
+  - Backfill de conteúdo de artigos (`backfill_content`) — pipeline em 3 tiers
   - Tradução automática de artigos (`backfill_translations`)
   - Sistema de timezone automático (96.5% cobertura GMT)
   - Blocklist para fontes problemáticas
   - Deduplicação por URL
+  - Cache de stats de fila (atualizado a cada 20s por `_refresh_queue_stats`)
   - REST API com endpoints:
     - GET /api/health - Health check
     - GET /api/articles - Query articles com timestamp
     - GET /api/sources - Lista de fontes
-    - GET /api/stats - Estatísticas de coleta
+    - GET /api/stats - Estatísticas de coleta (total, last_24h, last_hour, total_sources)
+    - GET /api/queues - Stats detalhadas de enriquecimento + tradução + tiers
+    - GET /api/monitor - Stats completas para dashboards externos
     - GET /api/latest_timestamp - Último timestamp
     - GET /docs - Swagger UI interativo
 - **Arquivo de serviço**: `/etc/systemd/system/wxAsyncNewsGather.service`
@@ -282,11 +285,14 @@ pyTweeter/
   ```
 
 #### 💾 predator_news.db (Banco de Dados)
-- **Engine**: SQLite
+- **Engine**: SQLite com WAL mode (permite leituras concorrentes com escritas)
+- **Tamanho actual**: ~2 GB (682k+ artigos, Abr 2026)
 - **Tabelas principais**:
   - `gm_articles`: Artigos coletados
-  - `gm_sources`: Fontes de notícias (481+)
+  - `gm_sources`: Fontes de notícias (1639+)
   - `gm_newsapi_sources`: Fontes do NewsAPI
+  - `gm_blocked_domains`: Domínios bloqueados por erros repetidos
+  - `languages`: Tabela de suporte a idiomas com flag `translate`
 - **Campos importantes em gm_articles**:
   - `title`, `url`, `description`, `author`
   - `published_at`: Timestamp original
@@ -294,6 +300,15 @@ pyTweeter/
   - `source_name`, `id_source`
   - `content`: Conteúdo completo do artigo (quando disponível)
   - `use_timezone`: Flag indicando se usa sistema de timezone
+  - `is_enriched`: 0=pendente, 1=enriquecido, -1=falhou
+  - `enrich_try`: Tier que deve processar (0=cffi, 1=requests, 2=playwright)
+  - `is_translated`: 0=pendente, 1=traduzido, -1=ignorado
+  - `detected_language`: Idioma detectado pelo serviço de linguagem
+- **Índices relevantes**:
+  - `idx_articles_enriched_translated` — (is_enriched, is_translated)
+  - `idx_articles_enrich_try` — (is_enriched, enrich_try)
+  - `idx_stats_translate_pending` — parcial WHERE is_translated=0
+  - `idx_articles_inserted_ms` — inserted_at_ms DESC
 
 #### ⚙️ article_fetcher.py (Orquestrador IPC de conteúdo)
 - **Função**: Orquestrador de busca de conteúdo de artigos via IPC
@@ -619,13 +634,106 @@ beautifulsoup4 (implícito em article_fetcher)
 | wxAsyncNewsReaderv6 | ✅ Ativo | Interface moderna com Notebook e API polling |
 | FastAPI Server | ✅ Port 8765 | Swagger UI em /docs |
 | Sistema Timezone | ✅ 96.5% | Cobertura GMT excelente |
-| Banco de Dados | ✅ 55k+ artigos | SQLite (predator_news.db) |
-| Fontes Ativas | ✅ 480+ | RSS + NewsAPI + MediaStack |
+| Banco de Dados | ✅ 682k+ artigos | SQLite WAL, ~2 GB (news_db.py singleton) |
+| Fontes Ativas | ✅ 1639+ | RSS + NewsAPI + MediaStack |
+| Enriquecimento | ✅ Pipeline 3-tiers | cffi→requests→playwright via enrich_try |
+| Tradução | ✅ Operacional | Google Translate IPC worker |
 | Type Safety | ✅ Clean | Pylance sem erros |
 | Projeto  | ✅ Organizado | docs/ + scripts/timezone/ |
 
 ---
 
-**Última atualização**: 2 de março de 2026
+## 🗂️ news_db.py — Camada de Acesso ao Banco
+
+> Singleton async CRUD. **Toda** acesso ao SQLite vai por aqui.
+
+### Conexões
+```python
+_c    → aiosqlite (read-write) — INSERT/UPDATE/commit exclusivamente
+_rc   → aiosqlite (mode=ro)    — todos os SELECTs; nunca bloqueia escritas
+```
+WAL mode ativado: leituras concorrentes com escritas — sem lock contention.
+
+### Métodos Read-Only (usam `_rc`)
+- `load_sources()`, `load_rss_sources()`
+- `get_source_block_status()`, `get_blocked_sources_for_probe()`
+- `find_by_title_hash()`
+- `fetch_pending_enrichment(limit, enrich_try)` — filtra por tier
+- `fetch_pending_translation(batch_size)`
+- `fetch_articles_missing_gmt(source_id)`
+- `load_blocked_domains()`
+- `fetch_article_stats()` — para /api/stats
+- `fetch_pending_by_language()` — para /api/monitor
+- `fetch_queue_stats()` — queries fundidas, para cache interno
+
+### Cache de Stats
+```python
+db.cached_stats  # QueueStats TypedDict — atualizado a cada 20s
+# Campos: enriched, enrich_pending, enrich_failed,
+#         translated, translate_skipped, translate_pending,
+#         pending_by_tier {enrich_try: count}, refreshed_at
+```
+
+---
+
+## 🔄 Pipeline de Enriquecimento (3 Tiers)
+
+```
+enrich_try=0  → cffi_worker      (Chrome TLS, bypass Cloudflare)
+                  ↓ falhou
+enrich_try=1  → requests_worker  (browser headers)
+                  ↓ falhou
+enrich_try=2  → playwright_worker (Chromium headless)
+```
+
+- `is_enriched=0` + `enrich_try=N` → artigo na fila do tier N
+- `is_enriched=1` → enriquecido com sucesso
+- `is_enriched=-1` → falhou em todos os tiers (ou fonte bloqueada)
+- Cada tier tem semáforo próprio e worker independente
+- Stats por tier disponíveis em `/api/queues` → `enrichment.tiers[]`
+
+---
+
+## 📺 Ferramentas de Monitoramento
+
+### monitor_queues.py
+```bash
+python3 monitor_queues.py [--interval SEGUNDOS] [--history N] [--url URL]
+# Padrão: interval=30s, history=10 amostras
+```
+**Exibe**: totais, enriquecimento por tier (pending/em-voo/resolvido/avançado/descartado),
+tradução, velocidades médias (janela deslizante + sessão completa), ETA de drenagem.
+
+**ETA sessão**: taxa líquida (enriquecidas/min − chegadas/min) × pendentes
+
+**ETA marca-d'água**: âncora reset quando pending *sobe* (burst); fica fixo durante drenagem
+para dar taxa estável. Drain rate = (wm_pending − cur_pend) / elapsed.
+
+### watch_translations.py
+```bash
+python3 watch_translations.py
+```
+Monitora tradução + tiers de enriquecimento via `/api/monitor`.
+
+---
+
+## 📡 Endpoints API
+
+| Endpoint | Cache | Descrição |
+|----------|-------|-----------|
+| `/api/health` | não | Health check |
+| `/api/articles` | não | Artigos por timestamp/source |
+| `/api/sources` | não | Lista de fontes |
+| `/api/stats` | não | total, last_24h, last_hour, total_sources |
+| `/api/queues` | 20s | Enriquecimento + tradução + tiers detalhados |
+| `/api/monitor` | 20s | Stats completas + pending_by_language |
+| `/api/latest_timestamp` | não | Último inserted_at_ms |
+
+O campo `stats_age_s` em `/api/queues` indica há quantos segundos o cache foi atualizado.
+
+---
+
+
+**Última atualização**: 11 de abril de 2026
 **Autor**: jamaj69
 **Repositório**: github.com/jamaj69/wxNews

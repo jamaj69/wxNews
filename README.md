@@ -156,11 +156,17 @@ python wxAsyncNewsReaderv6.py
 
 ### 3. **predator_news.db** (SQLite Database)
 
+**Engine**: SQLite with WAL mode — concurrent reads alongside writes (no lock contention)
+
+**Size**: ~2 GB (682k+ articles)
+
 **Tables**:
 
-- `gm_articles` - Collected news articles (~55k+)
-- `gm_sources` - News source catalog (480+ sources)
-- `gm_newsapi_sources` - NewsAPI source registry
+- `gm_articles` — Collected news articles (~682k)
+- `gm_sources` — News source catalog (1,639+ sources)
+- `gm_newsapi_sources` — NewsAPI source registry
+- `gm_blocked_domains` — Domains blocked after repeated errors
+- `languages` — Language catalog with `translate` flag
 
 **Key Article Fields**:
 
@@ -169,10 +175,17 @@ python wxAsyncNewsReaderv6.py
 - `published_at` - Original timestamp (string)
 - `published_at_gmt` - Normalized GMT timestamp (Unix epoch)
 - `inserted_at_ms` - Millisecond insertion timestamp
-- `content` - Full article text (up to 50,000 chars, all paragraphs)
-- `urlToImage` - Article image URL (extracted from RSS if not provided)
+- `content` - Full article text (up to 50,000 chars)
+- `urlToImage` - Article image URL
 - `id_source` - Source tracking
-- `use_timezone` - Timezone detection flag
+- `is_enriched` — 0=pending, 1=done, -1=failed
+- `enrich_try` — Pipeline tier: 0=cffi, 1=requests, 2=playwright
+- `is_translated` — 0=pending, 1=done, -1=skipped
+- `detected_language` — Language detected by language_service
+
+**Access layer**: `news_db.py` — singleton `NewsDatabase` with two connections:
+- `_c` (read-write) — INSERT/UPDATE/commit only
+- `_rc` (read-only, `mode=ro`) — all SELECTs; never blocks writers
 
 **Database Location**: `/home/jamaj/src/python/pyTweeter/predator_news.db`
 
@@ -299,7 +312,9 @@ journalctl -u wxAsyncNewsGather.service -p err
 | `/api/articles` | GET | Query articles since timestamp |
 | `/api/latest_timestamp` | GET | Get latest insertion timestamp |
 | `/api/sources` | GET | List available sources |
-| `/api/stats` | GET | Collection statistics |
+| `/api/stats` | GET | Collection statistics (total, last_24h, last_hour, total_sources) |
+| `/api/queues` | GET | Enrichment + translation queue stats with per-tier breakdown (cached 20s) |
+| `/api/monitor` | GET | Full stats for dashboards incl. pending_by_language (cached 20s) |
 
 **Example API Call**:
 
@@ -379,16 +394,17 @@ See [docs/USE_TIMEZONE_SYSTEM.md](docs/USE_TIMEZONE_SYSTEM.md) for details.
 
 ### Content Enrichment
 
-- **IPC-based fetcher** with three isolated subprocesses communicating via `multiprocessing.Queue`:
-  - `cffi_worker` — `curl_cffi` Chrome TLS fingerprint (bypasses Cloudflare)
-  - `requests_worker` — `requests` with browser headers (fallback when cffi unavailable)
-  - `playwright_worker` — headless Chromium (final fallback: bot-block 403/406, JS pages)
-- Orchestration logic in `article_fetcher.py` picks the best result automatically
-- Full text extraction up to 50,000 characters (all paragraphs, no hard cap)
-- Image URL extraction from `urlToImage` field or from RSS `<img>` tags in description
-- HTML description parsing and sanitization
-- Automatic deduplication by URL
-- **Backfill task**: retroactively enriches articles with missing content (batch=20, every 30 min)
+- **Tiered IPC backfill pipeline** — three independent workers, each in an isolated subprocess:
+  - Tier 0 — `cffi_worker` (`curl_cffi` Chrome TLS fingerprint, bypasses Cloudflare)
+  - Tier 1 — `requests_worker` (`requests` with browser headers, fallback when cffi fails)
+  - Tier 2 — `playwright_worker` (headless Chromium, final fallback for JS/bot-blocked pages)
+- Tier controlled by `enrich_try` column: 0→cffi, 1→requests, 2→playwright
+- `is_enriched`: 0=pending, 1=done, -1=failed all tiers
+- Per-tier stats exposed in `/api/queues` → `enrichment.tiers[]` (pending, in_flight, resolved, advanced, gave_up)
+- Full text extraction up to 50,000 characters
+- Image URL extraction from `urlToImage` or RSS `<img>` tags
+- HTML sanitization via `html_utils.py`
+- **Backfill task**: runs continuously, 10s sleep between cycles
 
 ### API Features
 
@@ -527,13 +543,15 @@ journalctl -u wxAsyncNewsGather.service -f
 
 ## 📈 Statistics
 
-- **Articles**: ~509,000+
-- **Sources**: 781+
-- **Languages**: English, Portuguese, Spanish, Italian
+- **Articles**: ~682,000+
+- **Sources**: 1,639+
+- **DB size**: ~2 GB (WAL mode)
+- **Languages**: English, Portuguese, Spanish, Italian, and others
 - **Timezone Coverage**: 96.5%
-- **Update Frequency**: 10-30 minutes (depending on source)
-- **API Response Time**: <100ms (typical)
-- **Backfill**: processes 20 articles per batch, every 30 minutes
+- **Enrichment queue**: ~33,000 pending (draining at ~100+/min)
+- **Update Frequency**: 10–30 minutes (depending on source)
+- **API Response Time**: <100ms (stats served from 20s cache)
+- **Backfill**: continuous, 3-tier pipeline (cffi → requests → playwright)
 
 ---
 
