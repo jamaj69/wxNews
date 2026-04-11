@@ -164,46 +164,60 @@ def print_snapshot(
     print(f"    Total no DB  : {_c(BOLD+WHITE, f'{total:>10,}')}  {_sign(d_total) if d_total is not None else ''}  {_rate(r_total)}")
 
     # ── Enriquecimento ───────────────────────────────────────────────────────
+    in_flight_note = f"  ({_c(CYAN, str(in_flight))} em voo)" if in_flight else ""
+    enr_sum = enriched + enr_pend + enr_fail
+    chk_enr_col = GREEN if enr_sum == total else RED
+    chk_enr = "✓" if enr_sum == total else f"✗ soma={enr_sum:,} ≠ total={total:,}"
     print(f"\n  {_c(BOLD, 'ENRIQUECIMENTO')}")
     print(f"    Enriquecidos : {_c(BOLD+GREEN, f'{enriched:>10,}')}  {_sign(d_enr) if d_enr is not None else ''}  {_rate(r_enr)}")
-    print(f"    Pendentes    : {_c(BOLD+YELLOW, f'{enr_pend:>10,}')}  {_sign(d_epend) if d_epend is not None else ''}  {_rate(r_epend)}  ETA {_eta(enr_pend, r_epend)}")
+    print(f"    Pendentes    : {_c(BOLD+YELLOW, f'{enr_pend:>10,}')}  {_sign(d_epend) if d_epend is not None else ''}  {_rate(r_epend)}{in_flight_note}  ETA {_eta(enr_pend, r_epend)}")
     print(f"    Falhas       : {_c(RED, f'{enr_fail:>10,}')}  {_sign(d_efail) if d_efail is not None else ''}  {_rate(r_efail)}")
-    if total > 0:
-        print(f"    Progresso    : {_bar(enriched, total)}")
-    print(f"    Worker fila  : {_c(CYAN, f'{worker_q:>10,}')}   em voo: {_c(CYAN, str(in_flight))}  {_sign(d_ifl) if d_ifl is not None else ''}")
+    print(_c(DIM, f"    {'─'*54}"))
+    print(f"    {'Total DB':<13}: {_c(chk_enr_col+BOLD, f'{enr_sum:>10,}')}  {_c(chk_enr_col, chk_enr)}")
+    if worker_q:
+        print(f"    Fila worker  : {_c(DIM, f'{worker_q:>10,}')}")
 
     # ── Por tier de enriquecimento ───────────────────────────────────────────
     tiers: list[dict] = _get(d, "enrichment", "tiers", default=[])
     if tiers:
         _BACKEND_COLOR = {'cffi': CYAN, 'requests': MAGENTA, 'playwright': YELLOW}
-        print(f"\n  {_c(BOLD, 'TIERS DE ENRIQUECIMENTO')}")
-        hdr = f"    {'Backend':<12}  {'Pendente':>9}  {'Em Voo':>7}  {'Resolvido':>9}  {'Avançado':>9}  {'Descartado':>10}"
+        print(f"\n  {_c(BOLD, 'TIERS DE ENRIQUECIMENTO')}  {_c(DIM, '(acumulado desde início do serviço)')}")
+        hdr = f"    {'Backend':<12}  {'Pendente':>9}  {'Resolvido':>9}  {'Avançado':>9}  {'Desistiu':>9}"
         print(_c(DIM, hdr))
-        print(_c(DIM, "    " + "─" * 66))
+        print(_c(DIM, "    " + "─" * 53))
         for tier in tiers:
             backend  = tier.get("backend", "?")
             col      = _BACKEND_COLOR.get(backend, WHITE)
             pending  = tier.get("pending",  0)
-            in_fl    = tier.get("in_flight", 0)
             resolved = tier.get("resolved", 0)
             advanced = tier.get("advanced", 0)
             gave_up  = tier.get("gave_up",  0)
+            col_p = RED if backend.startswith("stale") else YELLOW
             print(
                 f"    {_c(col+BOLD, f'{backend:<12}')}"
-                f"  {_c(YELLOW, f'{pending:>9,}')}"
-                f"  {_c(CYAN,   f'{in_fl:>7,}')}"
+                f"  {_c(col_p,  f'{pending:>9,}')}"
                 f"  {_c(GREEN,  f'{resolved:>9,}')}"
                 f"  {_c(DIM,    f'{advanced:>9,}')}"
-                f"  {_c(RED,    f'{gave_up:>10,}')}"
+                f"  {_c(RED,    f'{gave_up:>9,}')}"
             )
+        tier_pend_sum = sum(t.get("pending", 0) for t in tiers)
+        print(_c(DIM, f"    {'─'*53}"))
+        chk_col = GREEN if tier_pend_sum == enr_pend else RED
+        chk_msg = "✓" if tier_pend_sum == enr_pend else f"✗ tiers={tier_pend_sum:,} ≠ enrich_pending={enr_pend:,}"
+        print(f"    {'Total tiers':<12}  {_c(chk_col+BOLD, f'{tier_pend_sum:>9,}')}  {_c(chk_col, chk_msg)}")
 
     # ── Tradução ─────────────────────────────────────────────────────────────
+    t_not_eligible = max(0, total - translated - t_skip - t_pend)
+    tran_sum = translated + t_skip + t_pend + t_not_eligible
+    chk_tran_col = GREEN if tran_sum == total else RED
+    chk_tran = "✓" if tran_sum == total else f"✗ soma={tran_sum:,} ≠ total={total:,}"
     print(f"\n  {_c(BOLD, 'TRADUÇÃO')}")
     print(f"    Traduzidos   : {_c(BOLD+GREEN, f'{translated:>10,}')}  {_sign(d_transl) if d_transl is not None else ''}  {_rate(r_transl)}")
     print(f"    Ignorados    : {_c(DIM, f'{t_skip:>10,}')}  {_sign(d_tskip) if d_tskip is not None else ''}  {_rate(r_tskip)}")
     print(f"    Pendentes    : {_c(BOLD+YELLOW, f'{t_pend:>10,}')}  {_sign(d_tpend) if d_tpend is not None else ''}  {_rate(r_tpend)}  ETA {_eta(t_pend, r_tpend)}")
-    if total > 0:
-        print(f"    Progresso    : {_bar(translated, total)}")
+    print(f"    Não elegível : {_c(DIM, f'{t_not_eligible:>10,}')}  {_c(DIM, '(aguardam enriquecimento ou idioma sem tradução)')}")
+    print(_c(DIM, f"    {'─'*54}"))
+    print(f"    {'Total DB':<13}: {_c(chk_tran_col+BOLD, f'{tran_sum:>10,}')}  {_c(chk_tran_col, chk_tran)}")
 
     # ── Velocidades: janela recente + sessão completa ────────────────────────
     def _span_rate(a: "Sample", b: "Sample", keys: list[str]) -> float | None:

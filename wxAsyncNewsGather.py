@@ -700,6 +700,24 @@ class NewsGather():
         self._tier_resolved:  dict[str, int] = {'cffi': 0, 'requests': 0, 'playwright': 0}
         self._tier_advanced:  dict[str, int] = {'cffi': 0, 'requests': 0, 'playwright': 0}
         self._tier_gave_up:   dict[str, int] = {'cffi': 0, 'requests': 0, 'playwright': 0}
+
+        # RSS cycle progress — updated by collect_rss_feeds / _rss_fetcher / _rss_consumer
+        # All fields are safe to mutate without locks (single-threaded asyncio).
+        self._rss_cycle: dict = {
+            'cycle':        0,       # current cycle number
+            'started_at':   None,    # time.time() when cycle started
+            'total':        0,       # Stage-1 tasks dispatched this cycle
+            'running':      0,       # Stage-1 fetchers currently under semaphore
+            'done':         0,       # Stage-1 fetchers that finished (ok+err)
+            'queued':       0,       # feeds handed to the Stage-2 queue successfully
+            'processed':    0,       # Stage-2 consumer completions
+            'ok':           0,       # feeds with articles successfully inserted
+            'err_http':     0,       # HTTP status != 200
+            'err_content':  0,       # bad content-type or parse failure
+            'err_timeout':  0,       # fetch timeout fired
+            'articles_new': 0,       # new articles inserted this cycle
+            'sleeping_until': None,  # time.time() when next cycle will start
+        }
     
     async def open_async_db(self) -> None:
         """
@@ -1715,264 +1733,323 @@ class NewsGather():
                     continue
                 
                 self.logger.info(f"Found {len(rss_sources)} RSS sources to process")
-                
-                # Process feeds with semaphore for concurrency control
-                semaphore = asyncio.Semaphore(RSS_MAX_CONCURRENT)
-                
+
+                # Reset per-cycle counters
+                self._rss_cycle.update({
+                    'cycle':        cycle_count,
+                    'started_at':   time.time(),
+                    'total':        len(rss_sources),
+                    'running':      0,
+                    'done':         0,
+                    'queued':       0,
+                    'processed':    0,
+                    'ok':           0,
+                    'err_http':     0,
+                    'err_content':  0,
+                    'err_timeout':  0,
+                    'articles_new': 0,
+                    'sleeping_until': None,
+                })
+
+                # Producer-consumer pipeline:
+                #   Stage 1 (_rss_fetcher)  — RSS_MAX_CONCURRENT tasks, each does HTTP +
+                #     feedparser only, then drops (source, feed) into feed_queue.
+                #     The semaphore slot is released as soon as bytes are parsed.
+                #   Stage 2 (_rss_consumer) — single task drains feed_queue, runs all DB
+                #     work (dedup, normalize, insert) serially → no write contention.
+                semaphore  = asyncio.Semaphore(RSS_MAX_CONCURRENT)
+                feed_queue = asyncio.Queue()
+
                 async with aiohttp.ClientSession() as session:
-                    # Process in batches
-                    for i in range(0, len(rss_sources), RSS_BATCH_SIZE):
-                        if self.shutdown_flag:
-                            break
-                        
-                        batch = rss_sources[i:i+RSS_BATCH_SIZE]
-                        self.logger.info(f"Processing RSS batch {i//RSS_BATCH_SIZE + 1} ({len(batch)} feeds)...")
-                        
-                        tasks = [
-                            self.process_rss_feed_with_semaphore(session, source, semaphore)
-                            for source in batch
-                        ]
-                        await asyncio.gather(*tasks, return_exceptions=True)
-                
+                    self.logger.info(
+                        f"📡 Dispatching all {len(rss_sources)} RSS feeds "
+                        f"(max {RSS_MAX_CONCURRENT} concurrent, producer-consumer pipeline)..."
+                    )
+                    consumer_task = asyncio.create_task(self._rss_consumer(feed_queue))
+                    tasks = [
+                        self._rss_fetcher(session, source, semaphore, feed_queue)
+                        for source in rss_sources
+                    ]
+                    await asyncio.gather(*tasks, return_exceptions=True)
+                    # Sentinel: tell consumer all fetchers have finished
+                    await feed_queue.put(None)
+                    await consumer_task
+
+                rc = self._rss_cycle
+                self.logger.info(
+                    f"📡 RSS cycle {cycle_count} complete — "
+                    f"ok={rc['ok']} new_articles={rc['articles_new']} "
+                    f"http_err={rc['err_http']} content_err={rc['err_content']} "
+                    f"timeout={rc['err_timeout']}"
+                )
+
                 if not self.shutdown_flag:
+                    sleep_until = time.time() + RSS_CYCLE_INTERVAL
+                    self._rss_cycle['sleeping_until'] = sleep_until
                     self.logger.info(f"RSS cycle {cycle_count} complete. Sleeping {RSS_CYCLE_INTERVAL}s...")
                     # Reload sources to pick up any database changes
                     await self.reload_sources()
                     await asyncio.sleep(RSS_CYCLE_INTERVAL)
+                    self._rss_cycle['sleeping_until'] = None
         except asyncio.CancelledError:
             self.logger.info("📡 RSS collector cancelled")
         finally:
             self.logger.info("📡 RSS collector stopped")
     
-    async def process_rss_feed_with_semaphore(self, session, source, semaphore):
+    async def _rss_fetcher(self, session, source, semaphore, queue):
         """
-        Process RSS feed with semaphore control and a hard per-feed timeout.
-        The hard timeout (RSS_TIMEOUT * 3) guarantees the batch progresses even
-        if a feed TCP-hangs beyond the inner aiohttp/curl timeouts.
+        Stage 1 — HTTP fetch + feedparser parse only.
+        Holds the semaphore slot just long enough to get bytes off the wire
+        and run feedparser. The queue.put() is intentionally OUTSIDE the
+        semaphore so a slow consumer never blocks a network slot.
         """
+        if self.shutdown_flag:
+            return
+        parsed_feed = None
         async with semaphore:
+            if self.shutdown_flag:
+                return
+            self._rss_cycle['running'] += 1
             try:
-                return await asyncio.wait_for(
-                    self.process_rss_feed(session, source),
-                    timeout=RSS_TIMEOUT * 3
+                status, content_type, content = await self._fetch_rss_content(
+                    session, source['url'], RSS_TIMEOUT
                 )
+                if status != 200:
+                    self._rss_cycle['err_http'] += 1
+                    self.logger.warning(f"❌ [{source['name']}] HTTP {status}")
+                    return
+                if (not self._looks_like_feed_content_type(content_type)
+                        and not self._looks_like_feed_body(content)):
+                    self._rss_cycle['err_content'] += 1
+                    self.logger.warning(f"❌ [{source['name']}] Invalid content type: {content_type}")
+                    return
+                try:
+                    _loop = asyncio.get_event_loop()
+                    feed = await _loop.run_in_executor(None, feedparser.parse, content)
+                except Exception as parse_err:
+                    self._rss_cycle['err_content'] += 1
+                    self.logger.debug(f"⚠️  [{source['name']}] Parser error: {parse_err}")
+                    return
+                if not feed.entries:
+                    self.logger.debug(f"⚠️  [{source['name']}] No entries found")
+                    return
+                parsed_feed = (source, feed)
             except asyncio.TimeoutError:
-                self.logger.warning(
-                    f"⏱️  [{source['name']}] Hard timeout ({RSS_TIMEOUT * 3}s) — skipping feed"
-                )
-    
-    async def process_rss_feed(self, session, source):
-        """
-        Fetch and process a single RSS feed.
-        """
-        source_id = source['id']
-        source_name = source['name']
-        rss_url = source['url']
-        
-        try:
-            status, content_type, content = await self._fetch_rss_content(session, rss_url, RSS_TIMEOUT)
-            if status != 200:
-                self.logger.warning(f"❌ [{source_name}] HTTP {status}")
-                return
-            if not self._looks_like_feed_content_type(content_type) and not self._looks_like_feed_body(content):
-                self.logger.warning(f"❌ [{source_name}] Invalid content type: {content_type}")
-                return
+                self._rss_cycle['err_timeout'] += 1
+                self.logger.warning(f"⏱️  [{source['name']}] Fetch timeout ({RSS_TIMEOUT}s)")
+            except Exception as e:
+                self.logger.debug(f"❌ [{source['name']}] Fetch error: {str(e)[:80]}")
+            finally:
+                self._rss_cycle['running'] -= 1
+                self._rss_cycle['done']    += 1
+        # Semaphore already released — queue.put() can never block a network slot
+        if parsed_feed is not None:
+            await queue.put(parsed_feed)
+            self._rss_cycle['queued'] += 1
+            # Yield to the event loop so the consumer can run concurrently with
+            # ongoing fetchers.  queue.put() on an unbounded queue never yields
+            # by itself, so without this the consumer only drains after Stage 1
+            # fully completes.
+            await asyncio.sleep(0)
 
+    async def _rss_consumer(self, queue):
+        """
+        Stage 2 — sequentially processes feeds enqueued by _rss_fetcher.
+        Handles timezone detection, deduplication, language detection, DB inserts.
+        A single consumer serialises all DB writes, eliminating write contention.
+        """
+        while True:
+            item = await queue.get()
+            queue.task_done()
+            if item is None:  # sentinel — all fetchers finished
+                break
+            if self.shutdown_flag:
+                self._rss_cycle['processed'] += 1
+                continue
+            source, feed = item
             try:
-                _loop = asyncio.get_event_loop()
-                feed = await _loop.run_in_executor(None, feedparser.parse, content)
-            except (AssertionError, ValueError, Exception) as parse_err:
-                # feedparser can raise AssertionError on malformed HTML/XML in marked sections
-                self.logger.debug(f"⚠️  [{source_name}] Parser error (malformed feed): {parse_err}")
-                return
-                
-            if not feed.entries:
-                self.logger.debug(f"⚠️  [{source_name}] No entries found")
-                return
-            
-            self.logger.debug(f"📥 [{source_name}] Received {len(feed.entries)} entries")
-            
-            # PHASE 1: Análise de fuso horário ANTES de processar artigos
-            # Coleta todos os timestamps para detectar se o fuso está incorreto
-            all_timestamps = []
-            for entry in feed.entries:
-                published = as_text(entry.get('published', entry.get('updated', '')))
-                if published:
-                    all_timestamps.append(published)
-            
-            # Detecta se há problema de fuso horário analisando todos os timestamps
-            if all_timestamps and source_id in self.sources:
-                current_use_tz = self.sources[source_id].get('use_timezone', 0)
-                
-                # Só fazer auto-correção se use_timezone não estiver manualmente configurado
-                if current_use_tz == 0:
-                    corrected_tz, should_enable = detect_timezone_from_articles(
-                        all_timestamps, 
-                        source_name=source_name,
-                        logger=self.logger
-                    )
-                    
-                    if corrected_tz and should_enable:
-                        # Atualizar banco de dados ANTES de processar artigos
-                        try:
-                            async with aiosqlite.connect(self.db_path) as db:
-                                await db.execute(
-                                    'UPDATE gm_sources SET timezone = ?, use_timezone = 1 WHERE id_source = ?',
-                                    (corrected_tz, source_id)
-                                )
-                                await db.commit()
-                            
-                            # Atualizar cache em memória
-                            self.sources[source_id]['timezone'] = corrected_tz
-                            self.sources[source_id]['use_timezone'] = 1
-                            
-                            self.logger.info(
-                                f"✅ [{source_name}] Fuso corrigido para {corrected_tz}, use_timezone=1. "
-                                f"Artigos serão inseridos com timestamps corretos."
-                            )
-                        except Exception as e:
-                            self.logger.error(f"Failed to update timezone for {source_name}: {e}")
-            
-            # PHASE 2: Processar artigos com fuso já corrigido
-            articles_inserted = 0
-            articles_skipped = 0
-            detected_timezones = []  # Track detected timezones from all articles
-            
-            for entry in feed.entries:
-                    # Extract article data
-                    title = as_text(entry.get('title', ''))
-                    # Clean title: normalize whitespace
-                    if title:
-                        title = ' '.join(title.split())
-                    url = as_text(entry.get('link', ''))
-                    description = as_text(entry.get('summary', entry.get('description', '')))
-                    author = as_text(entry.get('author', ''))
-                    published = as_text(entry.get('published', entry.get('updated', '')))  # Original with timezone
-                    
-                    if not title or not url:
-                        continue
-                    
-                    # Create normalized UTC version (article timezone has priority over source timezone)
-                    source_tz = source.get('timezone')
-                    # Use source timezone only if use_timezone flag is enabled
-                    use_tz = source.get('use_timezone', 0)
-                    published_gmt, detected_tz = normalize_timestamp_to_utc(published, source_tz, use_source_timezone=(use_tz == 1))
-                    
-                    # Track detected timezone for consistency check
-                    if detected_tz:
-                        detected_timezones.append(detected_tz)
-                    
-                    # Generate article key with original timestamp
-                    article_key = url_encode(title + url + published)
-                    
-                    # Sanitize HTML description
-                    clean_description = sanitize_html_content(description) if description else ''
-                    
-                    # Extract first image from description and remove it from HTML to avoid duplicates
-                    extracted_image_url, clean_description = extract_and_remove_first_image(clean_description) if clean_description else (None, clean_description)
-                    
-                    # Language detection — prefer declared source/feed language over
-                    # automatic detection.  Short titles (e.g. author names, column
-                    # headers) are frequently mis-classified by langdetect, and many
-                    # feeds already declare their language either in the DB source
-                    # record or in the RSS <language> element.
-                    #
-                    # Priority:
-                    #   1. gm_sources.language (manually/auto set when source created)
-                    #   2. <language> element in the RSS feed itself
-                    #   3. Automatic langdetect (fallback)
-                    _source_declared_lang = (source.get('language') or '').strip().lower()
-                    if not _source_declared_lang:
-                        # Try the RSS feed's own <language> tag (e.g. "pt-br" → "pt")
-                        _feed_lang_raw = (feed.feed.get('language') or '').strip().lower()
-                        _source_declared_lang = _feed_lang_raw[:2] if _feed_lang_raw else ''
+                await self._process_feed_entries(source, feed)
+            except Exception as e:
+                self.logger.error(f"❌ RSS consumer [{source['name']}]: {e}")
+            finally:
+                self._rss_cycle['processed'] += 1
 
-                    if _source_declared_lang:
-                        # Source language is known — use it directly with full confidence.
-                        detected_lang, lang_confidence = _source_declared_lang, 1.0
-                    else:
-                        detected_lang, lang_confidence = detect_article_language(title, clean_description)
+    async def _process_feed_entries(self, source, feed):
+        """
+        Stage 2 processing: timezone correction, dedup check, language detection,
+        timestamp normalisation, DB insert for all entries of a parsed RSS feed.
+        """
+        source_id   = source['id']
+        source_name = source['name']
+        _loop       = asyncio.get_event_loop()
 
-                    # Create article object
-                    new_article = {
-                        'id_article': article_key,
-                        'id_source': source_id,
-                        'author': author,
-                        'title': title,
-                        'description': clean_description,
-                        'url': url,
-                        'urlToImage': extracted_image_url or '',
-                        'publishedAt': published,  # Original with timezone
-                        'published_at_gmt': published_gmt,  # Normalized UTC
-                        'content': '',
-                        'inserted_at_ms': int(time.time() * 1000),  # Insertion timestamp in ms
-                        'detected_language': detected_lang,
-                        'language_confidence': lang_confidence,
-                        'is_enriched': 0,
-                        'title_hash': _make_title_hash(title),
-                    }
+        self.logger.debug(f"📥 [{source_name}] Processing {len(feed.entries)} entries")
 
-                    t_hash = new_article['title_hash']
-                    if t_hash:
-                        existing = await self.db.find_by_title_hash(t_hash)
-                        if existing:
-                            new_article['author']      = existing['author']      or new_article['author']
-                            new_article['description'] = existing['description'] or new_article['description']
-                            new_article['content']     = existing['content']
-                            new_article['urlToImage']  = existing['urlToImage']  or new_article['urlToImage']
-                            new_article['is_enriched'] = 1
+        # PHASE 1: Análise de fuso horário ANTES de processar artigos
+        all_timestamps = []
+        for entry in feed.entries:
+            published = as_text(entry.get('published', entry.get('updated', '')))
+            if published:
+                all_timestamps.append(published)
 
-                    # Inline enrichment intentionally removed from RSS pipeline:
-                    # asyncio.wait_for (Python 3.11) awaits playwright cleanup on cancel,
-                    # keeping the semaphore slot occupied 3+ minutes per timed-out feed.
-                    # The backfill worker (_backfill_consumer) handles is_enriched=0 articles.
-
-                    # Insert article
+        if all_timestamps and source_id in self.sources:
+            current_use_tz = self.sources[source_id].get('use_timezone', 0)
+            if current_use_tz == 0:
+                corrected_tz, should_enable = await _loop.run_in_executor(
+                    None,
+                    detect_timezone_from_articles,
+                    all_timestamps,
+                    source_name,
+                    self.logger,
+                )
+                if corrected_tz and should_enable:
                     try:
-                        if await self.db.insert_article(new_article):
-                            articles_inserted += 1
-                            if articles_inserted <= 5:  # Log first 5
-                                self.logger.debug(f"  ✅ [{source_name}] {title[:60]}...")
-                        else:
-                            articles_skipped += 1
+                        await self.db.update_source_timezone_and_enable(source_id, corrected_tz)
+                        self.sources[source_id]['timezone']     = corrected_tz
+                        self.sources[source_id]['use_timezone'] = 1
+                        self.logger.info(
+                            f"✅ [{source_name}] Fuso corrigido para {corrected_tz}, use_timezone=1. "
+                            f"Artigos serão inseridos com timestamps corretos."
+                        )
                     except Exception as e:
-                        self.logger.error(f"Failed to insert RSS article: {e}")
-                
-            if articles_inserted > 0:
-                self.logger.debug(f"✅ [{source_name}] {articles_inserted} new, {articles_skipped} existing")
-            else:
-                self.logger.debug(f"⏭️  [{source_name}] All {articles_skipped} articles already exist")
-            
-            # Check if all articles in the feed have the same timezone
-            # If yes, and it's different from source timezone, update it
-            # Only do automatic backfill if use_timezone is enabled for this source
-            if detected_timezones:
-                unique_timezones = set(detected_timezones)
-                if len(unique_timezones) == 1:
-                    # All articles have the same timezone
-                    consistent_tz = detected_timezones[0]
-                    source_tz = source.get('timezone')
-                    use_tz = source.get('use_timezone', 0)
-                    
-                    if source_tz != consistent_tz:
-                        # Update source timezone with the consistent value from articles
-                        self.logger.info(f"🕐 [{source_name}] All {len(detected_timezones)} articles have timezone {consistent_tz}, updating source")
-                        await self.update_source_timezone(source_id, consistent_tz)
-                        
-                        # Only backfill if use_timezone is enabled (manually confirmed sources)
-                        if use_tz == 1:
-                            self.logger.info(f"🔄 [{source_name}] use_timezone=1, backfilling historical articles")
-                            await self.backfill_missing_gmt_for_source(source_id, consistent_tz)
-                        else:
-                            self.logger.info(f"⏸️  [{source_name}] use_timezone=0, skipping automatic backfill (needs manual confirmation)")
-                elif len(unique_timezones) > 1:
-                    # Multiple different timezones detected - log for debugging
-                    self.logger.debug(f"⚠️  [{source_name}] Multiple timezones in feed: {unique_timezones}")
-                    
-        except asyncio.TimeoutError:
-            self.logger.warning(f"⏱️  [{source_name}] Timeout after {RSS_TIMEOUT}s")
+                        self.logger.error(f"Failed to update timezone for {source_name}: {e}")
+
+        # Re-read timezone from self.sources (Phase 1 may have just updated it)
+        live_src  = self.sources.get(source_id, {})
+        source_tz = live_src.get('timezone')
+        use_tz    = live_src.get('use_timezone', 0)
+
+        # PHASE 2: Processar artigos com fuso já corrigido
+        batch              = []
+        detected_timezones = []
+
+        # Pre-process all entries in a thread (all CPU-bound/sync work in one shot)
+        def _prepare_entries(entries, src_tz, use_source_tz, src_lang, feed_lang):
+            prepared = []
+            for entry in entries:
+                title = as_text(entry.get('title', ''))
+                if title:
+                    title = ' '.join(title.split())
+                url         = as_text(entry.get('link', ''))
+                description = as_text(entry.get('summary', entry.get('description', '')))
+                author      = as_text(entry.get('author', ''))
+                published   = as_text(entry.get('published', entry.get('updated', '')))
+
+                if not title or not url:
+                    continue
+
+                published_gmt, detected_tz = normalize_timestamp_to_utc(
+                    published, src_tz, use_source_timezone=use_source_tz
+                )
+                clean_description = sanitize_html_content(description) if description else ''
+                extracted_image_url, clean_description = (
+                    extract_and_remove_first_image(clean_description)
+                    if clean_description else (None, clean_description)
+                )
+                if src_lang:
+                    detected_lang, lang_confidence = src_lang, 1.0
+                else:
+                    detected_lang, lang_confidence = detect_article_language(title, clean_description)
+
+                prepared.append({
+                    'title':             title,
+                    'url':               url,
+                    'author':            author,
+                    'published':         published,
+                    'published_gmt':     published_gmt,
+                    'detected_tz':       detected_tz,
+                    'clean_description': clean_description,
+                    'image_url':         extracted_image_url or '',
+                    'detected_lang':     detected_lang,
+                    'lang_confidence':   lang_confidence,
+                })
+            return prepared
+
+        _source_declared_lang = (source.get('language') or '').strip().lower()
+        if not _source_declared_lang:
+            _feed_lang_raw = (feed.feed.get('language') or '').strip().lower()
+            _source_declared_lang = _feed_lang_raw[:2] if _feed_lang_raw else ''
+
+        prepared_entries = await _loop.run_in_executor(
+            None, _prepare_entries,
+            feed.entries, source_tz, (use_tz == 1), _source_declared_lang, _source_declared_lang,
+        )
+
+        now_ms = int(time.time() * 1000)
+        for p in prepared_entries:
+            if p['detected_tz']:
+                detected_timezones.append(p['detected_tz'])
+            article_key = url_encode(p['title'] + p['url'] + p['published'])
+            batch.append({
+                'id_article':          article_key,
+                'id_source':           source_id,
+                'author':              p['author'],
+                'title':               p['title'],
+                'description':         p['clean_description'],
+                'url':                 p['url'],
+                'urlToImage':          p['image_url'],
+                'publishedAt':         p['published'],
+                'published_at_gmt':    p['published_gmt'],
+                'content':             '',
+                'inserted_at_ms':      now_ms,
+                'detected_language':   p['detected_lang'],
+                'language_confidence': p['lang_confidence'],
+                'is_enriched':         0,
+                'title_hash':          _make_title_hash(p['title']),
+            })
+
+        # Bulk title-hash lookup — one query instead of N individual reads
+        all_hashes = [a['title_hash'] for a in batch if a['title_hash']]
+        enriched_map = await self.db.find_by_title_hash_bulk(all_hashes)
+        for article in batch:
+            existing = enriched_map.get(article['title_hash'])
+            if existing:
+                article['author']      = existing['author']      or article['author']
+                article['description'] = existing['description'] or article['description']
+                article['content']     = existing['content']
+                article['urlToImage']  = existing['urlToImage']  or article['urlToImage']
+                article['is_enriched'] = 1
+
+        # Insert in batches of 10 — balances transaction overhead vs. lock hold time
+        BATCH_SIZE        = 10
+        articles_inserted = 0
+        articles_total    = len(batch)
+        try:
+            for i in range(0, articles_total, BATCH_SIZE):
+                chunk = batch[i:i + BATCH_SIZE]
+                articles_inserted += await self.db.insert_articles_batch(chunk)
+            articles_skipped = articles_total - articles_inserted
         except Exception as e:
-            self.logger.error(f"❌ [{source_name}] Error: {str(e)[:100]}")
+            self.logger.error(f"Failed to batch-insert RSS articles [{source_name}]: {e}")
+            articles_inserted = 0
+            articles_skipped  = articles_total
+
+        self._rss_cycle['ok']           += 1
+        self._rss_cycle['articles_new'] += articles_inserted
+        if articles_inserted > 0:
+            self.logger.debug(f"✅ [{source_name}] {articles_inserted} new, {articles_skipped} existing")
+        else:
+            self.logger.debug(f"⏭️  [{source_name}] All {articles_skipped} articles already exist")
+
+        # Timezone consistency check across all entries
+        if detected_timezones:
+            unique_timezones = set(detected_timezones)
+            if len(unique_timezones) == 1:
+                consistent_tz = detected_timezones[0]
+                live_src = self.sources.get(source_id, {})
+                if live_src.get('timezone') != consistent_tz:
+                    self.logger.info(
+                        f"🕐 [{source_name}] All {len(detected_timezones)} articles have "
+                        f"timezone {consistent_tz}, updating source"
+                    )
+                    await self.update_source_timezone(source_id, consistent_tz)
+                    if live_src.get('use_timezone', 0) == 1:
+                        self.logger.info(f"🔄 [{source_name}] use_timezone=1, backfilling historical articles")
+                        await self.backfill_missing_gmt_for_source(source_id, consistent_tz)
+                    else:
+                        self.logger.info(f"⏸️  [{source_name}] use_timezone=0, skipping automatic backfill")
+            elif len(unique_timezones) > 1:
+                self.logger.debug(f"⚠️  [{source_name}] Multiple timezones in feed: {unique_timezones}")
     
     async def collect_mediastack(self):
         """
@@ -2346,6 +2423,15 @@ class NewsGather():
             try:
                 # ── 0. Bulk-close articles from blocked sources ────────────
                 await self.db.bulk_close_blocked_source_articles()
+                # Defensive: articles with enrich_try>2 and is_enriched=0 are
+                # unreachable by any tier (fetch_pending_enrichment guards
+                # enrich_try<=2); give up on them so they don't skew stats.
+                n_gave_up = await self.db.bulk_give_up_exhausted_articles()
+                if n_gave_up:
+                    self.logger.warning(
+                        f"♻️  Backfill[{worker.backend}]: gave up on "
+                        f"{n_gave_up} articles with enrich_try>2"
+                    )
 
                 # ── 1. Fetch a larger slice so that after excluding in-flight
                 #       articles we still have enough work to fill free slots. ─
@@ -2940,6 +3026,35 @@ class NewsGather():
         # Local alias so nested async handlers inherit the narrowed type
         _HTTPException = HTTPException
 
+        def _rss_progress(g) -> dict:
+            """Return a serialisable snapshot of the current RSS cycle state."""
+            rc  = g._rss_cycle
+            now = time.time()
+            started        = rc['started_at']
+            sleeping_until = rc['sleeping_until']
+            total          = rc['total']
+            done           = rc['done']
+            return {
+                'cycle':      rc['cycle'],
+                'status':     'sleeping' if sleeping_until else ('running' if started else 'idle'),
+                'started_at': time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime(started)) if started else None,
+                'elapsed_s':  round(now - started, 1) if started and not sleeping_until else None,
+                # Stage 1 — fetch
+                'total':      total,
+                'pending':    max(0, total - done),
+                'running':    rc['running'],
+                'done':       done,
+                'err_http':   rc['err_http'],
+                'err_content': rc['err_content'],
+                'err_timeout': rc['err_timeout'],
+                # Stage 2 — process
+                'queued':     rc['queued'],
+                'processed':  rc['processed'],
+                'ok':         rc['ok'],
+                'articles_new': rc['articles_new'],
+                'next_cycle_in_s': round(sleeping_until - now, 1) if sleeping_until and sleeping_until > now else None,
+            }
+
         @api_app.get("/")
         async def root():
             return {
@@ -3082,17 +3197,20 @@ class NewsGather():
 
                 _TIER_NAMES = {0: 'cffi', 1: 'requests', 2: 'playwright'}
                 _fl_map = {'cffi': cffi_fl, 'requests': requests_fl, 'playwright': playwright_fl}
+                # Include any overflow tiers (enrich_try > 2) so the monitor
+                # can show that enrich_pending and sum(tier.pending) agree.
+                all_tier_keys = sorted(set(list(range(3)) + list(pending_by_tier.keys())))
                 tiers = [
                     {
                         "tier":      t,
-                        "backend":   _TIER_NAMES.get(t, f"tier{t}"),
+                        "backend":   _TIER_NAMES.get(t, f"stale(try={t})"),
                         "pending":   pending_by_tier.get(t, 0),
                         "in_flight": _fl_map.get(_TIER_NAMES.get(t, ''), 0),
                         "resolved":  gather._tier_resolved.get(_TIER_NAMES.get(t, ''), 0),
                         "advanced":  gather._tier_advanced.get(_TIER_NAMES.get(t, ''), 0),
                         "gave_up":   gather._tier_gave_up.get(_TIER_NAMES.get(t, ''), 0),
                     }
-                    for t in range(3)
+                    for t in all_tier_keys
                 ]
 
                 return {
@@ -3117,6 +3235,7 @@ class NewsGather():
                     "translation": {
                         "pending_db": s["translate_pending"],
                     },
+                    "rss": _rss_progress(gather),
                 }
             except Exception as e:
                 raise _HTTPException(status_code=500, detail=str(e))
@@ -3151,17 +3270,18 @@ class NewsGather():
                 pending_by_tier = s.get('pending_by_tier', {})
                 _TIER_NAMES = {0: 'cffi', 1: 'requests', 2: 'playwright'}
                 _fl_map = {'cffi': cffi_fl, 'requests': requests_fl, 'playwright': playwright_fl}
+                all_tier_keys = sorted(set(list(range(3)) + list(pending_by_tier.keys())))
                 tiers = [
                     {
                         "tier":      t,
-                        "backend":   _TIER_NAMES.get(t, f"tier{t}"),
+                        "backend":   _TIER_NAMES.get(t, f"stale(try={t})"),
                         "pending":   pending_by_tier.get(t, 0),
                         "in_flight": _fl_map.get(_TIER_NAMES.get(t, ''), 0),
                         "resolved":  gather._tier_resolved.get(_TIER_NAMES.get(t, ''), 0),
                         "advanced":  gather._tier_advanced.get(_TIER_NAMES.get(t, ''), 0),
                         "gave_up":   gather._tier_gave_up.get(_TIER_NAMES.get(t, ''), 0),
                     }
-                    for t in range(3)
+                    for t in all_tier_keys
                 ]
                 return {
                     'success':           True,
@@ -3174,6 +3294,7 @@ class NewsGather():
                     'translate_pending': s['translate_pending'],
                     'pending_by_language': pending_by_lang,
                     'enrichment_tiers':  tiers,
+                    'rss':               _rss_progress(gather),
                 }
             except Exception as e:
                 raise _HTTPException(status_code=500, detail=str(e))

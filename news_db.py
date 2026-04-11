@@ -153,6 +153,15 @@ class NewsDatabase:
             """
         )
         logger.debug("✅ Migration: idx_stats_translate_pending ensured")
+        # Index for title_hash lookups (cross-feed content reuse + dedup)
+        await self._conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_articles_title_hash
+            ON gm_articles(title_hash)
+            WHERE title_hash IS NOT NULL
+            """
+        )
+        logger.debug("✅ Migration: idx_articles_title_hash ensured")
         # One-time fix: strip microseconds from published_at_gmt values that were
         # stored with full microsecond precision (e.g. "2026-04-11T03:41:57.002412+00:00").
         # The bug was in the fallback branches of normalize_timestamp_to_utc which called
@@ -251,6 +260,16 @@ class NewsDatabase:
         """Update the detected timezone for a source."""
         await self._c.execute(
             "UPDATE gm_sources SET timezone=? WHERE id_source=?",
+            (timezone, source_id),
+        )
+        await self._c.commit()
+
+    async def update_source_timezone_and_enable(
+        self, source_id: str, timezone: str
+    ) -> None:
+        """Set timezone and flip use_timezone=1 in a single commit."""
+        await self._c.execute(
+            "UPDATE gm_sources SET timezone=?, use_timezone=1 WHERE id_source=?",
             (timezone, source_id),
         )
         await self._c.commit()
@@ -355,6 +374,27 @@ class NewsDatabase:
         await self._c.commit()
         return cur.rowcount > 0
 
+    async def insert_articles_batch(self, articles: list[dict]) -> int:
+        """
+        INSERT OR IGNORE a list of articles in a single transaction.
+        Returns the number of rows actually inserted (duplicates are silently ignored).
+        Much faster than calling insert_article() per row — one fsync instead of N.
+        """
+        if not articles:
+            return 0
+        cols         = list(articles[0].keys())
+        placeholders = ", ".join("?" * len(cols))
+        col_list     = ", ".join(cols)
+        sql          = f"INSERT OR IGNORE INTO gm_articles ({col_list}) VALUES ({placeholders})"
+        inserted     = 0
+        # No _write_lock needed: INSERT OR IGNORE is atomic per statement;
+        # the consumer is already serial and SQLite WAL handles concurrent readers.
+        for article in articles:
+            cur = await self._c.execute(sql, tuple(article[c] for c in cols))
+            inserted += cur.rowcount
+        await self._c.commit()
+        return inserted
+
     async def find_by_title_hash(self, title_hash: str) -> Optional[dict]:
         """
         Return the first enriched article with the same title_hash (cross-feed
@@ -374,6 +414,31 @@ class NewsDatabase:
             row = await cur.fetchone()
         return dict(row) if row else None
 
+    async def find_by_title_hash_bulk(self, hashes: list[str]) -> dict[str, dict]:
+        """
+        Batch version of find_by_title_hash.
+        Returns a dict {title_hash: enrichment_row} for any hash that has an
+        enriched article.  Missing hashes are simply absent from the result.
+        """
+        if not hashes:
+            return {}
+        placeholders = ", ".join("?" * len(hashes))
+        result: dict[str, dict] = {}
+        async with self._rc.execute(
+            f"""
+            SELECT title_hash, author, description, content, urlToImage
+            FROM gm_articles
+            WHERE title_hash IN ({placeholders})
+              AND is_enriched = 1
+              AND content IS NOT NULL AND content != ''
+            """,
+            hashes,
+        ) as cur:
+            async for row in cur:
+                d = dict(row)
+                result[d["title_hash"]] = d
+        return result
+
     async def fetch_pending_enrichment(self, limit: int, enrich_try: int = 0) -> list[dict]:
         """
         Return up to *limit* articles pending enrichment for the given tier,
@@ -392,6 +457,7 @@ class NewsDatabase:
             LEFT JOIN gm_sources s ON s.id_source = a.id_source
             WHERE a.is_enriched = 0
               AND a.enrich_try = ?
+              AND a.enrich_try <= 2
               AND a.url IS NOT NULL AND a.url != ''
               AND (s.fetch_blocked IS NULL OR s.fetch_blocked != 1)
             ORDER BY a.published_at_gmt DESC
@@ -485,6 +551,20 @@ class NewsDatabase:
             """
         )
         await self._c.commit()
+
+    async def bulk_give_up_exhausted_articles(self) -> int:
+        """
+        Mark is_enriched=-1 for articles stuck with enrich_try > 2 and is_enriched=0.
+        These can never be picked up by any backfill tier (fetch_pending_enrichment
+        filters enrich_try <= 2), so they would otherwise be counted in enrich_pending
+        forever without appearing in any tier.
+        """
+        cur = await self._c.execute(
+            "UPDATE gm_articles SET is_enriched = -1 "
+            "WHERE is_enriched = 0 AND enrich_try > 2"
+        )
+        await self._c.commit()
+        return cur.rowcount
 
     async def fetch_pending_translation(self, batch_size: int) -> list[dict]:
         """
