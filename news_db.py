@@ -342,7 +342,7 @@ class NewsDatabase:
                 content     = ?,
                 is_enriched = ?,
                 urlToImage  = COALESCE(?, urlToImage),
-                is_translated = CASE WHEN ? = 1 THEN 0 ELSE is_translated END
+                is_translated = CASE WHEN ? = 1 AND is_translated != 1 THEN 0 ELSE is_translated END
             WHERE id_article = ?
             """,
             (author, description, content, is_enriched,
