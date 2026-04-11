@@ -108,7 +108,7 @@ def _get(d: dict[str, Any], *keys: str, default: Any = 0) -> Any:
 
 # ─── Display ─────────────────────────────────────────────────────────────────
 
-def print_snapshot(samples: deque, interval_s: float, seq: int) -> None:
+def print_snapshot(samples: deque, first: "Sample | None", interval_s: float, seq: int) -> None:
     cur  = samples[-1]
     prev = samples[-2] if len(samples) >= 2 else None
 
@@ -198,25 +198,51 @@ def print_snapshot(samples: deque, interval_s: float, seq: int) -> None:
     if total > 0:
         print(f"    Progresso    : {_bar(translated, total)}")
 
-    # ── Velocidades acumuladas (últimas N amostras) ──────────────────────────
-    if len(samples) >= 3:
-        oldest = samples[0]
-        span   = cur.ts - oldest.ts
-        if span > 0:
-            def long_rate(keys):
-                c = _get(cur.data, *keys)
-                o = _get(oldest.data, *keys)
-                return ((c - o) / span) * 60.0
+    # ── Velocidades: janela recente + sessão completa ────────────────────────
+    def _span_rate(a: "Sample", b: "Sample", keys: list[str]) -> float | None:
+        span = b.ts - a.ts
+        if span <= 0:
+            return None
+        return (_get(b.data, *keys) - _get(a.data, *keys)) / span * 60.0
 
-            lr_total = long_rate(["articles", "total"])
-            lr_enr   = long_rate(["articles", "enriched"])
-            lr_t     = long_rate(["articles", "translated"])
-            n = len(samples) - 1
-            span_min = span / 60
-            print(f"\n  {_c(DIM, f'Média últimas {n} amostras ({span_min:.1f}min):')}  "
-                  f"chegadas {_rate(lr_total)}  "
-                  f"enriquecidas {_rate(lr_enr)}  "
-                  f"traduzidas {_rate(lr_t)}")
+    rows: list[tuple[str, float | None, float | None, float | None]] = []
+
+    # Linha 1: janela recente (deque)
+    if len(samples) >= 3:
+        oldest  = samples[0]
+        span_w  = cur.ts - oldest.ts
+        n_w     = len(samples) - 1
+        label_w = f"janela {n_w} amostras ({span_w/60:.1f}min)"
+        rows.append((
+            label_w,
+            _span_rate(oldest, cur, ["articles", "total"]),
+            _span_rate(oldest, cur, ["articles", "enriched"]),
+            _span_rate(oldest, cur, ["articles", "translated"]),
+        ))
+
+    # Linha 2: sessão completa (desde o início)
+    if first is not None and first is not cur:
+        span_s  = cur.ts - first.ts
+        label_s = f"sessão completa ({span_s/60:.1f}min)"
+        rows.append((
+            label_s,
+            _span_rate(first, cur, ["articles", "total"]),
+            _span_rate(first, cur, ["articles", "enriched"]),
+            _span_rate(first, cur, ["articles", "translated"]),
+        ))
+
+    if rows:
+        print(f"\n  {_c(BOLD, 'VELOCIDADES MÉDIAS')}")
+        hdr = f"    {'Janela':<32}  {'Chegadas':>12}  {'Enriquecidas':>14}  {'Traduzidas':>12}"
+        print(_c(DIM, hdr))
+        print(_c(DIM, "    " + "─" * 76))
+        for label, rt, re, rtr in rows:
+            print(
+                f"    {_c(DIM, f'{label:<32}')}"
+                f"  {_rate(rt):>12}"
+                f"  {_rate(re):>14}"
+                f"  {_rate(rtr):>12}"
+            )
 
     # ── Rodapé ───────────────────────────────────────────────────────────────
     age_str = f"{stats_age}s" if stats_age is not None else "—"
@@ -241,6 +267,7 @@ def main() -> None:
     max_history = max(2, args.history)
 
     samples: deque[Sample] = deque(maxlen=max_history)
+    first_sample: Sample | None = None
     seq = 0
 
     print(_c(BOLD, f"Iniciando monitor · {queues_url} · intervalo={interval_s}s"))
@@ -253,8 +280,11 @@ def main() -> None:
             ts   = time.time()
             seq += 1
 
-            samples.append(Sample(ts, data))
-            print_snapshot(samples, interval_s, seq)
+            s = Sample(ts, data)
+            samples.append(s)
+            if first_sample is None and "_error" not in data:
+                first_sample = s
+            print_snapshot(samples, first_sample, interval_s, seq)
 
             elapsed = time.monotonic() - t0
             sleep_s = max(0.0, interval_s - elapsed)
