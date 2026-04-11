@@ -277,7 +277,7 @@ def print_snapshot(
     cur_pend = enr_pend
     if (
         wm_pending is not None and wm_ts is not None
-        and cur_pend < wm_pending
+        and wm_pending > cur_pend
         and cur.ts > wm_ts
     ):
         drain_span  = cur.ts - wm_ts          # segundos desde o mínimo anterior
@@ -324,9 +324,13 @@ def main() -> None:
 
     samples: deque[Sample] = deque(maxlen=max_history)
     first_sample: Sample | None = None
-    # Watermark: lowest pending seen + timestamp when it was recorded
+    # Watermark: anchor at the START of each drain phase.
+    # wm_pending/wm_ts are fixed throughout a drain phase; they only reset when
+    # pending INCREASES (burst of new articles), starting a new phase.
+    # This lets the elapsed time grow so drain rate is stable and meaningful.
     wm_pending: int | None = None
     wm_ts:      float | None = None
+    prev_pend:  int | None = None
     seq = 0
 
     print(_c(BOLD, f"Iniciando monitor · {queues_url} · intervalo={interval_s}s"))
@@ -344,11 +348,17 @@ def main() -> None:
             if "_error" not in data:
                 if first_sample is None:
                     first_sample = s
-                # Update watermark only when pending actually decreases
                 cur_pend = _get(data, "articles", "enrich_pending")
-                if wm_pending is None or cur_pend < wm_pending:
+                if wm_pending is None:
+                    # First sample — initialise anchor
                     wm_pending = cur_pend
                     wm_ts      = ts
+                elif prev_pend is not None and cur_pend > prev_pend:
+                    # Pending went up (burst of new articles) — reset phase anchor
+                    wm_pending = cur_pend
+                    wm_ts      = ts
+                # else: pending equal or decreasing → keep anchor fixed
+                prev_pend = cur_pend
             print_snapshot(samples, first_sample, wm_pending, wm_ts, interval_s, seq)
 
             elapsed = time.monotonic() - t0

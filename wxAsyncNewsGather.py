@@ -2889,6 +2889,7 @@ class NewsGather():
     async def _refresh_queue_stats(self, interval: int = 20) -> None:
         """Background task: refresh db.cached_stats every `interval` seconds."""
         while not self.shutdown_flag:
+            t0 = asyncio.get_event_loop().time()
             try:
                 stats = await self.db.refresh_stats_cache()
                 self.logger.debug(
@@ -2897,7 +2898,8 @@ class NewsGather():
                 )
             except Exception as e:
                 self.logger.warning(f"Queue stats refresh failed: {e}")
-            await asyncio.sleep(interval)
+            elapsed = asyncio.get_event_loop().time() - t0
+            await asyncio.sleep(max(0.0, interval - elapsed))
 
     async def serve_api(self):
         """Run FastAPI HTTP server (real-time article polling endpoint)."""

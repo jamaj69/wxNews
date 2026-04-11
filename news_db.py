@@ -85,7 +85,8 @@ class NewsDatabase:
 
     def __init__(self, db_path: str) -> None:
         self._db_path    = db_path
-        self._conn: Optional[aiosqlite.Connection] = None
+        self._conn:    Optional[aiosqlite.Connection] = None
+        self._ro_conn: Optional[aiosqlite.Connection] = None  # read-only; never blocks writers
         # Serialises multi-statement atomic blocks so coroutines cannot interleave
         self._write_lock = asyncio.Lock()
         # Cached queue stats — refreshed by refresh_stats_cache() every N seconds
@@ -120,6 +121,13 @@ class NewsDatabase:
         await self._conn.execute("PRAGMA busy_timeout=60000")
         await self._migrate()
         await self._conn.commit()
+        # Read-only connection: runs in its own aiosqlite thread — never queues
+        # behind write operations. WAL mode allows concurrent readers + 1 writer.
+        self._ro_conn = await aiosqlite.connect(
+            f"file:{self._db_path}?mode=ro", uri=True, timeout=10.0
+        )
+        self._ro_conn.row_factory = aiosqlite.Row
+        await self._ro_conn.execute("PRAGMA busy_timeout=5000")
         logger.info(f"✅ NewsDatabase connected: {self._db_path}")
 
     async def _migrate(self) -> None:
@@ -136,8 +144,20 @@ class NewsDatabase:
             logger.info("✅ Migration: added enrich_try column + index")
         except Exception:
             pass  # column already exists — ignore
+        # Partial covering index for translate_pending count — avoids full-table scan
+        await self._conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_stats_translate_pending
+            ON gm_articles(is_enriched, detected_language)
+            WHERE is_translated = 0
+            """
+        )
+        logger.debug("✅ Migration: idx_stats_translate_pending ensured")
 
     async def close(self) -> None:
+        if self._ro_conn:
+            await self._ro_conn.close()
+            self._ro_conn = None
         if self._conn:
             await self._conn.close()
             self._conn = None
@@ -152,13 +172,20 @@ class NewsDatabase:
             raise RuntimeError("NewsDatabase is not connected")
         return self._conn
 
+    @property
+    def _rc(self) -> aiosqlite.Connection:
+        """Read-only connection — use for SELECT-only workloads to avoid blocking writes."""
+        if self._ro_conn is None:
+            raise RuntimeError("NewsDatabase read-only connection is not open")
+        return self._ro_conn
+
     # ═══════════════════════════════════════════════════════════════════════════
     # SOURCES
     # ═══════════════════════════════════════════════════════════════════════════
 
     async def load_sources(self) -> list[dict]:
         """Return all rows from gm_sources as a list of dicts."""
-        async with self._c.execute("SELECT * FROM gm_sources") as cur:
+        async with self._rc.execute("SELECT * FROM gm_sources") as cur:
             return [dict(r) for r in await cur.fetchall()]
 
     async def load_rss_sources(self, skip_blocked: bool = True) -> list[dict]:
@@ -171,7 +198,7 @@ class NewsDatabase:
             )
         else:
             sql = "SELECT * FROM gm_sources WHERE id_source LIKE 'rss-%'"
-        async with self._c.execute(sql) as cur:
+        async with self._rc.execute(sql) as cur:
             return [dict(r) for r in await cur.fetchall()]
 
     async def insert_source_if_new(self, source: dict) -> bool:
@@ -201,7 +228,7 @@ class NewsDatabase:
 
     async def get_source_block_status(self, source_id: str) -> tuple[int, int]:
         """Return (fetch_blocked, blocked_count) or (0, 0) if not found."""
-        async with self._c.execute(
+        async with self._rc.execute(
             "SELECT fetch_blocked, blocked_count FROM gm_sources WHERE id_source=?",
             (source_id,),
         ) as cur:
@@ -245,7 +272,7 @@ class NewsDatabase:
 
     async def get_blocked_sources_for_probe(self) -> list[dict]:
         """Return blocked sources with a sample article URL, lowest blocked_count first."""
-        async with self._c.execute(
+        async with self._rc.execute(
             """
             SELECT s.id_source, s.name, s.blocked_count,
                    a.url AS sample_url
@@ -304,7 +331,7 @@ class NewsDatabase:
         Return the first enriched article with the same title_hash (cross-feed
         content reuse), or None.
         """
-        async with self._c.execute(
+        async with self._rc.execute(
             """
             SELECT author, description, content, urlToImage
             FROM gm_articles
@@ -326,7 +353,7 @@ class NewsDatabase:
           1 = cffi failed (requests tier)
           2 = requests failed (playwright tier)
         """
-        async with self._c.execute(
+        async with self._rc.execute(
             """
             SELECT a.id_article, a.id_source, a.url, a.author,
                    a.description, a.content, a.urlToImage,
@@ -435,7 +462,7 @@ class NewsDatabase:
         Return up to *batch_size* articles pending translation using the
         optimised view v_articles_pending_translation.
         """
-        async with self._c.execute(
+        async with self._rc.execute(
             """
             SELECT id_article, detected_language, title, description, content
             FROM v_articles_pending_translation
@@ -494,7 +521,7 @@ class NewsDatabase:
         Return (id_article, publishedAt) for articles of *source_id* that
         have no published_at_gmt yet.
         """
-        async with self._c.execute(
+        async with self._rc.execute(
             """
             SELECT id_article, publishedAt
             FROM gm_articles
@@ -525,7 +552,7 @@ class NewsDatabase:
 
     async def load_blocked_domains(self) -> list[tuple[str, int]]:
         """Return [(domain, blocked_count)] for all is_blocked=1 entries."""
-        async with self._c.execute(
+        async with self._rc.execute(
             "SELECT domain, blocked_count FROM gm_blocked_domains WHERE is_blocked=1"
         ) as cur:
             return await cur.fetchall()
@@ -590,19 +617,37 @@ class NewsDatabase:
     async def fetch_queue_stats(self) -> QueueStats:
         """
         Return aggregate counts for the /api/queues response.
-        All three queries use the idx_articles_enriched_translated covering index.
+
+        Uses the read-only connection (_rc) so queries never queue behind write
+        operations. Two queries instead of four:
+          1. One combined GROUP BY scan over idx_articles_enriched_translated
+             replaces the former two separate GROUP BY queries.
+          2. Partial-index lookup for translate_pending via idx_stats_translate_pending.
         """
-        async with self._c.execute(
-            "SELECT is_enriched, COUNT(*) FROM gm_articles GROUP BY is_enriched"
-        ) as cur:
-            enrich_map = {r[0]: r[1] for r in await cur.fetchall()}
+        rc = self._rc
 
-        async with self._c.execute(
-            "SELECT is_translated, COUNT(*) FROM gm_articles GROUP BY is_translated"
+        # Single index scan replaces two separate GROUP BY queries.
+        # idx_articles_enriched_translated covers (is_enriched, is_translated).
+        async with rc.execute(
+            "SELECT is_enriched, is_translated, COUNT(*) "
+            "FROM gm_articles GROUP BY is_enriched, is_translated"
         ) as cur:
-            trans_map = {r[0]: r[1] for r in await cur.fetchall()}
+            enrich_map: dict[int, int] = {}
+            trans_map:  dict[int, int] = {}
+            for row in await cur.fetchall():
+                ie, it, cnt = row[0], row[1], row[2]
+                enrich_map[ie] = enrich_map.get(ie, 0) + cnt
+                trans_map[it]  = trans_map.get(it,  0) + cnt
 
-        async with self._c.execute(
+        # Fast via idx_articles_enrich_try (is_enriched, enrich_try)
+        async with rc.execute(
+            "SELECT enrich_try, COUNT(*) FROM gm_articles "
+            "WHERE is_enriched = 0 GROUP BY enrich_try"
+        ) as cur:
+            tier_map = {r[0]: r[1] for r in await cur.fetchall()}
+
+        # Translate pending — uses partial index idx_stats_translate_pending
+        async with rc.execute(
             """
             SELECT COUNT(*) FROM gm_articles
             WHERE is_translated = 0
@@ -612,12 +657,7 @@ class NewsDatabase:
               )
             """
         ) as cur:
-            row = await cur.fetchone()
-
-        async with self._c.execute(
-            "SELECT enrich_try, COUNT(*) FROM gm_articles WHERE is_enriched = 0 GROUP BY enrich_try"
-        ) as cur:
-            tier_map = {row[0]: row[1] for row in await cur.fetchall()}
+            tp_row = await cur.fetchone()
 
         return {
             "enriched":          enrich_map.get(1,  0),
@@ -625,7 +665,7 @@ class NewsDatabase:
             "enrich_failed":     enrich_map.get(-1, 0),
             "translated":        trans_map.get(1,   0),
             "translate_skipped": trans_map.get(-1,  0),
-            "translate_pending": row[0] if row else 0,
+            "translate_pending": tp_row[0] if tp_row else 0,
             "pending_by_tier":   tier_map,
             "refreshed_at":      int(time.time() * 1000),
         }
@@ -644,19 +684,19 @@ class NewsDatabase:
     async def fetch_article_stats(self) -> ArticleStats:
         """Return article/source counts for the /api/stats endpoint."""
         now_ms = int(time.time() * 1000)
-        async with self._c.execute("SELECT COUNT(*) FROM gm_articles") as cur:
+        async with self._rc.execute("SELECT COUNT(*) FROM gm_articles") as cur:
             total = (await cur.fetchone())[0]
-        async with self._c.execute(
+        async with self._rc.execute(
             "SELECT COUNT(*) FROM gm_articles WHERE inserted_at_ms > ?",
             (now_ms - 86_400_000,),
         ) as cur:
             last_24h = (await cur.fetchone())[0]
-        async with self._c.execute(
+        async with self._rc.execute(
             "SELECT COUNT(*) FROM gm_articles WHERE inserted_at_ms > ?",
             (now_ms - 3_600_000,),
         ) as cur:
             last_hour = (await cur.fetchone())[0]
-        async with self._c.execute("SELECT COUNT(*) FROM gm_sources") as cur:
+        async with self._rc.execute("SELECT COUNT(*) FROM gm_sources") as cur:
             total_sources = (await cur.fetchone())[0]
         return {
             "total":         total,
@@ -668,7 +708,7 @@ class NewsDatabase:
 
     async def fetch_pending_by_language(self, limit: int = 10) -> list[dict]:
         """Return pending-translation counts grouped by detected language, descending."""
-        async with self._c.execute(
+        async with self._rc.execute(
             """
             SELECT detected_language, language_name, target_language, COUNT(*) AS n
             FROM v_articles_pending_translation
