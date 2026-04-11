@@ -13,6 +13,7 @@ asyncio-standard-lib>=0.1.0; python_version < "3.10"
 # ============================================
 # SQLite (built-in with Python - no driver needed)
 # psycopg2-binary>=2.9.9  # PostgreSQL - NOT USED ANYMORE
+aiosqlite>=0.19.0
 SQLAlchemy>=2.0.25
 
 # Redis

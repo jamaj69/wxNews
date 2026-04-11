@@ -60,6 +60,9 @@ from html_utils import (
 # Async parallel enrichment worker
 from enrichment_worker import EnrichmentWorker, _BLOCKED_THRESHOLD
 
+# Centralised async CRUD layer (backed by aiosqlite)
+from news_db import NewsDatabase
+
 # FastAPI server (optional - enabled via API_SERVER_ENABLED)
 try:
     from fastapi import FastAPI, Query, HTTPException
@@ -109,7 +112,7 @@ NEWSAPI_CYCLE_INTERVAL = int(config('NEWSAPI_CYCLE_INTERVAL', default=600))  # 1
 
 # RSS Configuration
 RSS_TIMEOUT = int(config('RSS_TIMEOUT', default=15))
-RSS_MAX_CONCURRENT = int(config('RSS_MAX_CONCURRENT', default=10))
+RSS_MAX_CONCURRENT = int(config('RSS_MAX_CONCURRENT', default=20))
 RSS_BATCH_SIZE = int(config('RSS_BATCH_SIZE', default=20))
 RSS_CYCLE_INTERVAL = int(config('RSS_CYCLE_INTERVAL', default=900))  # 15 minutes
 
@@ -175,7 +178,7 @@ BASIC_HTTP_HEADERS = {
 }
 
 
-def url_encode(url):
+def url_encode(url: str) -> bytes:
     return base64.urlsafe_b64encode(zlib.compress(url.encode('utf-8')))[15:31]
 
 
@@ -184,7 +187,7 @@ import html
 from html.parser import HTMLParser
 
 
-def dbCredentials():
+def dbCredentials() -> str:
     """Return SQLite database path"""
     db_path = str(config('DB_PATH', default='predator_news.db', cast=str))
     # Make path absolute if relative
@@ -194,7 +197,7 @@ def dbCredentials():
     return db_path
 
 
-def as_text(value):
+def as_text(value: Any) -> str:
     """Return a safe string for loosely-typed feed/API fields with encoding fix."""
     if value is None:
         return ""
@@ -215,7 +218,11 @@ def _make_title_hash(title: str) -> str:
     return hashlib.sha1(norm.encode('utf-8', errors='ignore')).hexdigest()[:16]
 
 
-def detect_article_language(title, description=None, content=None):
+def detect_article_language(
+    title: Optional[str],
+    description: Optional[str] = None,
+    content: Optional[str] = None,
+) -> tuple[Optional[str], float]:
     """
     Detect language of article using langdetect
     
@@ -299,7 +306,11 @@ COUNTRY_TIMEZONES = {
 }
 
 
-def normalize_timestamp_to_utc(timestamp_str, source_timezone=None, use_source_timezone=False):
+def normalize_timestamp_to_utc(
+    timestamp_str: str,
+    source_timezone: Optional[str] = None,
+    use_source_timezone: bool = False,
+) -> tuple[Optional[str], Optional[str]]:
     """
     Normalize a timestamp string to UTC (GMT+0).
     
@@ -374,7 +385,26 @@ def normalize_timestamp_to_utc(timestamp_str, source_timezone=None, use_source_t
         # Reconstruct as HHMM format
         expanded_tz = f"{sign}{digit1}{digit2}{digit3}0"
         timestamp_str = timestamp_str[:match.start()] + expanded_tz + timestamp_str[match.end():]
-    
+
+    # Pre-process: Replace IANA timezone names (e.g. "Europe/Dublin") with their
+    # UTC offset so dateutil can parse them.  Some RSS feeds (e.g. breakingnews.ie)
+    # embed the full zone name instead of a numeric offset.
+    iana_tz_pattern = re.compile(r'([A-Za-z]+/[A-Za-z_]+)')
+    iana_match = iana_tz_pattern.search(timestamp_str)
+    if iana_match:
+        try:
+            tz_obj = pytz.timezone(iana_match.group(1))
+            # Use the current UTC offset for this zone (accounts for DST)
+            now_offset = datetime.now(tz_obj).utcoffset()
+            total_secs = int(now_offset.total_seconds())
+            h, rem = divmod(abs(total_secs), 3600)
+            m = rem // 60
+            offset_str = f"{'+' if total_secs >= 0 else '-'}{h:02d}{m:02d}"
+            timestamp_str = timestamp_str[:iana_match.start()] + offset_str + timestamp_str[iana_match.end():]
+        except Exception:
+            # Unknown IANA zone — strip it so dateutil at least parses the date
+            timestamp_str = timestamp_str[:iana_match.start()].rstrip()
+
     try:
         # Parse the timestamp with dateutil (handles most formats and extracts timezone)
         parsed_dt = dateutil_parser.parse(timestamp_str, tzinfos=tzinfos)
@@ -489,7 +519,11 @@ def normalize_timestamp_to_utc(timestamp_str, source_timezone=None, use_source_t
         return datetime.now(timezone.utc).isoformat(), None
 
 
-def detect_timezone_from_articles(articles_timestamps, source_name="Unknown", logger=None):
+def detect_timezone_from_articles(
+    articles_timestamps: list[str],
+    source_name: str = "Unknown",
+    logger: Optional[logging.Logger] = None,
+) -> tuple[Optional[str], bool]:
     """
     Analisa todos os timestamps de artigos para detectar se o fuso está incorreto.
     
@@ -598,7 +632,6 @@ class NewsGather():
         self.logger = logging.getLogger(__name__)
         self.sources = dict()
         self.loop = loop
-        self.db_lock = asyncio.Lock()  # Lock para serializar inserções SQLite
         self.shutdown_flag = False  # Flag para shutdown gracioso
         
         # API key rotation for NewsAPI
@@ -618,9 +651,11 @@ class NewsGather():
         self.gm_sources = Table('gm_sources', self.meta, autoload_with=self.eng) 
         self.gm_articles = Table('gm_articles', self.meta, autoload_with=self.eng) 
         
-        self.logger.info("Loading existing articles from database")
-        self.sources = self.InitArticles(self.eng, self.meta, self.gm_sources,self.gm_articles)
-        self.logger.info(f"Loaded {len(self.sources)} sources from database")
+        # Sources and blocked domains are loaded asynchronously in open_async_db().
+        self.sources = dict()
+
+        # Centralised async CRUD layer; opened in open_async_db() at startup.
+        self.db: Optional[NewsDatabase] = None
 
         # Parallel enrichment worker (started as bg task in run())
         self._enrichment_worker = EnrichmentWorker(
@@ -628,39 +663,69 @@ class NewsGather():
             timeout=ENRICH_TIMEOUT,
         )
 
-        # Pre-load blocked domains into enrichment worker so re-blocked domains
-        # are still skipped after a service restart.
+        # Set of article IDs currently in the enrichment pipeline; updated by
+        # backfill_content() and exposed via GET /api/queues.
+        self._backfill_processing_ids: set[int] = set()
+
+        # Cached queue/article stats refreshed every 30 s by _refresh_queue_stats().
+        # Avoids blocking the API event loop with slow DB queries.
+        self._queue_stats: dict = {
+            "enriched": 0, "enrich_pending": 0, "enrich_failed": 0,
+            "translated": 0, "translate_skipped": 0, "translate_pending": 0,
+            "refreshed_at": 0,
+        }
+    
+    async def open_async_db(self) -> None:
+        """
+        Open the aiosqlite connection and finish async initialisation.
+        Called once at the very start of run_all_collectors() before any
+        collector tasks are created.
+        """
+        self.db = await NewsDatabase.open(self.db_path)
+
+        # Load sources into memory
+        source_rows = await self.db.load_sources()
+        self.sources = {
+            r['id_source']: {
+                'id_source':    r['id_source'],
+                'name':         r.get('name',        ''),
+                'description':  r.get('description', ''),
+                'url':          r.get('url',         ''),
+                'category':     r.get('category',    ''),
+                'language':     r.get('language',    ''),
+                'country':      r.get('country',     ''),
+                'timezone':     r.get('timezone'),
+                'use_timezone': r.get('use_timezone', 0),
+                'articles':     {},
+            }
+            for r in source_rows
+        }
+        self.logger.info(f"🗄️  Loaded {len(self.sources)} sources via aiosqlite")
+
+        # Pre-populate blocked domains into the enrichment worker so domains
+        # that were already blocked survive a service restart.
         try:
-            with self.eng.connect() as conn:
-                rows = conn.execute(text(
-                    "SELECT domain, blocked_count FROM gm_blocked_domains WHERE is_blocked=1"
-                )).fetchall()
-                for (domain, cnt) in rows:
-                    self._enrichment_worker._error_counts[domain] = max(cnt, _BLOCKED_THRESHOLD)
-                if rows:
-                    self.logger.info(
-                        f"🔒 Loaded {len(rows)} blocked domain(s) into enrichment worker"
-                    )
+            blocked = await self.db.load_blocked_domains()
+            for (domain, cnt) in blocked:
+                self._enrichment_worker._error_counts[domain] = max(cnt, _BLOCKED_THRESHOLD)
+            if blocked:
+                self.logger.info(f"🔒 Loaded {len(blocked)} blocked domain(s) into enrichment worker")
         except Exception:
             pass  # Table may not exist yet on first run
-    
+
     def shutdown(self):
         """
-        Gracefully shutdown the application:
-        - Close database connections
-        - Clean up resources
-        Note: shutdown_flag should already be set before calling this
+        Gracefully shutdown the application.
+        Note: shutdown_flag should already be set before calling this.
+        The aiosqlite connection is closed inside run_all_collectors() finally.
         """
         self.logger.info("🛑 Shutting down NewsGather...")
-        
         try:
             if hasattr(self, 'eng') and self.eng:
-                self.logger.info("Closing database connection...")
                 self.eng.dispose()
-                self.logger.info("✅ Database connection closed")
+                self.logger.info("✅ SQLAlchemy engine disposed")
         except Exception as e:
-            self.logger.error(f"Error closing database: {e}")
-        
+            self.logger.error(f"Error disposing engine: {e}")
         self.logger.info("✅ Shutdown complete")
 
     def _build_http_headers(self, url: str) -> dict:
@@ -832,44 +897,31 @@ class NewsGather():
         (new sources added, sources blocked, URLs updated, etc.)
         """
         try:
-            async with self.db_lock:
-                with self.eng.connect() as con:
-                    stm = select(self.gm_sources)
-                    rs = con.execute(stm)
-                    
-                    new_sources = dict()
-                    source_count = 0
-                    
-                    for source in rs.fetchall():
-                        source_id = source[0]
-                        source_count += 1
-                        
-                        new_sources[source_id] = {
-                            'id_source': source_id,
-                            'name': source[1],
-                            'description': source[2],
-                            'url': source[3],
-                            'category': source[4],
-                            'language': source[5],
-                            'country': source[6],
-                            'timezone': source[9] if len(source) > 9 else None,  # Timezone offset (UTC+XX:XX)
-                            'use_timezone': source[10] if len(source) > 10 else 0,  # Whether to apply source timezone
-                            'articles': {}
-                        }
-                    
-                    # Calculate changes
-                    old_count = len(self.sources)
-                    added = len(set(new_sources.keys()) - set(self.sources.keys()))
-                    removed = len(set(self.sources.keys()) - set(new_sources.keys()))
-                    
-                    # Update sources atomically
-                    self.sources = new_sources
-                    
-                    if added > 0 or removed > 0:
-                        self.logger.info(f"🔄 Sources reloaded: {source_count} total (+{added}, -{removed})")
-                    else:
-                        self.logger.debug(f"🔄 Sources reloaded: {source_count} total (no changes)")
-                        
+            rows = await self.db.load_sources()
+            new_sources = {
+                r['id_source']: {
+                    'id_source':    r['id_source'],
+                    'name':         r.get('name',        ''),
+                    'description':  r.get('description', ''),
+                    'url':          r.get('url',         ''),
+                    'category':     r.get('category',    ''),
+                    'language':     r.get('language',    ''),
+                    'country':      r.get('country',     ''),
+                    'timezone':     r.get('timezone'),
+                    'use_timezone': r.get('use_timezone', 0),
+                    'articles':     {},
+                }
+                for r in rows
+            }
+            added   = len(set(new_sources) - set(self.sources))
+            removed = len(set(self.sources) - set(new_sources))
+            self.sources = new_sources
+            if added or removed:
+                self.logger.info(
+                    f"🔄 Sources reloaded: {len(new_sources)} total (+{added}, -{removed})"
+                )
+            else:
+                self.logger.debug(f"🔄 Sources reloaded: {len(new_sources)} total (no changes)")
         except Exception as e:
             self.logger.error(f"Error reloading sources: {e}", exc_info=True)
 
@@ -1026,6 +1078,117 @@ class NewsGather():
         except Exception as e:
             self.logger.debug(f"Error adding title_hash: {e}")
 
+        # ── idx_articles_enriched_translated ────────────────────────────────────
+        # Covers: COUNT(*) WHERE is_enriched=x  and  COUNT(*) WHERE is_translated=x
+        # Used by GET /api/queues to avoid full table scans.
+        try:
+            with eng.begin() as conn:
+                conn.execute(text(
+                    "CREATE INDEX IF NOT EXISTS idx_articles_enriched_translated "
+                    "ON gm_articles(is_enriched, is_translated)"
+                ))
+            self.logger.info("✅ Index idx_articles_enriched_translated ready")
+        except Exception as e:
+            self.logger.debug(f"Error creating idx_articles_enriched_translated: {e}")
+
+        # ── v_articles_pending_enrichment (no ORDER BY — ORDER BY in worker query)
+        # Simple equality on is_enriched=0 so SQLite uses
+        # idx_articles_enriched_translated as a covering index for COUNT(*).
+        try:
+            with eng.begin() as conn:
+                conn.execute(text("DROP VIEW IF EXISTS v_articles_pending_enrichment"))
+                conn.execute(text("""
+                    CREATE VIEW v_articles_pending_enrichment AS
+                    SELECT
+                        a.id_article,
+                        a.id_source,
+                        s.name   AS source_name,
+                        a.url,
+                        a.author,
+                        a.description,
+                        a.content,
+                        a.urlToImage,
+                        a.published_at_gmt
+                    FROM gm_articles a
+                    LEFT JOIN gm_sources s ON a.id_source = s.id_source
+                    WHERE a.is_enriched = 0
+                      AND a.url IS NOT NULL
+                      AND a.url != ''
+                      AND (s.fetch_blocked IS NULL OR s.fetch_blocked != 1)
+                """))
+            self.logger.info("✅ View v_articles_pending_enrichment ready")
+        except Exception as e:
+            self.logger.warning(f"Error creating v_articles_pending_enrichment: {e}")
+
+        # ── v_articles_pending_translation (no ORDER BY — ORDER BY in worker query)
+        # idx_articles_is_translated(is_translated, detected_language) covers the
+        # initial filter; idx_languages_translate covers the JOIN.
+        try:
+            with eng.begin() as conn:
+                conn.execute(text("DROP VIEW IF EXISTS v_articles_pending_translation"))
+                conn.execute(text("""
+                    CREATE VIEW v_articles_pending_translation AS
+                    SELECT
+                        a.id_article,
+                        a.id_source,
+                        s.name                              AS source_name,
+                        a.title,
+                        a.description,
+                        a.content,
+                        a.detected_language,
+                        a.language_confidence,
+                        l.language_name,
+                        l.translate_to                      AS target_language,
+                        l.translator_code,
+                        l.translate_backend,
+                        l.translate_without_enrichment,
+                        a.inserted_at_ms,
+                        a.published_at_gmt
+                    FROM gm_articles a
+                    JOIN languages l
+                           ON a.detected_language = l.language_code
+                          AND l.translate = 1
+                    LEFT JOIN gm_sources s
+                           ON a.id_source = s.id_source
+                    WHERE a.is_translated = 0
+                      AND a.title IS NOT NULL
+                      AND a.title != ''
+                      AND a.is_enriched IN (1, -1)
+                """))
+            self.logger.info("✅ View v_articles_pending_translation ready")
+        except Exception as e:
+            self.logger.warning(f"Error creating v_articles_pending_translation: {e}")
+        # Efficient summary view: uses idx_articles_is_translated(is_translated,
+        # detected_language) and idx_languages_translate(translate, language_code).
+        try:
+            with eng.begin() as conn:
+                conn.execute(text("DROP VIEW IF EXISTS v_translation_pending_by_language"))
+                conn.execute(text("""
+                    CREATE VIEW v_translation_pending_by_language AS
+                    SELECT
+                        l.language_code,
+                        l.language_name,
+                        l.translate_backend,
+                        l.translate_to                           AS target_language,
+                        COUNT(*)                                 AS pending_count,
+                        SUM(CASE WHEN a.is_enriched = 1 THEN 1 ELSE 0 END) AS enriched_pending,
+                        SUM(CASE WHEN a.is_enriched = 0 THEN 1 ELSE 0 END) AS not_yet_enriched,
+                        MIN(a.inserted_at_ms)                   AS oldest_pending_ms,
+                        MAX(a.inserted_at_ms)                   AS newest_pending_ms
+                    FROM languages l
+                    JOIN gm_articles a
+                           ON a.detected_language = l.language_code
+                          AND a.is_translated = 0
+                          AND a.title IS NOT NULL
+                          AND a.title != ''
+                    WHERE l.translate = 1
+                    GROUP BY l.language_code, l.language_name, l.translate_backend, l.translate_to
+                    ORDER BY pending_count DESC
+                """))
+            self.logger.info("✅ View v_translation_pending_by_language ready")
+        except Exception as e:
+            self.logger.warning(f"Error creating v_translation_pending_by_language: {e}")
+
         self.logger.info("Database initialization complete")
         return eng
         
@@ -1150,19 +1313,12 @@ class NewsGather():
                     'country': ''
                 }
                 
-                async with self.db_lock:
-                    with self.eng.connect() as conn:
-                        try:
-                            ins = insert(self.gm_sources).values(**new_rss_source)
-                            ins = ins.on_conflict_do_nothing()
-                            result = conn.execute(ins)
-                            conn.commit()
-                            if result.rowcount > 0:
-                                self.sources[rss_id] = {**new_rss_source, 'articles': {}}
-                                self.logger.info(f"✅ Registered RSS source: {source_name} -> {rss_url}")
-                        except Exception as e:
-                            self.logger.error(f"Failed to register RSS source {source_name}: {e}")
-                            conn.rollback()
+                try:
+                    if await self.db.insert_source_if_new(new_rss_source):
+                        self.sources[rss_id] = {**new_rss_source, 'articles': {}}
+                        self.logger.info(f"✅ Registered RSS source: {source_name} -> {rss_url}")
+                except Exception as e:
+                    self.logger.error(f"Failed to register RSS source {source_name}: {e}")
         except Exception as e:
             self.logger.debug(f"Could not discover RSS for {source_name}: {e}")
     
@@ -1190,24 +1346,12 @@ class NewsGather():
             
             self.logger.info(f"🕐 Updating timezone for {self.sources[source_id].get('name')}: {current_tz} -> {detected_timezone}")
             
-            # Update database
-            async with self.db_lock:
-                with self.eng.connect() as conn:
-                    try:
-                        update_stmt = (
-                            self.gm_sources.update()
-                            .where(self.gm_sources.c.id_source == source_id)
-                            .values(timezone=detected_timezone)
-                        )
-                        conn.execute(update_stmt)
-                        conn.commit()
-                        
-                        # Update in-memory sources
-                        self.sources[source_id]['timezone'] = detected_timezone
-                        
-                    except Exception as e:
-                        self.logger.error(f"Failed to update timezone for {source_id}: {e}")
-                        conn.rollback()
+            try:
+                await self.db.update_source_timezone(source_id, detected_timezone)
+                # Update in-memory sources
+                self.sources[source_id]['timezone'] = detected_timezone
+            except Exception as e:
+                self.logger.error(f"Failed to update timezone for {source_id}: {e}")
         except Exception as e:
             self.logger.debug(f"Error updating source timezone for {source_id}: {e}")
     
@@ -1238,66 +1382,31 @@ class NewsGather():
             total_seconds = sign * (hours * 3600 + minutes * 60)
             tz_offset = tzoffset('', total_seconds)
             
-            # Query articles without GMT for this source
-            async with self.db_lock:
-                with self.eng.connect() as conn:
-                    try:
-                        # Find articles without GMT
-                        query = text("""
-                            SELECT id_article, publishedAt
-                            FROM gm_articles
-                            WHERE id_source = :source_id
-                            AND published_at_gmt IS NULL
-                            AND publishedAt IS NOT NULL
-                        """)
-                        result = conn.execute(query, {'source_id': source_id})
-                        articles_to_fix = result.fetchall()
-                        
-                        if not articles_to_fix:
-                            return
-                        
-                        self.logger.info(f"🔄 [{source_name}] Backfilling {len(articles_to_fix)} articles with timezone {detected_timezone}")
-                        
-                        # Process conversions
-                        updates = []
-                        failed = 0
-                        
-                        for article_id, timestamp_str in articles_to_fix:
-                            try:
-                                # Parse timestamp (assume it's naive)
-                                dt_naive = dateutil_parser.parse(timestamp_str)
-                                
-                                # Apply timezone
-                                dt_with_tz = dt_naive.replace(tzinfo=tz_offset)
-                                
-                                # Convert to UTC
-                                dt_utc = dt_with_tz.astimezone(pytz.UTC)
-                                gmt_timestamp = dt_utc.replace(microsecond=0).isoformat()
-                                
-                                updates.append({
-                                    'article_id': article_id,
-                                    'gmt_timestamp': gmt_timestamp
-                                })
-                            except Exception as e:
-                                failed += 1
-                                self.logger.debug(f"Failed to convert timestamp for article {article_id}: {e}")
-                        
-                        # Batch update
-                        if updates:
-                            update_stmt = text("""
-                                UPDATE gm_articles
-                                SET published_at_gmt = :gmt_timestamp
-                                WHERE id_article = :article_id
-                            """)
-                            conn.execute(update_stmt, updates)
-                            conn.commit()
-                            
-                            success = len(updates)
-                            self.logger.info(f"✅ [{source_name}] Backfilled {success} articles ({failed} failed)")
-                        
-                    except Exception as e:
-                        self.logger.error(f"Failed to backfill GMT for {source_id}: {e}")
-                        conn.rollback()
+            articles_to_fix = await self.db.fetch_articles_missing_gmt(source_id)
+
+            if not articles_to_fix:
+                return
+
+            self.logger.info(f"🔄 [{source_name}] Backfilling {len(articles_to_fix)} articles with timezone {detected_timezone}")
+
+            # Process conversions
+            updates = []
+            failed = 0
+
+            for article_id, timestamp_str in articles_to_fix:
+                try:
+                    dt_naive      = dateutil_parser.parse(timestamp_str)
+                    dt_with_tz    = dt_naive.replace(tzinfo=tz_offset)
+                    dt_utc        = dt_with_tz.astimezone(pytz.UTC)
+                    gmt_timestamp = dt_utc.replace(microsecond=0).isoformat()
+                    updates.append({'article_id': article_id, 'gmt_timestamp': gmt_timestamp})
+                except Exception as e:
+                    failed += 1
+                    self.logger.debug(f"Failed to convert timestamp for article {article_id}: {e}")
+
+            if updates:
+                await self.db.update_gmt_batch(updates)
+                self.logger.info(f"✅ [{source_name}] Backfilled {len(updates)} articles ({failed} failed)")
         except Exception as e:
             self.logger.debug(f"Error during GMT backfill for {source_id}: {e}")
     
@@ -1478,30 +1587,23 @@ class NewsGather():
                                         }
                                         
                                         self.sources[source_id] = {**new_source, 'articles': {}}
-                                        
-                                        async with self.db_lock:
-                                            with self.eng.connect() as conn:
-                                                try:
-                                                    ins = insert(self.gm_sources).values(**new_source)
-                                                    result = conn.execute(ins)
-                                                    conn.commit()
-                                                    sources_added += 1
-                                                    self.logger.info(f"✅ Added source: {source_name}")
-                                                    
-                                                    # Try to discover RSS feed
-                                                    if source_url:
-                                                        self.loop.create_task(
-                                                            self.register_rss_source(session, source_id, source_name, source_url)
-                                                        )
-                                                except Exception as e:
-                                                    self.logger.error(f"Failed to insert source {source_name}: {e}")
-                                                    conn.rollback()
+
+                                        try:
+                                            await self.db.insert_source_if_new(new_source)
+                                            sources_added += 1
+                                            self.logger.info(f"✅ Added source: {source_name}")
+                                            # Try to discover RSS feed
+                                            if source_url:
+                                                self.loop.create_task(
+                                                    self.register_rss_source(session, source_id, source_name, source_url)
+                                                )
+                                        except Exception as e:
+                                            self.logger.error(f"Failed to insert source {source_name}: {e}")
                                     
-                                    # Detect language
-                                    detected_lang, lang_confidence = detect_article_language(
-                                        article_title, article_description, article_content
-                                    )
-                                    
+                                    # NewsAPI requests are per-language (the `lang` loop variable).
+                                    # Use it directly — no need for langdetect on a title-only article.
+                                    detected_lang, lang_confidence = lang, 1.0
+
                                     # Insert article
                                     new_article = {
                                         'id_article': article_key,
@@ -1523,25 +1625,15 @@ class NewsGather():
                                     if await self.enrich_article_content(new_article, source_name, source_id):
                                         new_article['is_enriched'] = 1
 
-                                    async with self.db_lock:
-                                        with self.eng.connect() as conn:
-                                            try:
-                                                ins = insert(self.gm_articles).values(**new_article)
-                                                ins_do_nothing = ins.on_conflict_do_nothing()
-                                                result = conn.execute(ins_do_nothing)
-                                                conn.commit()
-                                                
-                                                if result.rowcount > 0:
-                                                    articles_inserted += 1
-                                                    self.logger.debug(f"✅ [{source_name}] {article_title[:60]}...")
-                                                else:
-                                                    articles_skipped += 1
-                                                    self.logger.debug(f"⏭️  [{source_name}] Already exists: {article_title[:40]}...")
-                                                
-                                                # No need to cache articles in memory - SQLite handles deduplication
-                                            except Exception as e:
-                                                self.logger.error(f"Failed to insert article '{article_title[:40]}...': {e}")
-                                                conn.rollback()
+                                    try:
+                                        if await self.db.insert_article(new_article):
+                                            articles_inserted += 1
+                                            self.logger.debug(f"✅ [{source_name}] {article_title[:60]}...")
+                                        else:
+                                            articles_skipped += 1
+                                            self.logger.debug(f"⏭️  [{source_name}] Already exists: {article_title[:40]}...")
+                                    except Exception as e:
+                                        self.logger.error(f"Failed to insert article '{article_title[:40]}...': {e}")
                                 
                                 self.logger.info(f"Summary NewsAPI {lang}: {articles_inserted} inserted, {articles_skipped} skipped, {sources_added} new sources")
                         
@@ -1575,22 +1667,16 @@ class NewsGather():
                 self.logger.info(f"📡 RSS Cycle {cycle_count} starting...")
                 
                 # Get all RSS sources from database (skip fetch_blocked sources)
-                rss_sources = []
-                with self.eng.connect() as conn:
-                    stmt = select(self.gm_sources).where(
-                        self.gm_sources.c.id_source.like('rss-%'),
-                        self.gm_sources.c.fetch_blocked != 1
-                    )
-                    results = conn.execute(stmt).fetchall()
-                    for row in results:
-                        if self.shutdown_flag:
-                            break
-                        rss_sources.append({
-                            'id': row[0],
-                            'name': row[1],
-                            'url': row[3],
-                            'language': row[5] or 'en'
-                        })
+                raw_sources = await self.db.load_rss_sources(skip_blocked=True)
+                rss_sources = [
+                    {
+                        'id':       r['id_source'],
+                        'name':     r['name'],
+                        'url':      r['url'],
+                        'language': r.get('language') or 'en',
+                    }
+                    for r in raw_sources
+                ]
                 
                 if not rss_sources:
                     self.logger.info("No RSS sources found in database")
@@ -1756,9 +1842,28 @@ class NewsGather():
                     # Extract first image from description and remove it from HTML to avoid duplicates
                     extracted_image_url, clean_description = extract_and_remove_first_image(clean_description) if clean_description else (None, clean_description)
                     
-                    # Detect language
-                    detected_lang, lang_confidence = detect_article_language(title, clean_description)
-                    
+                    # Language detection — prefer declared source/feed language over
+                    # automatic detection.  Short titles (e.g. author names, column
+                    # headers) are frequently mis-classified by langdetect, and many
+                    # feeds already declare their language either in the DB source
+                    # record or in the RSS <language> element.
+                    #
+                    # Priority:
+                    #   1. gm_sources.language (manually/auto set when source created)
+                    #   2. <language> element in the RSS feed itself
+                    #   3. Automatic langdetect (fallback)
+                    _source_declared_lang = (source.get('language') or '').strip().lower()
+                    if not _source_declared_lang:
+                        # Try the RSS feed's own <language> tag (e.g. "pt-br" → "pt")
+                        _feed_lang_raw = (feed.feed.get('language') or '').strip().lower()
+                        _source_declared_lang = _feed_lang_raw[:2] if _feed_lang_raw else ''
+
+                    if _source_declared_lang:
+                        # Source language is known — use it directly with full confidence.
+                        detected_lang, lang_confidence = _source_declared_lang, 1.0
+                    else:
+                        detected_lang, lang_confidence = detect_article_language(title, clean_description)
+
                     # Create article object
                     new_article = {
                         'id_article': article_key,
@@ -1778,25 +1883,14 @@ class NewsGather():
                         'title_hash': _make_title_hash(title),
                     }
 
-                    # ── Cross-feed dedup: if another feed already enriched an
-                    # article with the same title, reuse its content ────────
                     t_hash = new_article['title_hash']
                     if t_hash:
-                        async with self.db_lock:
-                            with self.eng.connect() as conn:
-                                row = conn.execute(text("""
-                                    SELECT author, description, content, urlToImage
-                                    FROM gm_articles
-                                    WHERE title_hash = :h
-                                      AND is_enriched = 1
-                                      AND (content IS NOT NULL AND content != '')
-                                    LIMIT 1
-                                """), {'h': t_hash}).fetchone()
-                        if row:
-                            new_article['author']      = row[0] or new_article['author']
-                            new_article['description'] = row[1] or new_article['description']
-                            new_article['content']     = row[2]
-                            new_article['urlToImage']  = row[3] or new_article['urlToImage']
+                        existing = await self.db.find_by_title_hash(t_hash)
+                        if existing:
+                            new_article['author']      = existing['author']      or new_article['author']
+                            new_article['description'] = existing['description'] or new_article['description']
+                            new_article['content']     = existing['content']
+                            new_article['urlToImage']  = existing['urlToImage']  or new_article['urlToImage']
                             new_article['is_enriched'] = 1
 
                     # Inline enrichment intentionally removed from RSS pipeline:
@@ -1805,23 +1899,15 @@ class NewsGather():
                     # The backfill worker (_backfill_consumer) handles is_enriched=0 articles.
 
                     # Insert article
-                    async with self.db_lock:
-                        with self.eng.connect() as conn:
-                            try:
-                                ins = insert(self.gm_articles).values(**new_article)
-                                ins_do_nothing = ins.on_conflict_do_nothing()
-                                result = conn.execute(ins_do_nothing)
-                                conn.commit()
-                                
-                                if result.rowcount > 0:
-                                    articles_inserted += 1
-                                    if articles_inserted <= 5:  # Log first 5
-                                        self.logger.debug(f"  ✅ [{source_name}] {title[:60]}...")
-                                else:
-                                    articles_skipped += 1
-                            except Exception as e:
-                                self.logger.error(f"Failed to insert RSS article: {e}")
-                                conn.rollback()
+                    try:
+                        if await self.db.insert_article(new_article):
+                            articles_inserted += 1
+                            if articles_inserted <= 5:  # Log first 5
+                                self.logger.debug(f"  ✅ [{source_name}] {title[:60]}...")
+                        else:
+                            articles_skipped += 1
+                    except Exception as e:
+                        self.logger.error(f"Failed to insert RSS article: {e}")
                 
             if articles_inserted > 0:
                 self.logger.debug(f"✅ [{source_name}] {articles_inserted} new, {articles_skipped} existing")
@@ -2104,9 +2190,10 @@ class NewsGather():
             if not image and clean_description:
                 extracted_image, clean_description = extract_and_remove_first_image(clean_description)
             
-            # Detect language
-            detected_lang, lang_confidence = detect_article_language(title, clean_description)
-            
+            # MediaStack requests are per-language (the `language` loop variable).
+            # Use it directly — no need for langdetect on a title-only article.
+            detected_lang, lang_confidence = language, 1.0
+
             new_article = {
                 'id_article': article_id,
                 'id_source': source_id,
@@ -2129,23 +2216,15 @@ class NewsGather():
                 new_article['is_enriched'] = 1
 
             # Insert article with lock
-            async with self.db_lock:
-                with self.eng.connect() as conn:
-                    try:
-                        ins = insert(self.gm_articles).values(**new_article)
-                        ins_do_nothing = ins.on_conflict_do_nothing()
-                        result = conn.execute(ins_do_nothing)
-                        conn.commit()
-                        
-                        if result.rowcount > 0:
-                            self.logger.debug(f"  ✅ MediaStack: {title[:60]}...")
-                            return 'inserted'
-                        else:
-                            return 'skipped'
-                    except Exception as e:
-                        self.logger.error(f"Failed to insert MediaStack article: {e}")
-                        conn.rollback()
-                        return 'error'
+            try:
+                inserted = await self.db.insert_article(new_article)
+                if inserted:
+                    self.logger.debug(f"  ✅ MediaStack: {title[:60]}...")
+                    return 'inserted'
+                return 'skipped'
+            except Exception as e:
+                self.logger.error(f"Failed to insert MediaStack article: {e}")
+                return 'error'
         
         except Exception as e:
             self.logger.error(f"Error processing MediaStack article: {str(e)}")
@@ -2156,36 +2235,23 @@ class NewsGather():
         Ensure MediaStack source exists in database.
         Returns: True if source was newly created, False if it already existed
         """
-        async with self.db_lock:
-            with self.eng.connect() as conn:
-                try:
-                    # Check if source exists
-                    stmt = select(self.gm_sources.c.id_source).where(
-                        self.gm_sources.c.id_source == source_id
-                    )
-                    result = conn.execute(stmt).fetchone()
-                    
-                    if not result:
-                        # Insert new source
-                        ins = insert(self.gm_sources).values(
-                            id_source=source_id,
-                            name=source_name,
-                            description='MediaStack news source',
-                            url=source_url,  # Now capturing actual source URL
-                            category=category,
-                            language=language,
-                            country=''
-                        )
-                        ins = ins.on_conflict_do_nothing(index_elements=['id_source'])
-                        conn.execute(ins)
-                        conn.commit()
-                        self.logger.info(f"✅ Created MediaStack source: {source_name} ({source_url})")
-                        return True
-                    return False
-                except Exception as e:
-                    self.logger.error(f"Error ensuring MediaStack source exists: {e}")
-                    conn.rollback()
-                    return False
+        source = {
+            'id_source':   source_id,
+            'name':        source_name,
+            'description': 'MediaStack news source',
+            'url':         source_url,
+            'category':    category,
+            'language':    language,
+            'country':     '',
+        }
+        try:
+            is_new = await self.db.insert_source_if_new(source)
+            if is_new:
+                self.logger.info(f"✅ Created MediaStack source: {source_name} ({source_url})")
+            return is_new
+        except Exception as e:
+            self.logger.error(f"Error ensuring MediaStack source exists: {e}")
+            return False
     
     async def backfill_content(self):
         """
@@ -2226,6 +2292,7 @@ class NewsGather():
         # DB query while it is still being processed.  Safe to share between
         # the two coroutines because asyncio is single-threaded.
         processing_ids: set[int] = set()
+        self._backfill_processing_ids = processing_ids  # expose for /api/queues
 
         await asyncio.gather(
             self._backfill_producer(inflight, processing_ids),
@@ -2245,42 +2312,18 @@ class NewsGather():
         in-flight.  Sleeps BACKFILL_CYCLE_INTERVAL only when the DB returns no
         new rows.
         """
-        from sqlalchemy import text as sa_text
-
         while not self.shutdown_flag:
             try:
                 # ── 0. Bulk-close articles from blocked sources ────────────
-                async with self.db_lock:
-                    with self.eng.begin() as conn:
-                        conn.execute(sa_text("""
-                            UPDATE gm_articles
-                            SET is_enriched = CASE
-                                WHEN (description IS NOT NULL AND description != '')
-                                  OR (content IS NOT NULL AND content != '') THEN 1
-                                ELSE -1
-                            END
-                            WHERE is_enriched = 0
-                              AND id_source IN (
-                                  SELECT id_source FROM gm_sources WHERE fetch_blocked = 1
-                              )
-                        """))
+                await self.db.bulk_close_blocked_source_articles()
 
                 # ── 1. Fetch a larger slice so that after excluding in-flight
                 #       articles we still have enough work to fill free slots. ─
                 fetch_limit = BACKFILL_BATCH_SIZE + len(processing_ids)
-                async with self.db_lock:
-                    with self.eng.connect() as conn:
-                        rows = conn.execute(sa_text("""
-                            SELECT a.id_article, a.id_source, a.url, a.author,
-                                   a.description, a.content, a.urlToImage,
-                                   s.name AS source_name
-                            FROM v_articles_pending_enrichment a
-                            LEFT JOIN gm_sources s ON s.id_source = a.id_source
-                            LIMIT :batch
-                        """), {"batch": fetch_limit}).fetchall()
+                rows = await self.db.fetch_pending_enrichment(fetch_limit)
 
                 # Exclude articles already queued / being processed
-                rows = [r for r in rows if r[0] not in processing_ids]
+                rows = [r for r in rows if r['id_article'] not in processing_ids]
 
                 if not rows:
                     self.logger.info(
@@ -2301,22 +2344,17 @@ class NewsGather():
                     if self.shutdown_flag:
                         return
 
-                    # Block here until a slot is free — this is the back-
-                    # pressure mechanism.  Fast articles free their slots
-                    # quickly; slow ones (Playwright) hold theirs longer,
-                    # but that only limits the *number* in flight, not the
-                    # speed at which already-finished articles are persisted.
                     await inflight.acquire()
 
                     article = {
-                        'id_article':  row[0],
-                        'id_source':   row[1] or '',
-                        'source_name': row[7] or row[1] or '',
-                        'url':         row[2],
-                        'author':      row[3],
-                        'description': row[4],
-                        'content':     row[5],
-                        'urlToImage':  row[6],
+                        'id_article':  row['id_article'],
+                        'id_source':   row['id_source']   or '',
+                        'source_name': row['source_name'] or row['id_source'] or '',
+                        'url':         row['url'],
+                        'author':      row['author'],
+                        'description': row['description'],
+                        'content':     row['content'],
+                        'urlToImage':  row['urlToImage'],
                     }
                     processing_ids.add(article['id_article'])
                     await self._enrichment_worker.enqueue(article)
@@ -2341,9 +2379,6 @@ class NewsGather():
         immediately as each article finishes — no waiting for the whole batch.
         Releases the inflight semaphore slot so the producer can enqueue more.
         """
-        from sqlalchemy import text as sa_text
-        import re as _re_cons
-
         enriched_total = 0
         failed_total = 0
 
@@ -2391,7 +2426,7 @@ class NewsGather():
                         # meaningful — avoids stub HTML like HN's
                         # "<a href=...>Comments</a>" counting as real content.
                         raw_desc = article_dict.get('description') or ''
-                        _desc_text = _re_cons.sub(r'<[^>]+>', '', raw_desc).strip()
+                        _desc_text = re.sub(r'<[^>]+>', '', raw_desc).strip()
                         fetched_description = raw_desc if len(_desc_text) >= 80 else None
 
                         # If the fetch "succeeded" but returned nothing useful,
@@ -2405,24 +2440,14 @@ class NewsGather():
                         else:
                             enriched_val = 1
 
-                        async with self.db_lock:
-                            with self.eng.begin() as conn:
-                                conn.execute(sa_text("""
-                                    UPDATE gm_articles
-                                    SET author=COALESCE(:author, author),
-                                        description=COALESCE(:description, description),
-                                        content=:content,
-                                        is_enriched=:is_enriched,
-                                        urlToImage=COALESCE(:urlToImage, urlToImage)
-                                    WHERE id_article=:id_article
-                                """), {
-                                    'author':      fetched_author,
-                                    'description': fetched_description,
-                                    'content':     fetched_content,
-                                    'urlToImage':  fetched_image,
-                                    'is_enriched': enriched_val,
-                                    'id_article':  article_id,
-                                })
+                        await self.db.save_enriched_article(
+                            article_id,
+                            author=fetched_author,
+                            description=fetched_description,
+                            content=fetched_content,
+                            url_to_image=fetched_image,
+                            is_enriched=enriched_val,
+                        )
                         if enriched_val == 1:
                             enriched_total += 1
                         self.logger.debug(
@@ -2434,22 +2459,17 @@ class NewsGather():
                             f"Backfill DB write failed for {article_id}: {exc}"
                         )
                 else:
-                    # Use plain-text length to judge description quality —
-                    # stub HTML like "<a>Comments</a>" must NOT count as content.
-                    import re as _re2
-                    _raw = article_dict.get('description') or ''
-                    _plain = _re_cons.sub(r'<[^>]+>', '', _raw).strip()
-                    has_desc = len(_plain) >= 80
+                    # Fetch genuinely failed (ok=False from EnrichmentWorker).
+                    # Only mark is_enriched=1 if the article already had real
+                    # content in DB before we tried — meaning it was already
+                    # complete and no new fields were needed.
+                    # If content is missing, mark -1 so the article is not
+                    # silently treated as complete; the translation pipeline
+                    # already handles is_enriched=-1 via v_articles_pending_translation.
                     has_cont = bool((article_dict.get('content') or '').strip())
-                    is_enriched_val = 1 if (has_desc or has_cont) else -1
+                    is_enriched_val = 1 if has_cont else -1
                     try:
-                        async with self.db_lock:
-                            with self.eng.begin() as conn:
-                                conn.execute(sa_text("""
-                                    UPDATE gm_articles
-                                    SET is_enriched=:val
-                                    WHERE id_article=:id
-                                """), {'val': is_enriched_val, 'id': article_id})
+                        await self.db.save_enrichment_failure(article_id, has_cont)
                     except Exception as exc:
                         self.logger.error(f"Backfill failed-update error: {exc}")
                     failed_total += 1
@@ -2503,19 +2523,13 @@ class NewsGather():
         # Check if this source is blocked (403s)
         if source_id:
             try:
-                async with self.db_lock:
-                    with self.eng.connect() as conn:
-                        stmt = select(
-                            self.gm_sources.c.fetch_blocked,
-                            self.gm_sources.c.blocked_count
-                        ).where(self.gm_sources.c.id_source == source_id)
-                        result = conn.execute(stmt).fetchone()
-                        
-                        if result:
-                            fetch_blocked, blocked_count = result
-                            if fetch_blocked == 1:
-                                self.logger.debug(f"⏭️  [{source_name}] Skipping fetch - source is blocklisted (403 count: {blocked_count})")
-                                return False
+                fetch_blocked, blocked_count = await self.db.get_source_block_status(source_id)
+                if fetch_blocked == 1:
+                    self.logger.debug(
+                        f"⏭️  [{source_name}] Skipping fetch - "
+                        f"source is blocklisted (403 count: {blocked_count})"
+                    )
+                    return False
             except Exception as e:
                 self.logger.debug(f"Could not check blocklist for {source_name}: {e}")
         
@@ -2590,36 +2604,7 @@ class NewsGather():
             error_code: HTTP error code or 'TIMEOUT' (401 Unauthorized, 402 Payment, 403 Forbidden, 406 Not Acceptable, 410 Gone, 500 Internal Error, 503 Unavailable, TIMEOUT, etc.)
         """
         try:
-            async with self.db_lock:
-                with self.eng.connect() as conn:
-                    # Get current count
-                    stmt = select(
-                        self.gm_sources.c.blocked_count,
-                        self.gm_sources.c.fetch_blocked
-                    ).where(self.gm_sources.c.id_source == source_id)
-                    result = conn.execute(stmt).fetchone()
-                    
-                    if result:
-                        current_count, currently_blocked = result
-                        new_count = current_count + 1
-                        
-                        # Mark as blocked if 3+ HTTP errors
-                        should_block = 1 if new_count >= 3 else 0
-                        
-                        # Update the source
-                        update_stmt = self.gm_sources.update().where(
-                            self.gm_sources.c.id_source == source_id
-                        ).values(
-                            blocked_count=new_count,
-                            fetch_blocked=should_block
-                        )
-                        conn.execute(update_stmt)
-                        conn.commit()
-                        
-                        if should_block == 1 and currently_blocked == 0:
-                            self.logger.warning(f"🚫 [{source_name}] Blocklisted after {new_count} HTTP {error_code} errors - will skip future fetches")
-                        else:
-                            self.logger.debug(f"⚠️  [{source_name}] HTTP {error_code} error #{new_count}")
+            await self.db.increment_source_blocked_count(source_id, source_name, error_code)
         except Exception as e:
             self.logger.debug(f"Could not update blocked_count for {source_name}: {e}")
 
@@ -2632,42 +2617,18 @@ class NewsGather():
         articles whose URL contains that domain are removed from the enrichment queue
         (is_enriched = -1).  The RSS feed source in gm_sources is NOT touched.
         """
-        from sqlalchemy import text as sa_text
         if not domain:
             return
         try:
-            async with self.db_lock:
-                with self.eng.begin() as conn:
-                    conn.execute(sa_text("""
-                        INSERT INTO gm_blocked_domains
-                            (domain, blocked_count, is_blocked, last_error, updated_at)
-                        VALUES (:d, 1, 0, :e, datetime('now'))
-                        ON CONFLICT(domain) DO UPDATE SET
-                            blocked_count = blocked_count + 1,
-                            last_error    = :e,
-                            updated_at    = datetime('now'),
-                            is_blocked    = CASE
-                                WHEN blocked_count + 1 >= 3 THEN 1 ELSE is_blocked
-                            END
-                    """), {'d': domain, 'e': str(error_code)})
-
-                    result = conn.execute(sa_text(
-                        "SELECT blocked_count, is_blocked FROM gm_blocked_domains WHERE domain=:d"
-                    ), {'d': domain}).fetchone()
-
-                    if result and result[1] == 1:
-                        # Bulk-remove pending articles for this domain from the queue
-                        upd = conn.execute(sa_text("""
-                            UPDATE gm_articles SET is_enriched = -1
-                            WHERE is_enriched = 0
-                              AND (content IS NULL OR content = '')
-                              AND url LIKE :pat
-                        """), {'pat': f'%{domain}%'})
-                        self.logger.warning(
-                            f"🚫 Domain '{domain}' blocked after {result[0]} "
-                            f"HTTP {error_code} errors — "
-                            f"{upd.rowcount} pending articles removed from queue"
-                        )
+            count, is_blocked = await self.db.increment_blocked_domain(domain, error_code)
+            if is_blocked:
+                removed = await self.db.bulk_remove_pending_for_domain(domain)
+                if removed > 0:
+                    self.logger.warning(
+                        f"🚫 Domain '{domain}' blocked after {count} "
+                        f"HTTP {error_code} errors — "
+                        f"{removed} pending articles removed from queue"
+                    )
         except Exception as e:
             self.logger.debug(f"Could not update blocked domain '{domain}': {e}")
 
@@ -2702,21 +2663,7 @@ class NewsGather():
         while True:
             try:
                 # ── Collect blocked sources ────────────────────────────────
-                async with self.db_lock:
-                    with self.eng.connect() as conn:
-                        rows = conn.execute(text("""
-                            SELECT s.id_source, s.name, s.blocked_count,
-                                   a.url AS sample_url
-                            FROM gm_sources s
-                            JOIN gm_articles a ON a.id_article = (
-                                SELECT MAX(id_article)
-                                FROM gm_articles
-                                WHERE id_source = s.id_source
-                                  AND url IS NOT NULL AND url != ''
-                            )
-                            WHERE s.fetch_blocked = 1
-                            ORDER BY s.blocked_count ASC, s.name
-                        """)).fetchall()
+                rows = await self.db.get_blocked_sources_for_probe()
 
                 if not rows:
                     self.logger.debug("🔍 Probe: no blocked sources — sleeping")
@@ -2727,10 +2674,10 @@ class NewsGather():
                 unblocked_count = 0
 
                 for row in rows:
-                    source_id   = row[0]
-                    source_name = row[1] or source_id
-                    count       = row[2]
-                    url         = row[3]
+                    source_id   = row['id_source']
+                    source_name = row['name'] or source_id
+                    count       = row['blocked_count']
+                    url         = row['sample_url']
 
                     try:
                         result = await fetch_article_content_async(url, PROBE_TIMEOUT)
@@ -2740,22 +2687,9 @@ class NewsGather():
                                 f"✅ [{source_name}] probe succeeded — "
                                 f"unblocking (was {count} errors)"
                             )
-                            async with self.db_lock:
-                                with self.eng.connect() as conn:
-                                    conn.execute(text("""
-                                        UPDATE gm_sources
-                                        SET fetch_blocked = 0, blocked_count = 0
-                                        WHERE id_source = :sid
-                                    """), {"sid": source_id})
-                                    res = conn.execute(text("""
-                                        UPDATE gm_articles
-                                        SET is_enriched = 0
-                                        WHERE id_source = :sid
-                                          AND is_enriched != 1
-                                    """), {"sid": source_id})
-                                    conn.commit()
+                            requeued = await self.db.unblock_source(source_id)
                             self.logger.info(
-                                f"   ↩  {res.rowcount} article(s) re-queued for enrichment"
+                                f"   ↩  {requeued} article(s) re-queued for enrichment"
                             )
                             unblocked_count += 1
                         else:
@@ -2820,8 +2754,6 @@ class NewsGather():
             f"delay={TRANSLATE_DELAY}s, cycle={TRANSLATE_CYCLE_INTERVAL}s"
         )
 
-        from sqlalchemy import update as sa_update, and_, or_, text as sa_text
-
         while not self.shutdown_flag:
             # ── Bulk-skip: mark articles that don't need translation → -1 ────
             # Runs every cycle so new articles inserted since startup are caught.
@@ -2832,22 +2764,12 @@ class NewsGather():
             # Articles with NULL detected_language are left alone — language
             # detection may still run and set a translatable language later.
             try:
-                async with self.db_lock:
-                    with self.eng.begin() as conn:
-                        result = conn.execute(sa_text("""
-                            UPDATE gm_articles
-                            SET is_translated = -1
-                            WHERE is_translated = 0
-                              AND detected_language IS NOT NULL
-                              AND detected_language NOT IN (
-                                  SELECT language_code FROM languages WHERE translate = 1
-                              )
-                        """))
-                        if result.rowcount:
-                            self.logger.info(
-                                f"🌐 Translation: bulk-skipped {result.rowcount} articles "
-                                f"(translate=0 or unsupported language)"
-                            )
+                skipped = await self.db.bulk_skip_non_translatable()
+                if skipped:
+                    self.logger.info(
+                        f"🌐 Translation: bulk-skipped {skipped} articles "
+                        f"(translate=0 or unsupported language)"
+                    )
             except Exception as e:
                 self.logger.warning(f"Translation bulk-skip failed (non-critical): {e}")
             try:
@@ -2856,18 +2778,7 @@ class NewsGather():
                 # already applies all filters (is_translated=0, title not null/empty,
                 # translate=1 or unknown language) and carries the resolved
                 # target_language / translator_code from the languages table.
-                async with self.db_lock:
-                    with self.eng.connect() as conn:
-                        stmt = sa_text("""
-                            SELECT id_article,
-                                   detected_language,
-                                   title,
-                                   description,
-                                   content
-                            FROM v_articles_pending_translation
-                            LIMIT :batch
-                        """)
-                        rows = conn.execute(stmt, {"batch": TRANSLATE_BATCH_SIZE}).fetchall()
+                rows = await self.db.fetch_pending_translation(TRANSLATE_BATCH_SIZE)
 
                 if not rows:
                     self.logger.info(
@@ -2887,11 +2798,11 @@ class NewsGather():
                     if self.shutdown_flag:
                         break
 
-                    article_id  = row[0]
-                    lang        = row[1]   # detected_language, may be None
-                    title       = row[2] or ''
-                    description = row[3] or ''
-                    content     = row[4] or ''
+                    article_id  = row['id_article']
+                    lang        = row['detected_language']  # may be None
+                    title       = row['title']       or ''
+                    description = row['description'] or ''
+                    content     = row['content']     or ''
 
                     # Translate all three fields; NLLB subprocess used as fallback
                     # when Google fails — fully async, does not block the event loop.
@@ -2903,25 +2814,16 @@ class NewsGather():
                     any_translated = ok_t or ok_d or ok_c
 
                     try:
-                        async with self.db_lock:
-                            with self.eng.begin() as conn:
-                                values: dict = {
-                                    # -1 = processed but nothing to translate
-                                    # (misdetected lang / already in target lang)
-                                    'is_translated': 1 if any_translated else -1,
-                                }
-                                if ok_t:
-                                    values['translated_title'] = t_title
-                                if ok_d:
-                                    values['translated_description'] = t_desc
-                                if ok_c:
-                                    values['translated_content'] = t_cont
-
-                                conn.execute(
-                                    sa_update(self.gm_articles)
-                                    .where(self.gm_articles.c.id_article == article_id)
-                                    .values(**values)
-                                )
+                        values: dict = {
+                            'is_translated': 1 if any_translated else -1,
+                        }
+                        if ok_t:
+                            values['translated_title'] = t_title
+                        if ok_d:
+                            values['translated_description'] = t_desc
+                        if ok_c:
+                            values['translated_content'] = t_cont
+                        await self.db.save_translation(article_id, values)
                         if any_translated:
                             translated_count += 1
                             self.logger.debug(
@@ -2951,6 +2853,20 @@ class NewsGather():
             except Exception as e:
                 self.logger.error(f"Translation backfill unexpected error: {e}", exc_info=True)
                 await asyncio.sleep(60)
+
+    async def _refresh_queue_stats(self, interval: int = 30) -> None:
+        """Background task: refresh _queue_stats every `interval` seconds."""
+        while not self.shutdown_flag:
+            try:
+                stats = await self.db.fetch_queue_stats()
+                self._queue_stats.update(stats)
+                self.logger.debug(
+                    f"📊 Queue stats refreshed — enrich_pending={stats['enrich_pending']}, "
+                    f"translate_pending={stats['translate_pending']}"
+                )
+            except Exception as e:
+                self.logger.warning(f"Queue stats refresh failed: {e}")
+            await asyncio.sleep(interval)
 
     async def serve_api(self):
         """Run FastAPI HTTP server (real-time article polling endpoint)."""
@@ -2998,16 +2914,8 @@ class NewsGather():
                     "GET /api/latest_timestamp": "Get latest insertion timestamp",
                     "GET /api/sources": "Get available news sources",
                     "GET /api/stats": "Get collection statistics",
-                },
-                "documentation": "/docs",
-            }
-
-        @api_app.get("/api/health")
-        async def health_check():
-            return {
-                "status": "ok",
-                "timestamp": int(time.time() * 1000),
-                "version": "2.0.0",
+                    },
+                    "GET /api/queues": "Queue sizes (enrichment, translation)",
                 "database": "connected",
             }
 
@@ -3117,6 +3025,41 @@ class NewsGather():
             except Exception as e:
                 raise _HTTPException(status_code=500, detail=str(e))
 
+        @api_app.get("/api/queues")
+        async def get_queues():
+            try:
+                now_ms = int(time.time() * 1000)
+
+                # Return cached stats — refreshed every 30 s by _refresh_queue_stats()
+                s = gather._queue_stats
+                worker_q  = gather._enrichment_worker.input_queue.qsize()
+                in_flight = len(gather._backfill_processing_ids)
+                total_articles = s["enriched"] + s["enrich_failed"] + s["enrich_pending"]
+                return {
+                    "success": True,
+                    "timestamp": now_ms,
+                    "timestamp_iso": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(now_ms / 1000)),
+                    "stats_age_s": round((now_ms - s["refreshed_at"]) / 1000, 1) if s["refreshed_at"] else None,
+                    "articles": {
+                        "total": total_articles,
+                        "enriched": s["enriched"],
+                        "enrich_failed": s["enrich_failed"],
+                        "enrich_pending": s["enrich_pending"],
+                        "translated": s["translated"],
+                        "translate_skipped": s["translate_skipped"],
+                    },
+                    "enrichment": {
+                        "worker_queue": worker_q,
+                        "in_flight": in_flight,
+                        "pending_db": s["enrich_pending"],
+                    },
+                    "translation": {
+                        "pending_db": s["translate_pending"],
+                    },
+                }
+            except Exception as e:
+                raise _HTTPException(status_code=500, detail=str(e))
+
         @api_app.get("/api/stats")
         async def get_stats():
             try:
@@ -3213,12 +3156,24 @@ if __name__ == '__main__':
         """Handle shutdown signals by cancelling all collector tasks"""
         app.logger.info("\n🛑 Received shutdown signal. Cancelling collectors...")
         app.shutdown_flag = True
-        
-        # Cancel all collector tasks
+
+        # Cancel all collector tasks — asyncio.to_thread() tasks are not
+        # directly cancellable mid-thread, but cancelling the wrapping Task
+        # makes gather() return promptly once current thread calls complete.
         for task in collector_tasks:
             if not task.done():
                 task.cancel()
-        
+
+        # Schedule a hard exit after 8 s in case threads are still running.
+        # This fires before systemd's TimeoutStopSec=10 sends SIGKILL.
+        def _force_exit():
+            import os, sys
+            app.logger.warning("⚠️  Force-exiting after timeout (threads still running)")
+            sys.stdout.flush()
+            os._exit(0)
+        import threading
+        threading.Timer(8.0, _force_exit).start()
+
         app.logger.info("✅ Shutdown signal processed")
     
     # Register signal handlers (asyncio-compatible)
@@ -3227,6 +3182,7 @@ if __name__ == '__main__':
     
     # Run all three collectors in parallel
     async def run_all_collectors():
+        await app.open_async_db()
         app.logger.info("🚀 Starting all news collectors in parallel...")
         app.logger.info(f"   • NewsAPI: every {NEWSAPI_CYCLE_INTERVAL}s ({NEWSAPI_CYCLE_INTERVAL//60} min)")
         app.logger.info(f"   • RSS Feeds: every {RSS_CYCLE_INTERVAL}s ({RSS_CYCLE_INTERVAL//60} min)")
@@ -3244,6 +3200,7 @@ if __name__ == '__main__':
             loop.create_task(app.backfill_content()),
             loop.create_task(app.backfill_translations()),
             loop.create_task(app.probe_blocked_sources()),
+            loop.create_task(app._refresh_queue_stats()),
             loop.create_task(app.serve_api()),
         ]
         
@@ -3265,6 +3222,8 @@ if __name__ == '__main__':
             
             # Wait for all tasks to finish cancellation
             await asyncio.gather(*tasks, return_exceptions=True)
+            if app.db:
+                await app.db.close()
             app.logger.info("🏁 All collectors stopped")
     
     try:
