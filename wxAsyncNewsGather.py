@@ -60,8 +60,8 @@ from html_utils import (
 # Async parallel enrichment worker
 from enrichment_worker import EnrichmentWorker, _BLOCKED_THRESHOLD
 
-# Centralised async CRUD layer (backed by aiosqlite)
-from news_db import NewsDatabase
+# Centralised async CRUD layer — backend selected by DB_BACKEND in .env
+from db_factory import get_db_class, get_db_dsn, get_db_backend
 
 # Generic multi-producer/multi-consumer pipeline infrastructure
 from pipeline import PipelineQueue, PipelineStage, PipelineSupervisor
@@ -226,13 +226,8 @@ from html.parser import HTMLParser
 
 
 def dbCredentials() -> str:
-    """Return SQLite database path"""
-    db_path = str(config('DB_PATH', default='predator_news.db', cast=str))
-    # Make path absolute if relative
-    if not os.path.isabs(db_path):
-        script_dir = os.path.dirname(os.path.abspath(__file__))
-        db_path = os.path.join(script_dir, db_path)
-    return db_path
+    """Return the database connection string (path or DSN) from .env."""
+    return get_db_dsn()
 
 
 def as_text(value: Any) -> str:
@@ -776,7 +771,7 @@ class NewsGather():
         Called once at the very start of run_all_collectors() before any
         collector tasks are created.
         """
-        self.db = await NewsDatabase.open(self.db_path)
+        self.db = await get_db_class().open(self.db_path)
 
         # Load sources into memory
         source_rows = await self.db.load_sources()
@@ -1036,7 +1031,7 @@ class NewsGather():
     def dbOpen(self):    
         db_path = dbCredentials()
         self.db_path = db_path  # Store for later use
-        self.logger.info(f"Opening SQLite database: {db_path}")
+        self.logger.info(f"Opening {get_db_backend().upper()} database: {db_path}")
         # SQLite connection string with WAL mode and increased timeout for concurrent writes
         eng = create_engine(
             f'sqlite:///{db_path}',
