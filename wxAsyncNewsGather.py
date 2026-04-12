@@ -244,9 +244,12 @@ def as_text(value: Any) -> str:
 
 
 def _make_title_hash(title: str) -> str:
-    """SHA-1 of lowercased, stripped title — used for cross-feed dedup."""
-    if not title:
-        return ''
+    """SHA-1 of lowercased, whitespace-normalised title — used for cross-feed dedup.
+
+    Callers must guarantee *title* is non-empty; an empty title is a programming
+    error because entries are discarded before this point.
+    """
+    assert title and title.strip(), "_make_title_hash called with empty title"
     norm = ' '.join(title.lower().split())
     return hashlib.sha1(norm.encode('utf-8', errors='ignore')).hexdigest()[:16]
 
@@ -777,16 +780,17 @@ class NewsGather():
         source_rows = await self.db.load_sources()
         self.sources = {
             r['id_source']: {
-                'id_source':    r['id_source'],
-                'name':         r.get('name',        ''),
-                'description':  r.get('description', ''),
-                'url':          r.get('url',         ''),
-                'category':     r.get('category',    ''),
-                'language':     r.get('language',    ''),
-                'country':      r.get('country',     ''),
-                'timezone':     r.get('timezone'),
-                'use_timezone': r.get('use_timezone', 0),
-                'articles':     {},
+                'id_source':            r['id_source'],
+                'name':                 r.get('name',                ''),
+                'description':          r.get('description',         ''),
+                'url':                  r.get('url',                 ''),
+                'category':             r.get('category',            ''),
+                'language':             r.get('language',            ''),
+                'country':              r.get('country',             ''),
+                'timezone':             r.get('timezone'),
+                'use_timezone':         r.get('use_timezone',         0),
+                'is_proxy_aggregator':  r.get('is_proxy_aggregator',  0),
+                'articles':             {},
             }
             for r in source_rows
         }
@@ -990,16 +994,17 @@ class NewsGather():
             rows = await self.db.load_sources()
             new_sources = {
                 r['id_source']: {
-                    'id_source':    r['id_source'],
-                    'name':         r.get('name',        ''),
-                    'description':  r.get('description', ''),
-                    'url':          r.get('url',         ''),
-                    'category':     r.get('category',    ''),
-                    'language':     r.get('language',    ''),
-                    'country':      r.get('country',     ''),
-                    'timezone':     r.get('timezone'),
-                    'use_timezone': r.get('use_timezone', 0),
-                    'articles':     {},
+                    'id_source':            r['id_source'],
+                    'name':                 r.get('name',                ''),
+                    'description':          r.get('description',         ''),
+                    'url':                  r.get('url',                 ''),
+                    'category':             r.get('category',            ''),
+                    'language':             r.get('language',            ''),
+                    'country':              r.get('country',             ''),
+                    'timezone':             r.get('timezone'),
+                    'use_timezone':         r.get('use_timezone',         0),
+                    'is_proxy_aggregator':  r.get('is_proxy_aggregator',  0),
+                    'articles':             {},
                 }
                 for r in rows
             }
@@ -1162,9 +1167,9 @@ class NewsGather():
                 result = conn.execute(text("PRAGMA table_info(gm_articles)")).fetchall()
                 if 'title_hash' not in [r[1] for r in result]:
                     conn.execute(text('ALTER TABLE gm_articles ADD COLUMN title_hash TEXT'))
-                    conn.execute(text('CREATE INDEX IF NOT EXISTS idx_articles_title_hash ON gm_articles(title_hash)'))
+                    conn.execute(text("CREATE UNIQUE INDEX IF NOT EXISTS idx_articles_title_hash ON gm_articles(title_hash) WHERE title_hash IS NOT NULL AND title_hash != ''"))
                     conn.commit()
-                    self.logger.info("✅ title_hash column + index added to gm_articles")
+                    self.logger.info("✅ title_hash column + unique index added to gm_articles")
         except Exception as e:
             self.logger.debug(f"Error adding title_hash: {e}")
 
@@ -1282,6 +1287,41 @@ class NewsGather():
         except Exception as e:
             self.logger.warning(f"Error creating v_translation_pending_by_language: {e}")
 
+        # ── translated_at_ms column on gm_articles ──────────────────────────
+        try:
+            with eng.connect() as conn:
+                result = conn.execute(text("PRAGMA table_info(gm_articles)")).fetchall()
+                if 'translated_at_ms' not in [r[1] for r in result]:
+                    conn.execute(text('ALTER TABLE gm_articles ADD COLUMN translated_at_ms INTEGER'))
+                    conn.execute(text(
+                        "CREATE INDEX IF NOT EXISTS idx_articles_translated_at_ms "
+                        "ON gm_articles(translated_at_ms DESC) WHERE translated_at_ms IS NOT NULL"
+                    ))
+                    conn.commit()
+                    self.logger.info("✅ translated_at_ms column + index added to gm_articles")
+        except Exception as e:
+            self.logger.debug(f"Error adding translated_at_ms: {e}")
+
+        # ── is_proxy_aggregator flag on gm_sources ───────────────────────────
+        # Marks sources whose article links are proxy URLs (e.g. Google News)
+        # and whose content cannot be directly enriched.
+        try:
+            with eng.connect() as conn:
+                src_cols = [r[1] for r in conn.execute(text("PRAGMA table_info(gm_sources)")).fetchall()]
+                if 'is_proxy_aggregator' not in src_cols:
+                    conn.execute(text(
+                        'ALTER TABLE gm_sources ADD COLUMN is_proxy_aggregator INTEGER NOT NULL DEFAULT 0'
+                    ))
+                    # Mark all existing Google News sources
+                    conn.execute(text(
+                        "UPDATE gm_sources SET is_proxy_aggregator = 1 "
+                        "WHERE id_source LIKE 'rss-googlenews%'"
+                    ))
+                    conn.commit()
+                    self.logger.info("✅ is_proxy_aggregator column added to gm_sources + Google News sources flagged")
+        except Exception as e:
+            self.logger.debug(f"Error adding is_proxy_aggregator: {e}")
+
         self.logger.info("Database initialization complete")
         return eng
         
@@ -1304,12 +1344,17 @@ class NewsGather():
             f'https://{domain}/feed/',
             f'https://{domain}/rss',
             f'https://{domain}/rss.xml',
+            f'https://{domain}/rss/all.xml',
             f'https://{domain}/feed',
             f'https://{domain}/feeds/posts/default',  # Blogger
             f'https://{domain}/index.xml',
             f'https://{domain}/atom.xml',
+            f'https://{domain}/feed/rss/',
+            f'https://{domain}/feed/rss',
             f'http://{domain}/feed/',
             f'http://{domain}/rss',
+            f'http://{domain}/rss.xml',
+            f'http://{domain}/rss/all.xml',
         ]
         
         for rss_url in common_patterns:
@@ -1366,9 +1411,10 @@ class NewsGather():
             self.logger.debug(f"Failed to extract feed name from {rss_url}: {e}")
             return None
     
-    async def register_rss_source(self, session, source_id, source_name, source_url):
+    async def register_rss_source(self, session, source_id, source_name, source_url, **kwargs):
         """
         Check if source has RSS feed and register it if found.
+        Optional kwargs: language (str) — language code to assign (default 'en')
         """
         # Check if already registered as RSS
         rss_id = f'rss-{source_id}'
@@ -1400,9 +1446,9 @@ class NewsGather():
                     'id_source': rss_id,
                     'name': source_name,
                     'url': rss_url,
-                    'description': f'Auto-discovered from NewsAPI',
+                    'description': 'Auto-discovered RSS feed',
                     'category': 'general',
-                    'language': 'en',
+                    'language': kwargs.get('language', 'en'),
                     'country': ''
                 }
                 
@@ -1414,7 +1460,44 @@ class NewsGather():
                     self.logger.error(f"Failed to register RSS source {source_name}: {e}")
         except Exception as e:
             self.logger.debug(f"Could not discover RSS for {source_name}: {e}")
-    
+
+    async def _discover_and_register_domain(
+        self, session, domain: str, derived_id: str, language: str = 'en',
+        pub_name: str = ''
+    ) -> None:
+        """
+        Try to discover an RSS feed for *domain* and register it as a new source.
+        Called as a fire-and-forget task from _rss_write_batch for domains found
+        in Google News aggregator feeds.
+        """
+        if derived_id in self.sources:
+            return
+        try:
+            rss_url = await self.discover_rss_feed(session, domain, domain)
+            if not rss_url:
+                return
+            # Prefer the publisher name from entry.source.title; fall back to
+            # feed title or domain-derived name.
+            feed_title   = await self.extract_rss_feed_name(session, rss_url)
+            source_name  = pub_name or feed_title or domain.replace('www.', '').split('.')[0].capitalize()
+            new_source = {
+                'id_source':            derived_id,
+                'name':                 source_name,
+                'url':                  rss_url,
+                'description':          f'Auto-discovered via Google News ({domain})',
+                'category':             'general',
+                'language':             language,
+                'country':              '',
+                'is_proxy_aggregator':  0,
+            }
+            if await self.db.insert_source_if_new(new_source):
+                self.sources[derived_id] = {**new_source, 'articles': {}}
+                self.logger.info(
+                    f"✅ Auto-registered RSS source [{language}]: {source_name} → {rss_url}"
+                )
+        except Exception as e:
+            self.logger.debug(f"RSS discovery failed for {domain}: {e}")
+
     async def update_source_timezone(self, source_id, detected_timezone):
         """
         Update source timezone when detected from article timestamps.
@@ -2041,15 +2124,16 @@ class NewsGather():
             def _prepare_entries(entries, src_tz, use_source_tz, src_lang):
                 prepared = []
                 for entry in entries:
-                    title = as_text(entry.get('title', ''))
-                    if title:
-                        title = ' '.join(title.split())
-                    url         = as_text(entry.get('link', ''))
+                    # Title is mandatory — skip entry immediately if absent
+                    title = ' '.join(as_text(entry.get('title', '')).split())
+                    if not title:
+                        continue
+                    url = as_text(entry.get('link', ''))
+                    if not url:
+                        continue
                     description = as_text(entry.get('summary', entry.get('description', '')))
                     author      = as_text(entry.get('author', ''))
                     published   = as_text(entry.get('published', entry.get('updated', '')))
-                    if not title or not url:
-                        continue
                     published_gmt, detected_tz = normalize_timestamp_to_utc(
                         published, src_tz, use_source_timezone=use_source_tz
                     )
@@ -2064,6 +2148,11 @@ class NewsGather():
                         detected_lang, lang_confidence = detect_article_language(
                             title, clean_description
                         )
+                    # entry.source has the real publisher URL/name for aggregator
+                    # feeds like Google News (entry.link is always a proxy URL)
+                    _src = entry.get('source', {})
+                    source_href  = as_text(_src.get('href', ''))
+                    source_title = as_text(_src.get('title', ''))
                     prepared.append({
                         'title':             title,
                         'url':               url,
@@ -2075,6 +2164,8 @@ class NewsGather():
                         'image_url':         extracted_image_url or '',
                         'detected_lang':     detected_lang,
                         'lang_confidence':   lang_confidence,
+                        'source_href':       source_href,
+                        'source_title':      source_title,
                     })
                 return prepared
 
@@ -2092,6 +2183,15 @@ class NewsGather():
                 if p['detected_tz']:
                     detected_tzs.append(p['detected_tz'])
                 article_key = url_encode(p['title'] + p['url'] + p['published'])
+                # For proxy-aggregator sources (e.g. Google News) the article
+                # URL is a proxied redirect that requires JavaScript to resolve
+                # to the real publisher page — not feasible with plain HTTP.
+                # Mark is_enriched=-1 at insert time so these articles skip
+                # the enrichment queue entirely.
+                _is_proxy = bool(
+                    self.sources.get(source_id, {}).get('is_proxy_aggregator', 0)
+                    or 'news.google.com/rss/articles/' in p['url']
+                )
                 batch.append({
                     'id_article':          article_key,
                     'id_source':           source_id,
@@ -2106,8 +2206,11 @@ class NewsGather():
                     'inserted_at_ms':      now_ms,
                     'detected_language':   p['detected_lang'],
                     'language_confidence': p['lang_confidence'],
-                    'is_enriched':         0,
+                    'is_enriched':         -1 if _is_proxy else 0,
                     'title_hash':          _make_title_hash(p['title']),
+                    # source_href/source_title used by _rss_write_batch for discovery
+                    '_source_href':        p.get('source_href', ''),
+                    '_source_title':       p.get('source_title', ''),
                 })
 
             if not batch:
@@ -2179,13 +2282,19 @@ class NewsGather():
         source_id, source_name, batch, detected_tzs = item
 
         # ── DB inserts (single-worker → no write contention) ─────────────────
+        # Strip internal pipeline-only keys before hitting the DB
+        _STRIP_KEYS = ('_source_href', '_source_title')
+        clean_batch = [
+            {k: v for k, v in a.items() if k not in _STRIP_KEYS}
+            for a in batch
+        ]
         BATCH_SIZE        = 10
-        articles_total    = len(batch)
+        articles_total    = len(clean_batch)
         articles_inserted = 0
         try:
             for i in range(0, articles_total, BATCH_SIZE):
                 articles_inserted += await self.db.insert_articles_batch(
-                    batch[i : i + BATCH_SIZE]
+                    clean_batch[i : i + BATCH_SIZE]
                 )
             articles_skipped = articles_total - articles_inserted
         except Exception as e:
@@ -2229,6 +2338,44 @@ class NewsGather():
                 self.logger.debug(
                     f"⚠️  [{source_name}] Multiple timezones in feed: {unique_tzs}"
                 )
+
+        # ── RSS source discovery via entry.source.href (aggregator feeds) ──
+        # Google News and other proxy-aggregators provide the real publisher
+        # URL in entry.source.href.  Use that (not the proxied article URL)
+        # to find and register direct RSS feeds for these publishers.
+        _src_is_proxy = bool(
+            self.sources.get(source_id, {}).get('is_proxy_aggregator', 0)
+        )
+        if _src_is_proxy:
+            seen_domains: set = set()
+            source_lang = self.sources.get(source_id, {}).get('language') or 'en'
+            for article in batch:
+                source_href = article.get('_source_href') or ''
+                if not source_href:
+                    continue
+                try:
+                    netloc = urlparse(source_href).netloc
+                except Exception:
+                    continue
+                if not netloc or netloc in seen_domains:
+                    continue
+                if 'google.com' in netloc:
+                    continue
+                seen_domains.add(netloc)
+                derived_id = 'rss-' + re.sub(r'[^a-z0-9]+', '-', netloc.lower()).strip('-')
+                if derived_id in self.sources:
+                    continue
+                # Use publisher name from entry.source.title if available
+                pub_name = article.get('_source_title') or netloc
+                self.logger.debug(
+                    f"🔍 [{source_name}] Probing publisher for RSS: {netloc} ({pub_name})"
+                )
+                async with aiohttp.ClientSession() as _sess:
+                    self.loop.create_task(
+                        self._discover_and_register_domain(
+                            _sess, netloc, derived_id, source_lang, pub_name=pub_name
+                        )
+                    )
 
         return None  # terminal stage — nothing forwarded downstream
 
@@ -2995,6 +3142,99 @@ class NewsGather():
 
             await asyncio.sleep(PROBE_CYCLE_INTERVAL)
 
+    async def resolve_proxy_urls(self):
+        """
+        Background loop that resolves Google News proxy URLs to real article URLs.
+
+        Articles inserted by proxy-aggregator sources (is_proxy_aggregator=1) have
+        is_enriched=-2, meaning the stored URL is still the news.google.com/rss/articles/...
+        redirect.  This coroutine follows that redirect (single HEAD request), stores
+        the real URL, and sets is_enriched=0 so the normal enrichment worker picks the
+        article up and fetches description/content from the real publisher page.
+
+        is_enriched sentinel values:
+            -2  proxy URL, not yet resolved          ← this loop handles these
+            -1  proxy URL, resolution failed or skip (old articles cleaned up manually)
+             0  real URL, pending enrichment
+             1  enriched successfully
+        """
+        self.logger.info("🔗 Proxy URL resolver started")
+        _TIMEOUT = aiohttp.ClientTimeout(total=10, connect=5)
+        _HEADERS = {
+            'User-Agent': (
+                'Mozilla/5.0 (compatible; NewsBot/1.0; +https://github.com/pyTweeter)'
+            ),
+        }
+        CONCURRENCY = 8   # parallel HEAD requests per batch
+        POLL_SLEEP  = 30  # seconds between polls when work exists
+        IDLE_SLEEP  = 60  # seconds between polls when queue is empty
+
+        async def _resolve_one(session: aiohttp.ClientSession, row: dict) -> tuple:
+            """Follow the proxy redirect and return (id_article, real_url | None)."""
+            proxy_url = row['url']
+            try:
+                async with session.head(
+                    proxy_url,
+                    allow_redirects=True,
+                    max_redirects=10,
+                    headers=_HEADERS,
+                ) as resp:
+                    real_url = str(resp.url)
+                    # Reject if we ended up back on Google (redirect failed)
+                    if 'google.com' in real_url:
+                        return (row['id_article'], None)
+                    return (row['id_article'], real_url)
+            except Exception as e:
+                self.logger.debug(f"URL resolve failed for {proxy_url[:80]}: {e}")
+                return (row['id_article'], None)
+
+        while not self.shutdown_flag:
+            try:
+                rows = await self.db.get_proxy_articles_pending_resolution(limit=50)
+                if not rows:
+                    await asyncio.sleep(IDLE_SLEEP)
+                    continue
+
+                self.logger.debug(f"🔗 Resolving {len(rows)} proxy URLs…")
+                resolved = ok = failed = 0
+
+                async with aiohttp.ClientSession(timeout=_TIMEOUT) as session:
+                    # Process in batches of CONCURRENCY to avoid hammering Google
+                    for i in range(0, len(rows), CONCURRENCY):
+                        if self.shutdown_flag:
+                            break
+                        chunk   = rows[i : i + CONCURRENCY]
+                        results = await asyncio.gather(
+                            *[_resolve_one(session, r) for r in chunk],
+                            return_exceptions=False,
+                        )
+                        for (art_id, real_url) in results:
+                            resolved += 1
+                            if real_url:
+                                await self.db.resolve_proxy_article_url(art_id, real_url)
+                                ok += 1
+                            else:
+                                # Mark as -1 so we don't retry endlessly
+                                await self.db._c.execute(
+                                    "UPDATE gm_articles SET is_enriched = -1 "
+                                    "WHERE id_article = ? AND is_enriched = -2",
+                                    (art_id,),
+                                )
+                                await self.db._c.commit()
+                                failed += 1
+
+                self.logger.debug(
+                    f"🔗 Proxy URL resolve complete: {ok} resolved, {failed} failed "
+                    f"(of {resolved})"
+                )
+                await asyncio.sleep(POLL_SLEEP)
+
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                self.logger.error(f"resolve_proxy_urls error: {e}", exc_info=True)
+                await asyncio.sleep(IDLE_SLEEP)
+
     async def backfill_translations(self):
         """
         Translation pipeline using PipelineStage/PipelineQueue.
@@ -3101,6 +3341,19 @@ class NewsGather():
                     self.logger.warning(f"Translation bulk-skip failed (non-critical): {e}")
 
                 try:
+                    # Guard: don't re-enqueue articles that are already waiting in
+                    # the pipeline queue but haven't been written to DB yet.
+                    # fetch_pending_translation returns is_translated=0 rows, so
+                    # if the queue is non-empty the same articles would be fetched
+                    # again, creating duplicates (and unbounded queue growth).
+                    if not q_t0.empty():
+                        self.logger.debug(
+                            f"🌐 Translation feeder: queue still has {q_t0.depth} items, "
+                            f"waiting {TRANSLATE_CYCLE_INTERVAL}s before next fetch"
+                        )
+                        await asyncio.sleep(TRANSLATE_CYCLE_INTERVAL)
+                        continue
+
                     rows = await self.db.fetch_pending_translation(TRANSLATE_BATCH_SIZE)
                     if not rows:
                         self.logger.info(
@@ -3300,6 +3553,49 @@ class NewsGather():
                         'timestamp': int(time.time() * 1000)}
             except Exception as e:
                 self.logger.error(f"API /api/articles error: {e}", exc_info=True)
+                raise _HTTPException(status_code=500, detail=str(e))
+
+        @api_app.get("/api/articles/translations")
+        async def get_translated_articles(
+            since: int = Query(..., description="translated_at_ms threshold in milliseconds"),
+            limit: int = Query(100, ge=1, le=500),
+        ):
+            """Return articles that got translated after *since* ms.
+            Used by the reader to update already-displayed article cards."""
+            try:
+                t = gather.gm_articles
+                query = (
+                    select(
+                        t.c.id_article,
+                        t.c.translated_title,
+                        t.c.translated_description,
+                        t.c.translated_content,
+                        t.c.translated_at_ms,
+                    )
+                    .where(t.c.translated_at_ms > since)
+                    .where(t.c.is_translated == 1)
+                    .order_by(t.c.translated_at_ms.asc())
+                    .limit(limit)
+                )
+                with gather.eng.connect() as conn:
+                    rows = conn.execute(query).fetchall()
+                updates = [
+                    {
+                        'id_article':             r[0],
+                        'translated_title':       r[1],
+                        'translated_description': r[2],
+                        'translated_content':     r[3],
+                        'translated_at_ms':       r[4],
+                    }
+                    for r in rows
+                ]
+                latest_ts = updates[-1]['translated_at_ms'] if updates else since
+                return {'success': True, 'count': len(updates),
+                        'since': since, 'latest_timestamp': latest_ts,
+                        'updates': updates,
+                        'timestamp': int(time.time() * 1000)}
+            except Exception as e:
+                self.logger.error(f"API /api/articles/translations error: {e}", exc_info=True)
                 raise _HTTPException(status_code=500, detail=str(e))
 
         @api_app.get("/api/latest_timestamp")

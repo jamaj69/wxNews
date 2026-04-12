@@ -645,6 +645,7 @@ class NewsPanel(wx.Panel):
         # Initialize API client for real-time updates
         self.api_client = NewsAPIClient()
         self.polling_enabled = False
+        self.translation_last_ts = 0  # tracks translated_at_ms for update polling
         self.current_source_ids = []  # Track currently displayed sources
         
         # Load data
@@ -667,10 +668,104 @@ class NewsPanel(wx.Panel):
         if timestamp > 0:
             self.polling_enabled = True
             self.poll_timer.Start(POLL_INTERVAL_MS)
+            # Start translation-update polling: look back 1 min to catch anything
+            # just translated while the initial article load was running
+            self.translation_last_ts = int(time.time() * 1000) - 60_000
+            self.translation_poll_timer = wx.Timer(self)
+            self.Bind(wx.EVT_TIMER, self.OnTranslationPollTimer, self.translation_poll_timer)
+            self.translation_poll_timer.Start(POLL_INTERVAL_MS)
             logging.info(f"✅ Polling started (every {POLL_INTERVAL_MS/1000}s)")
         else:
             logging.warning("⚠️  Failed to initialize timestamp")
     
+    def OnTranslationPollTimer(self, event):
+        """Timer: poll for articles that were translated since last check."""
+        if not self.polling_enabled:
+            return
+        asyncio.create_task(self.poll_translations_async())
+
+    async def poll_translations_async(self):
+        """Fetch recently-translated articles and update their cards in the WebView."""
+        try:
+            loop = asyncio.get_event_loop()
+            since = self.translation_last_ts
+
+            def _fetch():
+                resp = requests.get(
+                    f"{self.api_client.api_url}/api/articles/translations",
+                    params={'since': since, 'limit': 200},
+                    timeout=10,
+                )
+                if resp.status_code == 200:
+                    return resp.json()
+                return None
+
+            data = await loop.run_in_executor(None, _fetch)
+            if not data or not data.get('success'):
+                return
+
+            updates = data.get('updates', [])
+            if not updates:
+                return
+
+            self.translation_last_ts = data.get('latest_timestamp', since)
+            logging.info(f"\U0001f310 Translation updates: {len(updates)} article(s) translated")
+            wx.CallAfter(self.ApplyTranslationUpdates, updates)
+        except Exception as e:
+            logging.debug(f"Translation poll error: {e}")
+
+    def ApplyTranslationUpdates(self, updates: list):
+        """Inject JS into the WebView to update article titles/descriptions in-place."""
+        if not updates:
+            return
+
+        # Build JS that iterates over the updates and patches each card
+        js_parts = []
+        for u in updates:
+            raw_id = u.get('id_article', '')
+            # id_article may be bytes encoded as a string — normalise to a plain str key
+            if isinstance(raw_id, bytes):
+                article_key = raw_id.decode('utf-8', errors='replace')
+            else:
+                article_key = str(raw_id)
+
+            t_title = (u.get('translated_title') or '').replace('\\', '\\\\').replace("'", "\\'").replace('\n', ' ').replace('\r', '')
+            t_title = t_title.replace('<', '&lt;').replace('>', '&gt;').replace('"', '&quot;')
+
+            t_desc = (u.get('translated_description') or '')
+            t_desc = sanitize_html_content(t_desc) if t_desc else ''
+            t_desc = t_desc.replace('\\', '\\\\').replace("'", "\\'").replace('\n', '\\n').replace('\r', '')
+
+            # Escape the article_key for use as a CSS attribute selector
+            safe_key = article_key.replace('\\', '\\\\').replace("'", "\\'")
+
+            js_parts.append(f"""
+(function() {{
+    var card = document.querySelector('[data-id="{safe_key}"]');
+    if (!card) return;
+    var titleA = card.querySelector('.article-title a');
+    if (titleA && '{t_title}') {{
+        titleA.textContent = '{t_title}';
+    }}
+    var descEl = card.querySelector('.article-content');
+    if (descEl && '{t_desc}') {{
+        descEl.innerHTML = '{t_desc}';
+    }}
+    // Add translation badge if missing
+    var meta = card.querySelector('.article-meta');
+    if (meta && !meta.querySelector('.translated-badge')) {{
+        var badge = document.createElement('span');
+        badge.className = 'translated-badge';
+        badge.style.cssText = 'color:#0b9ac4;font-size:13px;font-weight:500;';
+        badge.textContent = '\U0001f310 Traduzido';
+        meta.appendChild(badge);
+    }}
+}})();
+""")
+
+        if js_parts:
+            self.html_viewer.RunScript(''.join(js_parts))
+
     def OnPollTimer(self, event):
         """Timer event handler for polling new articles"""
         logging.info(f"⏰ Poll timer triggered - polling_enabled: {self.polling_enabled}")
@@ -821,7 +916,7 @@ class NewsPanel(wx.Panel):
         use_content = content_html and desc_text_len < 200
 
         # Build article card
-        html = '<div class="article" style="animation: fadeIn 0.5s;">'
+        html = f'<div class="article" data-id="{article_id}" style="animation: fadeIn 0.5s;">'
         html += f'<div class="article-title"><a href="{url}">{title}</a></div>'
         html += f'<div class="article-meta">'
         html += f'<span class="article-source">🔖 {source_name}</span>'
@@ -1934,7 +2029,7 @@ class NewsPanel(wx.Panel):
             use_content = content_html and desc_text_len < 200
 
             # Build article card
-            html += '<div class="article">'
+            html += f'<div class="article" data-id="{article_id}">'
             html += f'<div class="article-title"><a href="{url}">{title}</a></div>'
             html += f'<div class="article-meta">'
             html += f'<span class="article-source">🔖 {source_name}</span>'
@@ -2160,7 +2255,7 @@ class NewsPanel(wx.Panel):
             use_content = content_html and desc_text_len < 200
 
             # Build article card
-            html += '<div class="article">'
+            html += f'<div class="article" data-id="{article_id}">'
             html += f'<div class="article-title"><a href="{url}">{title}</a></div>'
             html += f'<div class="article-meta">'
             if author:

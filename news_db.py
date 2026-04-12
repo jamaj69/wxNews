@@ -153,15 +153,14 @@ class NewsDatabase:
             """
         )
         logger.debug("✅ Migration: idx_stats_translate_pending ensured")
-        # Index for title_hash lookups (cross-feed content reuse + dedup)
+        # Unique index for title_hash — every article must have one (title is mandatory)
         await self._conn.execute(
             """
-            CREATE INDEX IF NOT EXISTS idx_articles_title_hash
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_articles_title_hash
             ON gm_articles(title_hash)
-            WHERE title_hash IS NOT NULL
             """
         )
-        logger.debug("✅ Migration: idx_articles_title_hash ensured")
+        logger.debug("✅ Migration: idx_articles_title_hash (UNIQUE) ensured")
         # One-time fix: strip microseconds from published_at_gmt values that were
         # stored with full microsecond precision (e.g. "2026-04-11T03:41:57.002412+00:00").
         # The bug was in the fallback branches of normalize_timestamp_to_utc which called
@@ -266,11 +265,12 @@ class NewsDatabase:
         cols = ("id_source", "name", "description", "url",
                 "category", "language", "country")
         vals = tuple(source.get(c, "") or "" for c in cols)
+        is_proxy = int(source.get("is_proxy_aggregator", 0) or 0)
         cur = await self._c.execute(
             "INSERT OR IGNORE INTO gm_sources "
-            "(id_source, name, description, url, category, language, country) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?)",
-            vals,
+            "(id_source, name, description, url, category, language, country, is_proxy_aggregator) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            vals + (is_proxy,),
         )
         await self._c.commit()
         return cur.rowcount > 0
@@ -640,12 +640,33 @@ class NewsDatabase:
         await self._c.commit()
         return cur.rowcount
 
+    async def get_proxy_articles_pending_resolution(self, limit: int = 30) -> list[dict]:
+        """Return articles with is_enriched=-2 (proxy URL not yet resolved)."""
+        async with self._rc.execute(
+            "SELECT id_article, url FROM gm_articles "
+            "WHERE is_enriched = -2 "
+            "ORDER BY inserted_at_ms DESC "
+            "LIMIT ?",
+            (limit,),
+        ) as cur:
+            return [{"id_article": r[0], "url": r[1]} for r in await cur.fetchall()]
+
+    async def resolve_proxy_article_url(self, id_article: bytes, real_url: str) -> None:
+        """Update the article URL to the real (resolved) URL and queue for enrichment."""
+        await self._c.execute(
+            "UPDATE gm_articles SET url = ?, is_enriched = 0 "
+            "WHERE id_article = ? AND is_enriched = -2",
+            (real_url, id_article),
+        )
+        await self._c.commit()
+
     async def save_translation(self, article_id: str, values: TranslationValues) -> None:
         """
         Persist translation results atomically.
         *values* must include 'is_translated' and may include
         translated_title, translated_description, translated_content.
         """
+        import time as _time
         _ALLOWED = frozenset({
             "is_translated", "translated_title",
             "translated_description", "translated_content",
@@ -653,6 +674,9 @@ class NewsDatabase:
         params = {k: v for k, v in values.items() if k in _ALLOWED}
         if "is_translated" not in params:
             raise ValueError("save_translation requires 'is_translated'")
+        # Record timestamp only for successfully translated articles
+        if params.get("is_translated") == 1:
+            params["translated_at_ms"] = int(_time.time() * 1000)
         params["_id"] = article_id
         set_clause = ", ".join(f"{k}=:{k}" for k in params if k != "_id")
         await self._c.execute(

@@ -197,9 +197,8 @@ class NewsDatabase:
             ON gm_articles(is_enriched, enrich_try)
         """)
         await conn.execute("""
-            CREATE INDEX IF NOT EXISTS idx_articles_title_hash
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_articles_title_hash
             ON gm_articles(title_hash)
-            WHERE title_hash IS NOT NULL
         """)
         await conn.execute("""
             CREATE INDEX IF NOT EXISTS idx_stats_translate_pending
