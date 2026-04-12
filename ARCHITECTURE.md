@@ -13,10 +13,12 @@
 4. [Translation Subsystem](#4-translation-subsystem)
 5. [Language Detection](#5-language-detection)
 6. [Data Flow — Article Collection](#6-data-flow--article-collection)
-7. [Database Schema](#7-database-schema)
-8. [Source Blocking Logic](#8-source-blocking-logic)
-9. [Debug Playbook](#9-debug-playbook)
-10. [Extending the System](#10-extending-the-system)
+7. [RSS Pipeline — Multi-stage Architecture](#7-rss-pipeline--multi-stage-architecture)
+8. [Pipeline Infrastructure — `pipeline.py`](#8-pipeline-infrastructure--pipelinepy)
+9. [Database Schema](#9-database-schema)
+10. [Source Blocking Logic](#10-source-blocking-logic)
+11. [Debug Playbook](#11-debug-playbook)
+12. [Extending the System](#12-extending-the-system)
 
 ---
 
@@ -278,7 +280,244 @@ UPDATE gm_articles SET translated_title=..., is_translated=1
 
 ---
 
-## 7. Database Schema
+## 7. RSS Pipeline — Multi-stage Architecture
+
+Introduced in April 2026. Replaces the former single-consumer approach with a
+**3-stage dynamically-scaled pipeline** managed by `PipelineSupervisor`.
+
+### Overview diagram
+
+```mermaid
+flowchart LR
+    subgraph S1["Stage 1 — HTTP Fetch (×60 concurrent)"]
+        direction TB
+        F1["_rss_fetcher\nHTTP + feedparser"]
+    end
+
+    subgraph QS12["Queue s1→s2\n(PipelineQueue)"]
+        QA["(source, feed)\ntuples"]
+    end
+
+    subgraph SUP["PipelineSupervisor\n(checks every 2s)"]
+        SV["scales Stage 2\n↑ if depth > 8\n↓ if depth < 2"]
+    end
+
+    subgraph S2["Stage 2 — Process (×2→6, dynamic)"]
+        direction TB
+        P1["_rss_process_one\nworker-0"]
+        P2["_rss_process_one\nworker-1"]
+        PN["_rss_process_one\nworker-N"]
+    end
+
+    subgraph QS23["Queue s2→s3\n(PipelineQueue)"]
+        QB["(src_id, name,\nbatch, tz_list)"]
+    end
+
+    subgraph S3["Stage 3 — DB Write (×1 fixed)"]
+        direction TB
+        W1["_rss_write_batch\nINSERT OR IGNORE\n+ tz backfill"]
+    end
+
+    F1 -->|"put(source, feed)"| QS12
+    QS12 --> P1
+    QS12 --> P2
+    QS12 --> PN
+    SUP -.->|scale_to(N)| S2
+    QS12 -.->|depth| SUP
+    P1 -->|"put(batch)"| QS23
+    P2 -->|"put(batch)"| QS23
+    PN -->|"put(batch)"| QS23
+    QS23 --> W1
+```
+
+### Stage responsibilities
+
+| Stage | Method | Workers | Work done |
+|-------|--------|---------|-----------|
+| **Stage 1** | `_rss_fetcher` | Up to 60 (semaphore) | HTTP GET + feedparser; releases semaphore **before** `queue.put()` to avoid deadlock |
+| **Stage 2** | `_rss_process_one` | 2 → 6 (dynamic) | Timezone detection · CPU normalisation in `run_in_executor` · `find_by_title_hash_bulk` |
+| **Stage 3** | `_rss_write_batch` | **1 fixed** | `insert_articles_batch` (chunks of 10) · timezone consistency back-fill |
+
+### Supervisor scaling rules
+
+The `PipelineSupervisor` inspects the **`s1→s2` queue depth** every 2 seconds:
+
+- `depth > 8`  → add workers (up to `RSS_MAX_WORKERS`)
+- `depth < 2` AND `workers > min_workers` → remove one worker
+- Once `signal_upstream_done()` is set, scaling stops
+
+### Configuration (`.env`)
+
+| Variable | Default | Meaning |
+|----------|---------|---------|
+| `RSS_MAX_CONCURRENT` | `20` | Stage-1 semaphore slots (HTTP concurrency) |
+| `RSS_TIMEOUT` | `15` | Per-feed HTTP timeout (seconds) |
+| `RSS_INITIAL_WORKERS` | `2` | Stage-2 workers at cycle start |
+| `RSS_MAX_WORKERS` | `6` | Stage-2 worker ceiling |
+| `RSS_CYCLE_INTERVAL` | `900` | Inter-cycle sleep after Stage 3 finishes |
+
+### API fields exposed (`/api/queues` → `"rss"` object)
+
+| Field | Meaning |
+|-------|---------|
+| `total` / `done` / `running` | Stage-1 progress |
+| `queued` | Feeds delivered to Stage-2 queue (cumulative) |
+| `processed` | Stage-2 completions |
+| `stage2_workers` | Live worker count (changes dynamically) |
+| `s1s2_depth` | Items currently waiting in Stage-1→2 queue |
+| `s2s3_depth` | Items currently waiting in Stage-2→3 queue |
+| `articles_new` | New articles inserted this cycle (Stage 3) |
+
+### End-of-pipeline drain sequence
+
+```
+await asyncio.gather(*fetcher_tasks)   # Stage 1 completes
+stage2.signal_upstream_done()          # no more items arriving
+await stage2.wait_done()               # Stage 2 drains
+supervisor.stop()
+stage3.signal_upstream_done()
+await stage3.wait_done()               # Stage 3 finishes writing
+```
+
+---
+
+## 8. Pipeline Infrastructure — `pipeline.py`
+
+Generic reusable pipeline primitives. Can be used by any future pipeline
+(enrichment, translation, etc.) without modification.
+
+### Class overview
+
+```mermaid
+classDiagram
+    class PipelineQueue {
+        +name: str
+        +depth: int
+        +put(item)
+        +get() item
+        +get_timeout(timeout) item | _TIMED_OUT
+        +to_dict() dict
+    }
+
+    class StageStats {
+        +processed: int
+        +errors: int
+        +in_flight: int
+        +elapsed_s: float
+        +to_dict() dict
+    }
+
+    class PipelineStage {
+        +name: str
+        +input_queue: PipelineQueue
+        +output_queue: PipelineQueue
+        +min_workers: int
+        +max_workers: int
+        +stats: StageStats
+        +start(initial)
+        +signal_upstream_done()
+        +wait_done()
+        +scale_to(target)
+        +worker_count: int
+        +to_dict() dict
+        #process_item(item) result~
+    }
+
+    class PipelineSupervisor {
+        +stages: list
+        +check_interval: float
+        +scale_up_threshold: int
+        +scale_down_threshold: int
+        +start() Task
+        +stop()
+        +status() dict
+    }
+
+    PipelineStage --> PipelineQueue : input_queue
+    PipelineStage --> PipelineQueue : output_queue
+    PipelineStage --> StageStats
+    PipelineSupervisor --> PipelineStage
+```
+
+### Standard usage pattern
+
+```python
+# 1. Create queues
+q_in  = PipelineQueue("my:in")
+q_mid = PipelineQueue("my:mid")
+q_out = PipelineQueue("my:out")
+
+# 2. Define stages via subclass or inline handler
+stage_a = PipelineStage("parse",  q_in,  q_mid, handler=parse_item,  min_workers=1, max_workers=4)
+stage_b = PipelineStage("write",  q_mid, q_out, handler=write_item,  min_workers=1, max_workers=1)
+
+# 3. Supervisor (optional — auto-scales stage_a)
+sup = PipelineSupervisor([stage_a], check_interval=2.0, scale_up_threshold=8)
+
+# 4. Start
+await stage_a.start(initial=2)
+await stage_b.start(initial=1)
+sup.start()
+
+# 5. Produce items
+for item in source:
+    await q_in.put(item)
+
+# 6. Drain in order
+stage_a.signal_upstream_done()
+await stage_a.wait_done()
+sup.stop()
+
+stage_b.signal_upstream_done()
+await stage_b.wait_done()
+```
+
+### Worker lifecycle
+
+Each worker coroutine runs a `while True` loop:
+
+1. `get_timeout(0.3)` — returns `_TIMED_OUT` on timeout (no raise)
+2. `_TIMED_OUT` + `upstream_done` set + queue empty → **clean exit**
+3. `None` sentinel → set `upstream_done`, propagate to sibling workers, exit
+4. Real item → call `process_item()`, forward non-`None` result to output queue
+
+Workers cancelled by `scale_to()` (scale-down) raise `CancelledError` and exit
+immediately, decrementing the pool counter.
+
+### `PipelineStage.process_item()` override
+
+```python
+class MyStage(PipelineStage):
+    async def process_item(self, item: Any) -> Any | None:
+        result = await do_work(item)
+        return result    # forwarded downstream
+        # return None    # discard (no forwarding)
+```
+
+Alternatively pass a coroutine function as `handler=` to the constructor.
+
+### Monitoring a pipeline via `/api/queues`
+
+Any `PipelineStage` instance can be serialised with `.to_dict()`:
+
+```json
+{
+  "stage":       "rss-processor",
+  "workers":     4,
+  "min_workers": 2,
+  "max_workers": 6,
+  "queue_depth": 37,
+  "processed":   142,
+  "errors":      0,
+  "in_flight":   4,
+  "elapsed_s":   58.3
+}
+```
+
+---
+
+## 9. Database Schema
+<!-- formerly section 7 -->
 
 **File**: `predator_news.db` (SQLite)
 
@@ -325,7 +564,7 @@ Lookup table: ISO 639-1 code → full language name. Populated by `setup_languag
 
 ---
 
-## 8. Source Blocking Logic
+## 10. Source Blocking Logic
 
 Defined in `wxAsyncNewsGather.py`, triggered after `fetch_article_content()` returns:
 
@@ -353,9 +592,9 @@ sqlite3 predator_news.db "SELECT source_name, blocked_count FROM gm_sources WHER
 
 ---
 
-## 9. Debug Playbook
+## 11. Debug Playbook
 
-### 9.1 Content fetcher not enriching articles
+### 11.1 Content fetcher not enriching articles
 
 ```bash
 # Check if workers are starting (logs at DEBUG level)
@@ -376,7 +615,7 @@ req_q.put(None); p.join()
 EOF
 ```
 
-### 9.2 A specific site returns `permanent` error (403/404)
+### 11.2 A specific site returns `permanent` error (403/404)
 
 ```bash
 # Check error type
@@ -390,7 +629,7 @@ sqlite3 predator_news.db \
   "SELECT source_name, fetch_blocked, blocked_count FROM gm_sources WHERE url LIKE '%site.com%';"
 ```
 
-### 9.3 Playwright subprocess crashing
+### 11.3 Playwright subprocess crashing
 
 ```bash
 # Check playwright install
@@ -402,7 +641,7 @@ python playwright_worker.py  # has no __main__ — check imports only:
 python -c "import playwright_worker; print('OK')"
 ```
 
-### 9.4 Language detection producing wrong language codes
+### 11.4 Language detection producing wrong language codes
 
 ```bash
 # Check detected_language distribution
@@ -413,7 +652,7 @@ sqlite3 predator_news.db \
 python redetect_article_languages.py
 ```
 
-### 9.5 Queue deadlock / worker not responding
+### 11.5 Queue deadlock / worker not responding
 
 The `fetch_sync()` caller waits up to `timeout + 30` seconds then returns a `TIMEOUT` result — it does not block forever. If the worker subprocess dies, the pump thread will stop reading from `resp_q`, and callers will eventually hit the ceiling timeout.
 
@@ -425,7 +664,7 @@ sudo systemctl restart wxAsyncNewsGather.service
 
 The singletons `_cffi / _requests / _playwright` are module-level — they are recreated on the next import after service restart.
 
-### 9.6 Articles not being collected from RSS
+### 11.6 Articles not being collected from RSS
 
 ```bash
 # Run RSS diagnosis
@@ -449,7 +688,7 @@ sqlite3 predator_news.db "UPDATE gm_sources SET fetch_blocked=0, blocked_count=0
 
 ---
 
-## 10. Extending the System
+## 12. Extending the System
 
 ### Adding a new HTTP fetcher backend
 
@@ -477,3 +716,73 @@ All endpoints are defined in `wxAsyncNewsGather.py` using FastAPI decorators. Th
 ### Adding a new RSS source
 
 Edit `rssfeeds.conf` — one URL per line. The service re-reads the config on each RSS collection cycle, so no restart is needed for source additions.
+
+### Adding a new multi-stage pipeline
+
+Use `pipeline.py` as the infrastructure layer. The pattern is:
+
+1. **Create a `PipelineStage` subclass** (or pass a `handler=` coroutine):
+
+```python
+from pipeline import PipelineQueue, PipelineStage, PipelineSupervisor
+
+class MyProcessStage(PipelineStage):
+    async def process_item(self, item):
+        result = await do_async_work(item)
+        return result   # None → drop; non-None → forwarded to output_queue
+```
+
+2. **Wire queues and stages:**
+
+```python
+q_in  = PipelineQueue("my:in")
+q_out = PipelineQueue("my:out")
+
+stage = MyProcessStage(
+    "my-worker",
+    input_queue=q_in,
+    output_queue=q_out,
+    min_workers=1,
+    max_workers=8,
+)
+```
+
+3. **Add a supervisor if dynamic scaling is desired:**
+
+```python
+sup = PipelineSupervisor(
+    [stage],
+    check_interval=2.0,        # how often to check queue depth
+    scale_up_threshold=10,     # add worker when depth > 10
+    scale_down_threshold=2,    # remove worker when depth < 2
+)
+```
+
+4. **Start, produce, drain:**
+
+```python
+await stage.start(initial=2)
+sup.start()
+
+async with aiohttp.ClientSession() as sess:
+    tasks = [producer(sess, item, q_in) for item in all_items]
+    await asyncio.gather(*tasks)
+
+stage.signal_upstream_done()
+await stage.wait_done()
+sup.stop()
+```
+
+5. **Expose metrics** — call `stage.to_dict()` from any API endpoint to get
+   `workers`, `queue_depth`, `processed`, `errors`, `in_flight`, `elapsed_s`.
+
+#### Rules for stage design
+
+| Rule | Reason |
+|------|--------|
+| DB **write** stages: `max_workers=1` | SQLite cannot handle concurrent write transactions |
+| DB **read** stages: `max_workers=N` | `find_by_title_hash_bulk` uses read-only connection, safe to parallelise |
+| CPU-bound work: use `run_in_executor` inside `process_item` | Never block the event loop |
+| Semaphore-controlled producers: release **before** `queue.put()` | Prevents deadlock when queue fills |
+| After each `queue.put()`: `await asyncio.sleep(0)` | Yields to let consumers drain while producers are still running |
+

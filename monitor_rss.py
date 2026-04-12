@@ -133,9 +133,18 @@ def print_snapshot(
     elapsed_s     = r.get("elapsed_s") or 0.0
     next_in_s     = r.get("next_cycle_in_s")
     started_at    = r.get("started_at", "—")
+    # Stage-2 dynamic pool & queue depths (new pipeline fields)
+    stage2_workers = r.get("stage2_workers", 0)
+    s1s2_depth     = r.get("s1s2_depth", 0)   # items waiting in Stage-1→2 queue
+    s2s3_depth     = r.get("s2s3_depth", 0)   # items waiting in Stage-2→3 queue
 
-    # items still in queue (best-effort estimate)
-    queue_depth   = max(0, queued - processed)
+    # items still in stage-2 queue (best-effort; prefer live depth when available)
+    if s1s2_depth > 0 or stage2_workers > 0:
+        # new pipeline: use live queue depth
+        queue_depth = s1s2_depth
+    else:
+        # legacy fallback
+        queue_depth = max(0, queued - processed)
 
     # ── deltas vs previous sample ─────────────────────────────────────────────
     elapsed_delta = (cur.ts - prev.ts) if prev else interval_s
@@ -241,7 +250,7 @@ def print_snapshot(
 
     # ══════════════════════════════════════════════════════════════════════════
     MAGENTA = "\033[35m"
-    print(_c(BOLD + MAGENTA, "  ── Stage 2: Process (dedup → insert DB) ────────────────────────"))
+    print(_c(BOLD + MAGENTA, "  ── Stage 2: Process (dedup + normalise) ─────────────────────────"))
     print()
 
     proc_bar = _bar(processed, queued)
@@ -251,10 +260,19 @@ def print_snapshot(
     )
     print()
 
-    q_color = YELLOW if queue_depth > 0 else DIM
+    # Workers dinâmicos (supervisor)
+    w_color = GREEN if stage2_workers > 0 else DIM
     print(
-        f"  {'Na fila (aguardando)':<28} {_c(q_color + BOLD, f'{queue_depth:>4}')}"
+        f"  {'Workers activos (dinâmico)':<28} {_c(w_color + BOLD, f'{stage2_workers:>4}')}"
         f"   {'Processados':<22} {_c(GREEN, f'{processed:>5}')}"
+    )
+
+    # Filas Stage-1→2 e Stage-2→3
+    q12_color = YELLOW if s1s2_depth > 20 else (CYAN if s1s2_depth > 0 else DIM)
+    q23_color = YELLOW if s2s3_depth > 10 else (CYAN if s2s3_depth > 0 else DIM)
+    print(
+        f"  {'Fila S1→S2 (aguardando)':<28} {_c(q12_color + BOLD, f'{s1s2_depth:>4}')}"
+        f"   {'Fila S2→S3 (para escrita)':<22} {_c(q23_color + BOLD, f'{s2s3_depth:>5}')}"
     )
     print()
 
@@ -270,6 +288,15 @@ def print_snapshot(
     if len(speed_history) >= 3:
         print(f"\n  Hist. Stage 2  {_c(DIM, _spark(speed_history))}")
 
+    print()
+
+    # ══════════════════════════════════════════════════════════════════════════
+    print(_c(BOLD + GREEN, "  ── Stage 3: DB Write (×1 serializado) ──────────────────────────"))
+    print()
+    print(
+        f"  {'Fila S2→S3':<28} {_c(q23_color + BOLD, f'{s2s3_depth:>4}')}"
+        f"   {'Inserções OK':<22} {_c(GREEN, f'{ok:>5}')}"
+    )
     print()
 
     # ── ETA / next cycle ─────────────────────────────────────────────────────

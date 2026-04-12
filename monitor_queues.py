@@ -314,6 +314,59 @@ def print_snapshot(
         print(f"    {label_eta1:<50}  →  {eta_sessao}")
         print(f"    {label_eta2:<50}  →  {eta_wm}")
 
+    # ── RSS pipeline (resumo) ─────────────────────────────────────────────────
+    rss = d.get("rss", {})
+    if rss:
+        rss_status  = rss.get("status", "idle")
+        rss_cycle   = rss.get("cycle", 0)
+        rss_total   = rss.get("total", 0)
+        rss_done    = rss.get("done", 0)
+        rss_proc    = rss.get("processed", 0)
+        rss_queued  = rss.get("queued", 0)
+        rss_art     = rss.get("articles_new", 0)
+        rss_elapsed = rss.get("elapsed_s") or 0.0
+        rss_next    = rss.get("next_cycle_in_s")
+        s2_workers  = rss.get("stage2_workers", 0)
+        s1s2_depth  = rss.get("s1s2_depth", 0)
+        s2s3_depth  = rss.get("s2s3_depth", 0)
+        err_total   = rss.get("err_http", 0) + rss.get("err_content", 0) + rss.get("err_timeout", 0)
+
+        if rss_status == "running":
+            rss_status_str = _c(GREEN + BOLD, "● RUNNING")
+        elif rss_status == "sleeping":
+            nxt = f"  (próximo em {rss_next:.0f}s)" if rss_next else ""
+            rss_status_str = _c(CYAN, f"◌ sleeping{nxt}")
+        else:
+            rss_status_str = _c(DIM, "○ idle")
+
+        print(f"\n  {_c(BOLD, 'RSS PIPELINE')}  ciclo {_c(BOLD, str(rss_cycle))}  {rss_status_str}  {_c(DIM, f'{rss_elapsed:.0f}s')}")
+
+        # Stage 1
+        s1_pct = f"{rss_done/rss_total*100:.0f}%" if rss_total else "—"
+        print(
+            f"    {'Stage 1 (fetch)':<20}  "
+            f"{_c(BOLD, str(rss_done))}/{_c(DIM, str(rss_total))}  {_c(DIM, s1_pct)}  "
+            + (_c(RED, f"  erros={err_total}") if err_total else "")
+        )
+
+        # Stage 2
+        w_col = GREEN if s2_workers > 0 else DIM
+        q12_col = YELLOW if s1s2_depth > 20 else (CYAN if s1s2_depth > 0 else DIM)
+        print(
+            f"    {'Stage 2 (process)':<20}  "
+            f"{_c(BOLD, str(rss_proc))}/{_c(DIM, str(rss_queued))}  "
+            f"workers={_c(w_col+BOLD, str(s2_workers))}  "
+            f"fila S1→S2={_c(q12_col+BOLD, str(s1s2_depth))}"
+        )
+
+        # Stage 3
+        q23_col = YELLOW if s2s3_depth > 10 else (CYAN if s2s3_depth > 0 else DIM)
+        print(
+            f"    {'Stage 3 (DB write)':<20}  "
+            f"artigos novos={_c(GREEN+BOLD, str(rss_art))}  "
+            f"fila S2→S3={_c(q23_col+BOLD, str(s2s3_depth))}"
+        )
+
     # ── Rodapé ───────────────────────────────────────────────────────────────
     age_str = f"{stats_age}s" if stats_age is not None else "—"
     print(_c(DIM, f"\n  última actualiz. cache: {age_str}   ts: {ts_iso}"))
