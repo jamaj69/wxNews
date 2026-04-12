@@ -133,17 +133,16 @@ def print_snapshot(
     elapsed_s     = r.get("elapsed_s") or 0.0
     next_in_s     = r.get("next_cycle_in_s")
     started_at    = r.get("started_at", "—")
-    # Stage-2 dynamic pool & queue depths (new pipeline fields)
+    # Stage-2 dynamic pool & queue depths
     stage2_workers = r.get("stage2_workers", 0)
-    s1s2_depth     = r.get("s1s2_depth", 0)   # items waiting in Stage-1→2 queue
-    s2s3_depth     = r.get("s2s3_depth", 0)   # items waiting in Stage-2→3 queue
+    s1s2_depth     = r.get("s1s2_depth", 0)   # S1→S2: awaiting process
+    s2s3_depth     = r.get("s2s3_depth", 0)   # S2→S3: awaiting dedup
+    s3s4_depth     = r.get("s3s4_depth", 0)   # S3→S4: awaiting DB write
 
     # items still in stage-2 queue (best-effort; prefer live depth when available)
     if s1s2_depth > 0 or stage2_workers > 0:
-        # new pipeline: use live queue depth
         queue_depth = s1s2_depth
     else:
-        # legacy fallback
         queue_depth = max(0, queued - processed)
 
     # ── deltas vs previous sample ─────────────────────────────────────────────
@@ -267,12 +266,12 @@ def print_snapshot(
         f"   {'Processados':<22} {_c(GREEN, f'{processed:>5}')}"
     )
 
-    # Filas Stage-1→2 e Stage-2→3
     q12_color = YELLOW if s1s2_depth > 20 else (CYAN if s1s2_depth > 0 else DIM)
     q23_color = YELLOW if s2s3_depth > 10 else (CYAN if s2s3_depth > 0 else DIM)
+    q34_color = YELLOW if s3s4_depth > 10 else (CYAN if s3s4_depth > 0 else DIM)
     print(
         f"  {'Fila S1→S2 (aguardando)':<28} {_c(q12_color + BOLD, f'{s1s2_depth:>4}')}"
-        f"   {'Fila S2→S3 (para escrita)':<22} {_c(q23_color + BOLD, f'{s2s3_depth:>5}')}"
+        f"   {'Fila S2→S3 (para dedup)':<22} {_c(q23_color + BOLD, f'{s2s3_depth:>5}')}"
     )
     print()
 
@@ -291,10 +290,20 @@ def print_snapshot(
     print()
 
     # ══════════════════════════════════════════════════════════════════════════
-    print(_c(BOLD + GREEN, "  ── Stage 3: DB Write (×1 serializado) ──────────────────────────"))
+    BLUE = "\033[34m"
+    print(_c(BOLD + BLUE, "  ── Stage 3: Dedup (leituras paralelas WAL) ──────────────────────"))
     print()
     print(
-        f"  {'Fila S2→S3':<28} {_c(q23_color + BOLD, f'{s2s3_depth:>4}')}"
+        f"  {'Fila S2→S3 (aguardando)':<28} {_c(q23_color + BOLD, f'{s2s3_depth:>4}')}"
+        f"   {'Fila S3→S4 (para escrita)':<22} {_c(q34_color + BOLD, f'{s3s4_depth:>5}')}"
+    )
+    print()
+
+    # ══════════════════════════════════════════════════════════════════════════
+    print(_c(BOLD + GREEN, "  ── Stage 4: DB Write (×1 serializado) ──────────────────────────"))
+    print()
+    print(
+        f"  {'Fila S3→S4 (aguardando)':<28} {_c(q34_color + BOLD, f'{s3s4_depth:>4}')}"
         f"   {'Inserções OK':<22} {_c(GREEN, f'{ok:>5}')}"
     )
     print()

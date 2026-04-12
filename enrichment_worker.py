@@ -173,6 +173,19 @@ class EnrichmentWorker:
         finally:
             self.logger.info("🏁 EnrichmentWorker stopped")
 
+    async def enrich_direct(self, article: ArticleDict) -> bool:
+        """
+        Enrich *article* directly without going through the input/output queues.
+
+        Intended for use with PipelineStage workers, where the stage's
+        ``max_workers`` provides concurrency control instead of the internal
+        semaphore.  Mutates *article* in-place; sets ``_error_code`` and
+        ``_blocked_domain`` keys on permanent fetch failures.
+
+        Returns True if at least one field was updated.
+        """
+        return await self._do_enrich(article)
+
     # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------

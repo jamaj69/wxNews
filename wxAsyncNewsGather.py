@@ -113,13 +113,24 @@ API_KEY1 = str(config('NEWS_API_KEY_1', cast=str))
 API_KEY2 = str(config('NEWS_API_KEY_2', cast=str))
 NEWSAPI_CYCLE_INTERVAL = int(config('NEWSAPI_CYCLE_INTERVAL', default=600))  # 10 minutes
 
-# RSS Configuration
-RSS_TIMEOUT = int(config('RSS_TIMEOUT', default=15))
-RSS_MAX_CONCURRENT = int(config('RSS_MAX_CONCURRENT', default=20))
-RSS_BATCH_SIZE = int(config('RSS_BATCH_SIZE', default=20))
-RSS_CYCLE_INTERVAL    = int(config('RSS_CYCLE_INTERVAL',    default=900))  # 15 minutes
-RSS_INITIAL_WORKERS   = int(config('RSS_INITIAL_WORKERS',   default=2))   # starting Stage-2 workers
-RSS_MAX_WORKERS       = int(config('RSS_MAX_WORKERS',       default=6))   # max Stage-2 workers (supervisor ceiling)
+# ── RSS Pipeline ─────────────────────────────────────────────────────────────
+# Stage 1  _rss_fetcher        async I/O  aiohttp     semaphore-limited
+# Stage 2  _rss_process_one    CPU        ProcessPool feedparser normalise + lang detection
+# Stage 3  _rss_dedup          async I/O  aiosqlite   bulk title-hash SELECT + merge
+# Stage 4  _rss_write_batch    async I/O  aiosqlite   INSERT OR IGNORE (serialised)
+RSS_TIMEOUT        = int(config('RSS_TIMEOUT',        default=15))
+RSS_BATCH_SIZE     = int(config('RSS_BATCH_SIZE',     default=20))
+RSS_CYCLE_INTERVAL = int(config('RSS_CYCLE_INTERVAL', default=900))   # seconds
+RSS_S1_MAX_CONCURRENT  = int(config('RSS_S1_MAX_CONCURRENT',  default=20))   # Stage 1: concurrent HTTP fetchers
+RSS_S2_INITIAL_WORKERS = int(config('RSS_S2_INITIAL_WORKERS', default=2))    # Stage 2: initial CPU workers
+RSS_S2_MAX_WORKERS     = int(config('RSS_S2_MAX_WORKERS',     default=16))   # Stage 2: max CPU workers (supervisor ceiling)
+RSS_S3_DEDUP_WORKERS   = int(config('RSS_S3_DEDUP_WORKERS',   default=4))    # Stage 3: dedup workers (WAL allows parallel reads)
+RSS_S4_MAX_WORKERS     = int(config('RSS_S4_MAX_WORKERS',     default=1))    # Stage 4: DB write (keep 1 — serialised INSERTs)
+# Backwards-compat aliases
+RSS_MAX_CONCURRENT  = RSS_S1_MAX_CONCURRENT
+RSS_INITIAL_WORKERS = RSS_S2_INITIAL_WORKERS
+RSS_MAX_WORKERS     = RSS_S2_MAX_WORKERS
+RSS_S3_MAX_WORKERS  = RSS_S4_MAX_WORKERS   # old name pointed at write stage
 
 # MediaStack Configuration
 MEDIASTACK_API_KEY = str(config('MEDIASTACK_API_KEY', cast=str))
@@ -140,16 +151,23 @@ ENRICH_MISSING_CONTENT = config('ENRICH_MISSING_CONTENT', default=True, cast=boo
 ENRICH_TIMEOUT = int(config('ENRICH_TIMEOUT', default=10))
 ENRICH_CONCURRENCY = int(config('ENRICH_CONCURRENCY', default=32))
 
-# Per-tier enrichment tuning (tiered pipeline: cffi → requests → playwright)
-CFFI_CONCURRENCY    = int(config('CFFI_CONCURRENCY',    default=40))
+# ── Enrichment Pipeline (tiered: cffi → requests → playwright) ───────────────
+# Stage E1  cffi_worker        thread     curl_cffi subprocess   Chrome TLS
+# Stage E2  requests_worker    thread     requests subprocess    browser headers
+# Stage E3  playwright_worker  async      Playwright subprocess  headless Chromium
 CFFI_TIMEOUT        = int(config('CFFI_TIMEOUT',        default=12))
 CFFI_BATCH_SIZE     = int(config('CFFI_BATCH_SIZE',     default=80))
-REQUESTS_CONCURRENCY = int(config('REQUESTS_CONCURRENCY', default=20))
 REQUESTS_TIMEOUT     = int(config('REQUESTS_TIMEOUT',     default=15))
 REQUESTS_BATCH_SIZE  = int(config('REQUESTS_BATCH_SIZE',  default=40))
-PLAYWRIGHT_CONCURRENCY = int(config('PLAYWRIGHT_CONCURRENCY', default=6))
 PLAYWRIGHT_TIMEOUT     = int(config('PLAYWRIGHT_TIMEOUT',     default=30))
 PLAYWRIGHT_BATCH_SIZE  = int(config('PLAYWRIGHT_BATCH_SIZE',  default=12))
+ENRICH_CFFI_MAX_WORKERS       = int(config('ENRICH_CFFI_MAX_WORKERS',       default=40))
+ENRICH_REQUESTS_MAX_WORKERS   = int(config('ENRICH_REQUESTS_MAX_WORKERS',   default=20))
+ENRICH_PLAYWRIGHT_MAX_WORKERS = int(config('ENRICH_PLAYWRIGHT_MAX_WORKERS', default=6))
+# Backwards-compat aliases
+CFFI_CONCURRENCY       = ENRICH_CFFI_MAX_WORKERS
+REQUESTS_CONCURRENCY   = ENRICH_REQUESTS_MAX_WORKERS
+PLAYWRIGHT_CONCURRENCY = ENRICH_PLAYWRIGHT_MAX_WORKERS
 
 # API Server Configuration
 API_SERVER_ENABLED = config('API_SERVER_ENABLED', default=True, cast=bool)
@@ -163,10 +181,14 @@ BACKFILL_BATCH_SIZE = int(config('BACKFILL_BATCH_SIZE', default=50))   # article
 BACKFILL_DELAY = float(config('BACKFILL_DELAY', default=1.0))           # seconds between articles
 BACKFILL_CYCLE_INTERVAL = int(config('BACKFILL_CYCLE_INTERVAL', default=10))  # seconds between cycles
 
-TRANSLATE_ENABLED = config('TRANSLATE_ENABLED', default=True, cast=bool)
-TRANSLATE_BATCH_SIZE = int(config('TRANSLATE_BATCH_SIZE', default=100))     # articles per batch
-TRANSLATE_DELAY = float(config('TRANSLATE_DELAY', default=2.0))             # seconds between articles
-TRANSLATE_CYCLE_INTERVAL = int(config('TRANSLATE_CYCLE_INTERVAL', default=60))    # 60s between cycles
+# ── Translation Pipeline ──────────────────────────────────────────────────────
+# Stage T1  Google Translate    thread     Google subprocess
+# Stage T2  NLLB offline        process    NLLB model subprocess (GPU/CPU)
+TRANSLATE_ENABLED        = config('TRANSLATE_ENABLED',        default=True, cast=bool)
+TRANSLATE_BATCH_SIZE     = int(config('TRANSLATE_BATCH_SIZE',     default=100))   # articles per cycle
+TRANSLATE_MAX_WORKERS    = int(config('TRANSLATE_MAX_WORKERS',    default=4))     # concurrent translations
+TRANSLATE_DELAY          = float(config('TRANSLATE_DELAY',        default=2.0))   # seconds between articles
+TRANSLATE_CYCLE_INTERVAL = int(config('TRANSLATE_CYCLE_INTERVAL', default=60))    # seconds between cycles
 
 # Blocked-source probing — periodically re-tests blocked sources and unblocks survivors
 PROBE_ENABLED = config('PROBE_ENABLED', default=True, cast=bool)
@@ -690,13 +712,10 @@ class NewsGather():
             backend='playwright',
         )
         # Legacy single-worker alias (used by enrich_article_content helper)
+        # Legacy single-backend alias — still used by enrich_article_content()
         self._enrichment_worker = self._cffi_worker
 
-        # Set of article IDs currently in the enrichment pipeline; updated by
-        # backfill_content() and exposed via GET /api/queues.
-        self._backfill_processing_ids: set[int] = set()
-
-        # Per-tier in-flight sets (populated by backfill_content, read by /api/queues)
+        # Per-tier in-flight sets (feeder adds, write-stage removes)
         self._cffi_ids:       set[int] = set()
         self._requests_ids:   set[int] = set()
         self._playwright_ids: set[int] = set()
@@ -705,6 +724,27 @@ class NewsGather():
         self._tier_resolved:  dict[str, int] = {'cffi': 0, 'requests': 0, 'playwright': 0}
         self._tier_advanced:  dict[str, int] = {'cffi': 0, 'requests': 0, 'playwright': 0}
         self._tier_gave_up:   dict[str, int] = {'cffi': 0, 'requests': 0, 'playwright': 0}
+
+        # Per-worker read-only DB connections for _rss_dedup.
+        # Key = asyncio.Task object of the PipelineStage worker; value = aiosqlite.Connection.
+        # Each connection lives for the lifetime of its worker task.
+        self._dedup_conns: dict = {}
+
+        # Live pipeline objects for enrichment (set by backfill_content)
+        self._enrich_q_e0:    Optional[PipelineQueue] = None
+        self._enrich_q_e1:    Optional[PipelineQueue] = None
+        self._enrich_q_e2:    Optional[PipelineQueue] = None
+        self._enrich_q_ew:    Optional[PipelineQueue] = None
+        self._enrich_stage_e0: Optional[PipelineStage] = None
+        self._enrich_stage_e1: Optional[PipelineStage] = None
+        self._enrich_stage_e2: Optional[PipelineStage] = None
+        self._enrich_stage_ew: Optional[PipelineStage] = None
+
+        # Live pipeline objects for translation (set by backfill_translations)
+        self._translate_q_t0:    Optional[PipelineQueue] = None
+        self._translate_q_tw:    Optional[PipelineQueue] = None
+        self._translate_stage_t0: Optional[PipelineStage] = None
+        self._translate_stage_tw: Optional[PipelineStage] = None
 
         # RSS cycle progress — updated by collect_rss_feeds / _rss_fetcher / stage workers.
         # All fields are safe to mutate without locks (single-threaded asyncio).
@@ -723,11 +763,12 @@ class NewsGather():
             'articles_new': 0,       # new articles inserted this cycle
             'sleeping_until': None,  # time.time() when next cycle will start
         }
-        # Live references to the current-cycle Stage-2 pipeline objects.
+        # Live references to the current-cycle pipeline objects.
         # Set during collect_rss_feeds(), cleared between cycles.
         # Exposed to /api/queues via _rss_progress().
         self._rss_stage2:  Optional[PipelineStage] = None
         self._rss_q_s2s3:  Optional[PipelineQueue] = None
+        self._rss_q_s3s4:  Optional[PipelineQueue] = None
     
     async def open_async_db(self) -> None:
         """
@@ -1784,23 +1825,32 @@ class NewsGather():
 
                 # ── Build pipeline ───────────────────────────────────────────────
                 q_s1_s2 = PipelineQueue('rss:s1→s2')   # (source, feed) tuples
-                q_s2_s3 = PipelineQueue('rss:s2→s3')   # (src_id, name, batch, tzs)
+                q_s2_s3 = PipelineQueue('rss:s2→s3')   # (src_id, name, raw_batch, tzs)
+                q_s3_s4 = PipelineQueue('rss:s3→s4')   # (src_id, name, merged_batch, tzs)
 
                 stage2 = PipelineStage(
                     'rss-processor',
                     input_queue=q_s1_s2,
                     output_queue=q_s2_s3,
                     handler=self._rss_process_one,
-                    min_workers=RSS_INITIAL_WORKERS,
-                    max_workers=RSS_MAX_WORKERS,
+                    min_workers=RSS_S2_INITIAL_WORKERS,
+                    max_workers=RSS_S2_MAX_WORKERS,
                 )
                 stage3 = PipelineStage(
-                    'rss-db-writer',
+                    'rss-dedup',
                     input_queue=q_s2_s3,
+                    output_queue=q_s3_s4,
+                    handler=self._rss_dedup,
+                    min_workers=RSS_S3_DEDUP_WORKERS,
+                    max_workers=RSS_S3_DEDUP_WORKERS,
+                )
+                stage4 = PipelineStage(
+                    'rss-db-writer',
+                    input_queue=q_s3_s4,
                     output_queue=None,
                     handler=self._rss_write_batch,
-                    min_workers=1,
-                    max_workers=1,   # single writer — serialised DB inserts
+                    min_workers=RSS_S4_MAX_WORKERS,
+                    max_workers=RSS_S4_MAX_WORKERS,
                 )
                 supervisor = PipelineSupervisor(
                     [stage2],
@@ -1812,18 +1862,22 @@ class NewsGather():
                 # Expose to /api/queues during this cycle
                 self._rss_stage2 = stage2
                 self._rss_q_s2s3 = q_s2_s3
+                self._rss_q_s3s4 = q_s3_s4
 
-                await stage2.start(initial=RSS_INITIAL_WORKERS)
-                await stage3.start(initial=1)
+                await stage2.start(initial=RSS_S2_INITIAL_WORKERS)
+                await stage3.start(initial=RSS_S3_DEDUP_WORKERS)
+                await stage4.start(initial=RSS_S4_MAX_WORKERS)
                 supervisor.start()
 
                 # ── Stage 1: dispatch all fetchers ────────────────────────────────
-                semaphore = asyncio.Semaphore(RSS_MAX_CONCURRENT)
+                semaphore = asyncio.Semaphore(RSS_S1_MAX_CONCURRENT)
                 async with aiohttp.ClientSession() as session:
                     self.logger.info(
                         f"📡 Dispatching {len(rss_sources)} RSS feeds "
-                        f"(Stage-1 concurrency={RSS_MAX_CONCURRENT}, "
-                        f"Stage-2 workers={RSS_INITIAL_WORKERS}→{RSS_MAX_WORKERS})..."
+                        f"(S1={RSS_S1_MAX_CONCURRENT}, "
+                        f"S2={RSS_S2_INITIAL_WORKERS}→{RSS_S2_MAX_WORKERS}, "
+                        f"S3-dedup={RSS_S3_DEDUP_WORKERS}, "
+                        f"S4-write={RSS_S4_MAX_WORKERS})..."
                     )
                     tasks = [
                         self._rss_fetcher(session, source, semaphore, q_s1_s2)
@@ -1831,18 +1885,21 @@ class NewsGather():
                     ]
                     await asyncio.gather(*tasks, return_exceptions=True)
 
-                # ── Stage 1 done → drain Stage 2 ─────────────────────────────────
+                # ── Drain: S1 done → S2 → S3 → S4 ───────────────────────────────
                 stage2.signal_upstream_done()
                 await stage2.wait_done()
                 supervisor.stop()
 
-                # ── Stage 2 done → drain Stage 3 ─────────────────────────────────
                 stage3.signal_upstream_done()
                 await stage3.wait_done()
+
+                stage4.signal_upstream_done()
+                await stage4.wait_done()
 
                 # Clear live pipeline refs
                 self._rss_stage2 = None
                 self._rss_q_s2s3 = None
+                self._rss_q_s3s4 = None
 
                 rc = self._rss_cycle
                 self.logger.info(
@@ -1865,6 +1922,7 @@ class NewsGather():
         finally:
             self._rss_stage2 = None
             self._rss_q_s2s3 = None
+            self._rss_q_s3s4 = None
             self.logger.info("📡 RSS collector stopped")
 
     
@@ -2060,18 +2118,6 @@ class NewsGather():
             if not batch:
                 return None
 
-            # One bulk SELECT instead of N individual reads
-            all_hashes   = [a['title_hash'] for a in batch if a['title_hash']]
-            enriched_map = await self.db.find_by_title_hash_bulk(all_hashes)
-            for article in batch:
-                existing = enriched_map.get(article['title_hash'])
-                if existing:
-                    article['author']      = existing['author']      or article['author']
-                    article['description'] = existing['description'] or article['description']
-                    article['content']     = existing['content']
-                    article['urlToImage']  = existing['urlToImage']  or article['urlToImage']
-                    article['is_enriched'] = 1
-
             return (source_id, source_name, batch, detected_tzs)
 
         except Exception as e:
@@ -2080,13 +2126,58 @@ class NewsGather():
         finally:
             self._rss_cycle['processed'] += 1
 
+    async def _rss_dedup(self, item: tuple) -> Optional[tuple]:
+        """
+        Stage 3 handler — title-hash dedup.
+
+        Every article always has a title, so title_hash is always set.
+        The only task here is: check which hashes already exist in the DB
+        and discard those articles.  Uses a covering-index query so SQLite
+        never touches table data pages.
+
+        Each PipelineStage worker task gets its own persistent read-only
+        aiosqlite connection (one OS thread per connection) so that N workers
+        issue their queries truly in parallel.
+        """
+        source_id, source_name, batch, detected_tzs = item
+
+        # ── Per-worker connection (opened once, closed when task exits) ─────
+        task = asyncio.current_task()
+        conn = self._dedup_conns.get(task)
+        if conn is None:
+            conn = await self.db.open_ro_conn()
+            self._dedup_conns[task] = conn
+
+            def _release(t: asyncio.Task) -> None:
+                self._dedup_conns.pop(t, None)
+                # Schedule async close from sync callback
+                asyncio.get_event_loop().call_soon(
+                    lambda: asyncio.ensure_future(conn.close())
+                )
+            task.add_done_callback(_release)
+
+        # ── Covering-index query — no table I/O ──────────────────────────────
+        try:
+            all_hashes = [a['title_hash'] for a in batch]   # never empty; title always present
+            existing   = await self.db.find_existing_title_hashes(all_hashes, conn=conn)
+
+            deduped = [a for a in batch if a['title_hash'] not in existing]
+            if not deduped:
+                return None   # all already in DB
+
+            return (source_id, source_name, deduped, detected_tzs)
+
+        except Exception as e:
+            self.logger.error(f"❌ RSS dedup [{source_name}]: {e}", exc_info=True)
+            return item   # pass through unmodified on error
+
     async def _rss_write_batch(self, item: tuple) -> None:
         """
-        Stage 3 handler — serialised DB writes for one processed feed batch.
+        Stage 4 handler — serialised DB writes for one processed feed batch.
 
         Always runs in a single-worker PipelineStage so that SQLite write
         transactions never interleave.  Receives the tuple produced by
-        ``_rss_process_one`` and performs:
+        ``_rss_dedup`` and performs:
           • insert_articles_batch (chunked, INSERT OR IGNORE)
           • timezone consistency back-fill if all entries share one timezone
         """
@@ -2459,14 +2550,19 @@ class NewsGather():
         """
         Tiered enrichment pipeline: cffi → requests → playwright.
 
-        Three independent producer+consumer pairs run concurrently, each with
-        its own semaphore, concurrency, and timeout:
-          Tier 0 (cffi)      — enrich_try=0  fast Chrome-TLS fetcher
-          Tier 1 (requests)  — enrich_try=1  browser-headers fallback
-          Tier 2 (playwright)— enrich_try=2  headless Chromium last resort
+        Three independent PipelineStage instances run concurrently, each fed
+        from its own DB poller queue.  Successful results flow to a shared
+        write stage.
 
-        A failure in tier N increments enrich_try so the article moves to tier
-        N+1 on the next cycle.  Playwright failure marks is_enriched=-1 (done).
+        Pipeline layout:
+            [DB-feeder] ─→ q_e0 → [E0: cffi,      ×CFFI_CONCURRENCY]       ─→ q_ew
+                         → q_e1 → [E1: requests,   ×REQUESTS_CONCURRENCY]  ─→ q_ew
+                         → q_e2 → [E2: playwright,  ×PLAYWRIGHT_CONCURRENCY]─→ q_ew
+                                               q_ew → [EW: write, ×1] → DB
+
+        Failures in any tier call mark_enrich_attempt_failed() inline (fast
+        DB write). The DB feeder picks articles up in the next tier on the
+        subsequent cycle.
         """
         if not BACKFILL_ENABLED:
             self.logger.info("⏭️  Backfill disabled (BACKFILL_ENABLED=False)")
@@ -2474,236 +2570,207 @@ class NewsGather():
 
         self.logger.info(
             f"🔁 Backfill started — "
-            f"cffi(batch={CFFI_BATCH_SIZE}, concur={CFFI_CONCURRENCY}, t={CFFI_TIMEOUT}s) | "
-            f"requests(batch={REQUESTS_BATCH_SIZE}, concur={REQUESTS_CONCURRENCY}, t={REQUESTS_TIMEOUT}s) | "
-            f"playwright(batch={PLAYWRIGHT_BATCH_SIZE}, concur={PLAYWRIGHT_CONCURRENCY}, t={PLAYWRIGHT_TIMEOUT}s)"
+            f"cffi(concur={CFFI_CONCURRENCY}, t={CFFI_TIMEOUT}s) | "
+            f"requests(concur={REQUESTS_CONCURRENCY}, t={REQUESTS_TIMEOUT}s) | "
+            f"playwright(concur={PLAYWRIGHT_CONCURRENCY}, t={PLAYWRIGHT_TIMEOUT}s)"
         )
 
-        # Shared in-flight tracking (keyed per worker instance) — reuse instance sets
         self._cffi_ids.clear()
         self._requests_ids.clear()
         self._playwright_ids.clear()
-        cffi_ids       = self._cffi_ids
-        requests_ids   = self._requests_ids
-        playwright_ids = self._playwright_ids
-        self._backfill_processing_ids = cffi_ids  # legacy alias for /api/queues
 
-        cffi_inflight       = asyncio.Semaphore(CFFI_BATCH_SIZE)
-        requests_inflight   = asyncio.Semaphore(REQUESTS_BATCH_SIZE)
-        playwright_inflight = asyncio.Semaphore(PLAYWRIGHT_BATCH_SIZE)
+        # ── Queues ────────────────────────────────────────────────────────
+        q_e0 = PipelineQueue('enrich:e0')      # cffi tier
+        q_e1 = PipelineQueue('enrich:e1')      # requests tier
+        q_e2 = PipelineQueue('enrich:e2')      # playwright tier
+        q_ew = PipelineQueue('enrich:write')   # all successes → DB
+        self._enrich_q_e0, self._enrich_q_e1  = q_e0, q_e1
+        self._enrich_q_e2, self._enrich_q_ew  = q_e2, q_ew
 
-        await asyncio.gather(
-            self._backfill_producer(cffi_inflight,       cffi_ids,       self._cffi_worker,       enrich_try=0, batch=CFFI_BATCH_SIZE),
-            self._backfill_consumer(cffi_inflight,       cffi_ids,       self._cffi_worker,       enrich_try=0),
-            self._backfill_producer(requests_inflight,   requests_ids,   self._requests_worker,   enrich_try=1, batch=REQUESTS_BATCH_SIZE),
-            self._backfill_consumer(requests_inflight,   requests_ids,   self._requests_worker,   enrich_try=1),
-            self._backfill_producer(playwright_inflight, playwright_ids, self._playwright_worker, enrich_try=2, batch=PLAYWRIGHT_BATCH_SIZE),
-            self._backfill_consumer(playwright_inflight, playwright_ids, self._playwright_worker, enrich_try=2),
-            return_exceptions=True,
-        )
+        # ── Per-tier handler factory ──────────────────────────────────────
+        def _make_tier_handler(worker, ids, tier):
+            async def _handler(article: dict):
+                article_id  = article['id_article']
+                source_id   = article.get('id_source', '')
+                source_name = article.get('source_name', '')
+                current_try = article.get('_enrich_try', tier)
 
-    async def _backfill_producer(
-        self,
-        inflight: asyncio.Semaphore,
-        processing_ids: set[int],
-        worker,
-        enrich_try: int,
-        batch: int,
-    ) -> None:
-        """
-        Fetch pending articles for *enrich_try* tier from DB and enqueue them.
-        Blocks on the semaphore when *batch* articles are already in-flight.
-        Sleeps BACKFILL_CYCLE_INTERVAL when the DB returns no new rows.
-        """
-        while not self.shutdown_flag:
-            try:
-                # ── 0. Bulk-close articles from blocked sources ────────────
-                await self.db.bulk_close_blocked_source_articles()
-                # Defensive: articles with enrich_try>2 and is_enriched=0 are
-                # unreachable by any tier (fetch_pending_enrichment guards
-                # enrich_try<=2); give up on them so they don't skew stats.
-                n_gave_up = await self.db.bulk_give_up_exhausted_articles()
-                if n_gave_up:
-                    self.logger.warning(
-                        f"♻️  Backfill[{worker.backend}]: gave up on "
-                        f"{n_gave_up} articles with enrich_try>2"
-                    )
+                ok = await worker.enrich_direct(article)
 
-                # ── 1. Fetch a larger slice so that after excluding in-flight
-                #       articles we still have enough work to fill free slots. ─
-                fetch_limit = batch + len(processing_ids)
-                rows = await self.db.fetch_pending_enrichment(fetch_limit, enrich_try=enrich_try)
-
-                # Exclude articles already queued / being processed
-                rows = [r for r in rows if r['id_article'] not in processing_ids]
-
-                if not rows:
-                    self.logger.info(
-                        f"✅ Backfill[{worker.backend}]: no new articles — "
-                        f"sleeping {BACKFILL_CYCLE_INTERVAL}s "
-                        f"(in-flight={len(processing_ids)})"
-                    )
-                    await asyncio.sleep(BACKFILL_CYCLE_INTERVAL)
-                    continue
-
-                self.logger.info(
-                    f"🔁 Backfill[{worker.backend}]: {len(rows)} articles to enqueue "
-                    f"(in-flight={len(processing_ids)}, max={batch})…"
-                )
-
-                for row in rows:
-                    if self.shutdown_flag:
-                        return
-
-                    await inflight.acquire()
-
-                    article = {
-                        'id_article':  row['id_article'],
-                        'id_source':   row['id_source']   or '',
-                        'source_name': row['source_name'] or row['id_source'] or '',
-                        'url':         row['url'],
-                        'author':      row['author'],
-                        'description': row['description'],
-                        'content':     row['content'],
-                        'urlToImage':  row['urlToImage'],
-                        '_enrich_try': row.get('enrich_try', enrich_try),
-                    }
-                    processing_ids.add(article['id_article'])
-                    await worker.enqueue(article)
-
-                # Yield to let the consumer (and other tasks) run
-                await asyncio.sleep(0)
-
-            except asyncio.CancelledError:
-                self.logger.info(f"🏁 Backfill[{worker.backend}] producer cancelled")
-                return
-            except Exception as exc:
-                self.logger.error(f"Backfill[{worker.backend}] producer error: {exc}", exc_info=True)
-                await asyncio.sleep(60)
-
-    async def _backfill_consumer(
-        self,
-        inflight: asyncio.Semaphore,
-        processing_ids: set[int],
-        worker,
-        enrich_try: int,
-    ) -> None:
-        """
-        Drain the worker's output_queue and persist results to the DB.
-        On failure, advances the article to the next tier via mark_enrich_attempt_failed().
-        """
-        enriched_total = 0
-        failed_total = 0
-
-        while not self.shutdown_flag:
-            try:
-                try:
-                    article_dict, ok = await asyncio.wait_for(
-                        worker.output_queue.get(),
-                        timeout=5.0,
-                    )
-                except asyncio.TimeoutError:
-                    continue
-
-                article_id  = article_dict['id_article']
-                source_id   = article_dict.get('id_source', '')
-                source_name = article_dict.get('source_name', '')
-                current_try = article_dict.get('_enrich_try', enrich_try)
-
-                # Remove from tracking set and free the inflight slot
-                processing_ids.discard(article_id)
-                inflight.release()
-
-                # Persist blocking error — use the article's URL *domain* so
-                # aggregator feeds (e.g. investing.com's "All News") are never
-                # blocked; only the actual paywalled domain gets blocked.
-                error_code     = article_dict.pop('_error_code', None)
-                blocked_domain = article_dict.pop('_blocked_domain', None)
+                # Surface blocking errors to persistent DB tracking
+                error_code     = article.pop('_error_code', None)
+                blocked_domain = article.pop('_blocked_domain', None)
                 if error_code:
                     if blocked_domain:
                         await self._increment_blocked_domain(
                             blocked_domain, source_name, error_code
                         )
                     elif source_id:
-                        # Fallback (no URL available): block by source
-                        await self._increment_blocked_count(source_id, source_name, error_code)
+                        await self._increment_blocked_count(
+                            source_id, source_name, error_code
+                        )
+
+                ids.discard(article_id)
 
                 if ok:
-                    try:
-                        # Normalize empty strings to NULL so content IS NOT NULL
-                        # is a reliable "has real content" check downstream.
-                        fetched_content     = article_dict.get('content') or None
-                        fetched_author      = article_dict.get('author') or None
-                        fetched_image       = article_dict.get('urlToImage') or None
-
-                        # Use plain-text length to decide if description is
-                        # meaningful — avoids stub HTML like HN's
-                        # "<a href=...>Comments</a>" counting as real content.
-                        raw_desc = article_dict.get('description') or ''
-                        _desc_text = re.sub(r'<[^>]+>', '', raw_desc).strip()
-                        fetched_description = raw_desc if len(_desc_text) >= 80 else None
-
-                        # If the fetch "succeeded" but returned nothing useful,
-                        # advance to next tier (same as a fetch failure).
-                        if not fetched_content and not fetched_description:
-                            self.logger.debug(
-                                f"⚠️  Backfill[{worker.backend}]: empty result for [{source_name}] "
-                                f"{article_id} — advancing to next tier"
-                            )
-                            await self.db.mark_enrich_attempt_failed(article_id, current_try)
-                            if current_try >= 2:
-                                self._tier_gave_up[worker.backend] = self._tier_gave_up.get(worker.backend, 0) + 1
-                            else:
-                                self._tier_advanced[worker.backend] = self._tier_advanced.get(worker.backend, 0) + 1
-                            continue
-                        else:
-                            enriched_val = 1
-
-                        await self.db.save_enriched_article(
-                            article_id,
-                            author=fetched_author,
-                            description=fetched_description,
-                            content=fetched_content,
-                            url_to_image=fetched_image,
-                            is_enriched=enriched_val,
-                        )
-                        if enriched_val == 1:
-                            enriched_total += 1
-                            self._tier_resolved[worker.backend] = self._tier_resolved.get(worker.backend, 0) + 1
+                    # Reject JS skeletons: no real content despite "ok"
+                    raw_desc   = article.get('description') or ''
+                    _desc_text = re.sub(r'<[^>]+>', '', raw_desc).strip()
+                    if not article.get('content') and len(_desc_text) < 80:
                         self.logger.debug(
-                            f"✅ Backfill saved: [{source_name}] {article_id} "
-                            f"(enriched={enriched_total}, val={enriched_val})"
+                            f"⚠️  Backfill[{worker.backend}]: empty result for "
+                            f"[{source_name}] {article_id} — advancing tier"
                         )
+                        await self.db.mark_enrich_attempt_failed(article_id, current_try)
+                        if current_try >= 2:
+                            self._tier_gave_up[worker.backend] = \
+                                self._tier_gave_up.get(worker.backend, 0) + 1
+                        else:
+                            self._tier_advanced[worker.backend] = \
+                                self._tier_advanced.get(worker.backend, 0) + 1
+                        return None
+                    self._tier_resolved[worker.backend] = \
+                        self._tier_resolved.get(worker.backend, 0) + 1
+                    return (article, current_try)
+                else:
+                    await self.db.mark_enrich_attempt_failed(article_id, current_try)
+                    if current_try >= 2:
+                        self._tier_gave_up[worker.backend] = \
+                            self._tier_gave_up.get(worker.backend, 0) + 1
+                    else:
+                        self._tier_advanced[worker.backend] = \
+                            self._tier_advanced.get(worker.backend, 0) + 1
+                    return None
+            return _handler
+
+        # ── Write stage handler ───────────────────────────────────────────
+        async def _handle_enrich_write(item: tuple):
+            article, current_try = item
+            article_id = article['id_article']
+            try:
+                raw_desc    = article.get('description') or ''
+                _desc_text  = re.sub(r'<[^>]+>', '', raw_desc).strip()
+                await self.db.save_enriched_article(
+                    article_id,
+                    author=      article.get('author')     or None,
+                    description= raw_desc if len(_desc_text) >= 80 else None,
+                    content=     article.get('content')    or None,
+                    url_to_image=article.get('urlToImage') or None,
+                    is_enriched= 1,
+                )
+                self.logger.debug(
+                    f"✅ Backfill saved: [{article.get('source_name','')}] {article_id}"
+                )
+            except Exception as exc:
+                self.logger.error(f"Enrich write failed for {article_id}: {exc}")
+            return None
+
+        # ── Stages ───────────────────────────────────────────────────────
+        stage_e0 = PipelineStage(
+            'enrich-cffi', q_e0, q_ew,
+            handler=_make_tier_handler(self._cffi_worker, self._cffi_ids, 0),
+            min_workers=1, max_workers=CFFI_CONCURRENCY,
+        )
+        stage_e1 = PipelineStage(
+            'enrich-requests', q_e1, q_ew,
+            handler=_make_tier_handler(self._requests_worker, self._requests_ids, 1),
+            min_workers=1, max_workers=REQUESTS_CONCURRENCY,
+        )
+        stage_e2 = PipelineStage(
+            'enrich-playwright', q_e2, q_ew,
+            handler=_make_tier_handler(self._playwright_worker, self._playwright_ids, 2),
+            min_workers=1, max_workers=PLAYWRIGHT_CONCURRENCY,
+        )
+        stage_ew = PipelineStage(
+            'enrich-write', q_ew, None,
+            handler=_handle_enrich_write,
+            min_workers=1, max_workers=1,
+        )
+        self._enrich_stage_e0 = stage_e0
+        self._enrich_stage_e1 = stage_e1
+        self._enrich_stage_e2 = stage_e2
+        self._enrich_stage_ew = stage_ew
+
+        sup = PipelineSupervisor([stage_e0, stage_e1, stage_e2])
+        await stage_e0.start(initial=CFFI_CONCURRENCY)
+        await stage_e1.start(initial=REQUESTS_CONCURRENCY)
+        await stage_e2.start(initial=PLAYWRIGHT_CONCURRENCY)
+        await stage_ew.start(initial=1)
+        sup.start()
+
+        # ── DB feeder loop (runs until shutdown_flag or CancelledError) ──
+        _tier_spec = [
+            (0, q_e0, self._cffi_ids,       CFFI_BATCH_SIZE,       'cffi'),
+            (1, q_e1, self._requests_ids,   REQUESTS_BATCH_SIZE,   'requests'),
+            (2, q_e2, self._playwright_ids, PLAYWRIGHT_BATCH_SIZE, 'playwright'),
+        ]
+        try:
+            while not self.shutdown_flag:
+                # Once-per-cycle DB maintenance
+                try:
+                    await self.db.bulk_close_blocked_source_articles()
+                    n_gave_up = await self.db.bulk_give_up_exhausted_articles()
+                    if n_gave_up:
+                        self.logger.warning(
+                            f"♻️  Backfill: gave up on {n_gave_up} exhausted articles"
+                        )
+                except Exception as exc:
+                    self.logger.error(f"Backfill maintenance error: {exc}", exc_info=True)
+
+                for tier_id, q, ids, batch, backend in _tier_spec:
+                    if self.shutdown_flag:
+                        break
+                    try:
+                        rows = await self.db.fetch_pending_enrichment(
+                            batch + len(ids), enrich_try=tier_id
+                        )
+                        rows = [r for r in rows if r['id_article'] not in ids]
+                        if not rows:
+                            self.logger.info(
+                                f"✅ Backfill[{backend}]: no new articles "
+                                f"(in-flight={len(ids)})"
+                            )
+                            continue
+                        self.logger.info(
+                            f"🔁 Backfill[{backend}]: {len(rows)} articles to enqueue "
+                            f"(in-flight={len(ids)}, max={batch})"
+                        )
+                        for row in rows:
+                            if self.shutdown_flag:
+                                break
+                            article = {
+                                'id_article':  row['id_article'],
+                                'id_source':   row['id_source']   or '',
+                                'source_name': row['source_name'] or row['id_source'] or '',
+                                'url':         row['url'],
+                                'author':      row['author'],
+                                'description': row['description'],
+                                'content':     row['content'],
+                                'urlToImage':  row['urlToImage'],
+                                '_enrich_try': row.get('enrich_try', tier_id),
+                            }
+                            ids.add(article['id_article'])
+                            await q.put(article)
                     except Exception as exc:
                         self.logger.error(
-                            f"Backfill DB write failed for {article_id}: {exc}"
+                            f"Backfill[tier{tier_id}] feeder error: {exc}", exc_info=True
                         )
-                else:
-                    # Fetch failed → advance article to next tier
-                    try:
-                        await self.db.mark_enrich_attempt_failed(article_id, current_try)
-                    except Exception as exc:
-                        self.logger.error(f"Backfill failed-update error: {exc}")
-                    failed_total += 1
-                    if current_try >= 2:
-                        self._tier_gave_up[worker.backend] = self._tier_gave_up.get(worker.backend, 0) + 1
-                    else:
-                        self._tier_advanced[worker.backend] = self._tier_advanced.get(worker.backend, 0) + 1
-                    next_tier = 'give up (is_enriched=-1)' if current_try >= 2 else f'tier {current_try + 1}'
-                    self.logger.debug(
-                        f"⚠️  Backfill[{worker.backend}] no-data: [{source_name}] {article_id} "
-                        f"→ {next_tier} (failed={failed_total})"
-                    )
 
-            except asyncio.CancelledError:
-                self.logger.info(
-                    f"🏁 Backfill[{worker.backend}] consumer cancelled "
-                    f"(enriched={enriched_total}, failed={failed_total})"
-                )
-                return
-            except Exception as exc:
-                self.logger.error(f"Backfill[{worker.backend}] consumer error: {exc}", exc_info=True)
-                await asyncio.sleep(1)
+                await asyncio.sleep(BACKFILL_CYCLE_INTERVAL)
+
+        except asyncio.CancelledError:
+            self.logger.info("🏁 Backfill feeder cancelled — draining stages…")
+        finally:
+            sup.stop()
+            for stage in (stage_e0, stage_e1, stage_e2):
+                stage.signal_upstream_done()
+            await asyncio.gather(
+                stage_e0.wait_done(), stage_e1.wait_done(), stage_e2.wait_done(),
+                return_exceptions=True,
+            )
+            stage_ew.signal_upstream_done()
+            await stage_ew.wait_done()
+            self.logger.info("🏁 Backfill pipeline drained")
 
     async def enrich_article_content(self, article_dict, source_name='', source_id=''):
         """
@@ -2935,141 +3002,145 @@ class NewsGather():
 
     async def backfill_translations(self):
         """
-        Continuously translate articles whose is_translated=0 and whose
-        detected_language requires translation (per the languages table).
+        Translation pipeline using PipelineStage/PipelineQueue.
 
-        Each cycle:
-          1. Fetch a batch of untranslated articles with a non-null title,
-             ordered newest first.
-          2. For each article, call translatev1.translate_article() for
-             title, description, and content.
-          3. If Google returned a translated result, write translated_title /
-             translated_description / translated_content and set is_translated=1.
-          4. If the text was unchanged (e.g. misdetected language already in
-             target language), leave translated_* NULL and is_translated stays 0
-             so we skip it on future cycles (mark with is_translated=-1).
-          5. Sleep TRANSLATE_DELAY between articles, TRANSLATE_CYCLE_INTERVAL
-             between full cycles.
+        Pipeline layout:
+            [DB-feeder] ─→ q_t0 → [T0: translate, ×TRANSLATE_MAX_WORKERS] ─→ q_tw
+                                              q_tw → [TW: write, ×1] → DB
+
+        TRANSLATE_MAX_WORKERS articles are translated concurrently; each worker
+        sleeps TRANSLATE_DELAY after its call to honour API rate limits.
+        A single write worker serialises all DB updates.
         """
         if not TRANSLATE_ENABLED:
             self.logger.info("⏭️  Translation backfill disabled (TRANSLATE_ENABLED=False)")
             return
 
-        # Import here so the module is loaded once and its lru_cache is shared
         import translatev1 as tv
         tv._load_language_rules.cache_clear()
 
-        # Start both translation subprocesses eagerly so they are warm before
-        # any article needs translating.  Both sit idle on their request queues
-        # until called.  Google subprocess starts in milliseconds; NLLB takes
-        # ~40 s to load the model onto the GPU.
+        # Start both subprocess workers eagerly so they are warm before use.
+        # Google starts in milliseconds; NLLB takes ~40 s to load the model.
         tv._google.start()
         tv._nllb.start()
 
         self.logger.info(
-            f"🌐 Translation backfill started — batch={TRANSLATE_BATCH_SIZE}, "
+            f"🌐 Translation backfill started — "
+            f"workers={TRANSLATE_MAX_WORKERS}, batch={TRANSLATE_BATCH_SIZE}, "
             f"delay={TRANSLATE_DELAY}s, cycle={TRANSLATE_CYCLE_INTERVAL}s"
         )
 
-        while not self.shutdown_flag:
-            # ── Bulk-skip: mark articles that don't need translation → -1 ────
-            # Runs every cycle so new articles inserted since startup are caught.
-            # Two cases:
-            #   a) detected_language has translate=0 in the languages table (en, pt, …)
-            #   b) detected_language is set but references no row in languages at all
-            #      (unsupported/unknown language code)
-            # Articles with NULL detected_language are left alone — language
-            # detection may still run and set a translatable language later.
-            try:
-                skipped = await self.db.bulk_skip_non_translatable()
-                if skipped:
-                    self.logger.info(
-                        f"🌐 Translation: bulk-skipped {skipped} articles "
-                        f"(translate=0 or unsupported language)"
-                    )
-            except Exception as e:
-                self.logger.warning(f"Translation bulk-skip failed (non-critical): {e}")
-            try:
-                # ── 1. Find articles that need translation ─────────────────
-                # Uses the optimised view v_articles_pending_translation which
-                # already applies all filters (is_translated=0, title not null/empty,
-                # translate=1 or unknown language) and carries the resolved
-                # target_language / translator_code from the languages table.
-                rows = await self.db.fetch_pending_translation(TRANSLATE_BATCH_SIZE)
+        # ── Queues ────────────────────────────────────────────────────────
+        q_t0 = PipelineQueue('translate:t0')    # articles awaiting translation
+        q_tw = PipelineQueue('translate:write')  # results awaiting DB write
+        self._translate_q_t0 = q_t0
+        self._translate_q_tw = q_tw
 
-                if not rows:
+        # ── Stage handlers ─────────────────────────────────────────────────
+        async def _handle_translate(row: dict):
+            article_id  = row['id_article']
+            lang        = row['detected_language']
+            title       = row['title']       or ''
+            description = row['description'] or ''
+            content     = row['content']     or ''
+
+            (t_title, ok_t), (t_desc, ok_d), (t_cont, ok_c) = \
+                await tv.translate_article_fields_async(
+                    title, description, content, lang
+                )
+
+            if TRANSLATE_DELAY > 0:
+                await asyncio.sleep(TRANSLATE_DELAY)
+
+            return (article_id, lang, title, t_title, ok_t, t_desc, ok_d, t_cont, ok_c)
+
+        async def _handle_translate_write(item: tuple):
+            article_id, lang, title, t_title, ok_t, t_desc, ok_d, t_cont, ok_c = item
+            any_translated = ok_t or ok_d or ok_c
+            try:
+                values: dict = {'is_translated': 1 if any_translated else -1}
+                if ok_t:
+                    values['translated_title'] = t_title
+                if ok_d:
+                    values['translated_description'] = t_desc
+                if ok_c:
+                    values['translated_content'] = t_cont
+                await self.db.save_translation(article_id, values)
+                if any_translated:
+                    self.logger.debug(f"🌐 Translated [{lang}]: {title[:60]}")
+                else:
+                    self.logger.debug(f"⏭️  No translation needed [{lang}]: {title[:60]}")
+            except Exception as e:
+                self.logger.error(f"Translation DB write failed for {article_id}: {e}")
+            return None
+
+        # ── Stages ────────────────────────────────────────────────────────
+        stage_t0 = PipelineStage(
+            'translate-translate', q_t0, q_tw,
+            handler=_handle_translate,
+            min_workers=TRANSLATE_MAX_WORKERS, max_workers=TRANSLATE_MAX_WORKERS,
+        )
+        stage_tw = PipelineStage(
+            'translate-write', q_tw, None,
+            handler=_handle_translate_write,
+            min_workers=1, max_workers=1,
+        )
+        self._translate_stage_t0 = stage_t0
+        self._translate_stage_tw = stage_tw
+
+        await stage_t0.start(initial=TRANSLATE_MAX_WORKERS)
+        await stage_tw.start(initial=1)
+
+        # ── DB feeder loop (runs until shutdown_flag or CancelledError) ──
+        try:
+            while not self.shutdown_flag:
+                # Bulk-skip articles that will never need translation
+                try:
+                    skipped = await self.db.bulk_skip_non_translatable()
+                    if skipped:
+                        self.logger.info(
+                            f"🌐 Translation: bulk-skipped {skipped} articles "
+                            f"(translate=0 or unsupported language)"
+                        )
+                except Exception as e:
+                    self.logger.warning(f"Translation bulk-skip failed (non-critical): {e}")
+
+                try:
+                    rows = await self.db.fetch_pending_translation(TRANSLATE_BATCH_SIZE)
+                    if not rows:
+                        self.logger.info(
+                            f"✅ Translation backfill: no pending articles — "
+                            f"sleeping {TRANSLATE_CYCLE_INTERVAL}s"
+                        )
+                        await asyncio.sleep(TRANSLATE_CYCLE_INTERVAL)
+                        continue
+
                     self.logger.info(
-                        f"✅ Translation backfill: no pending articles — "
-                        f"sleeping {TRANSLATE_CYCLE_INTERVAL}s"
+                        f"🌐 Translation backfill: enqueuing {len(rows)} articles…"
                     )
+                    for row in rows:
+                        if self.shutdown_flag:
+                            break
+                        await q_t0.put(dict(row))
+
                     await asyncio.sleep(TRANSLATE_CYCLE_INTERVAL)
-                    continue
 
-                self.logger.info(
-                    f"🌐 Translation backfill: processing {len(rows)} articles..."
-                )
-                translated_count = 0
-                skipped_count = 0
+                except asyncio.CancelledError:
+                    raise
+                except Exception as e:
+                    self.logger.error(
+                        f"Translation backfill unexpected error: {e}", exc_info=True
+                    )
+                    await asyncio.sleep(60)
 
-                for row in rows:
-                    if self.shutdown_flag:
-                        break
-
-                    article_id  = row['id_article']
-                    lang        = row['detected_language']  # may be None
-                    title       = row['title']       or ''
-                    description = row['description'] or ''
-                    content     = row['content']     or ''
-
-                    # Translate all three fields; NLLB subprocess used as fallback
-                    # when Google fails — fully async, does not block the event loop.
-                    (t_title, ok_t), (t_desc, ok_d), (t_cont, ok_c) = \
-                        await tv.translate_article_fields_async(
-                            title, description, content, lang
-                        )
-
-                    any_translated = ok_t or ok_d or ok_c
-
-                    try:
-                        values: dict = {
-                            'is_translated': 1 if any_translated else -1,
-                        }
-                        if ok_t:
-                            values['translated_title'] = t_title
-                        if ok_d:
-                            values['translated_description'] = t_desc
-                        if ok_c:
-                            values['translated_content'] = t_cont
-                        await self.db.save_translation(article_id, values)
-                        if any_translated:
-                            translated_count += 1
-                            self.logger.debug(
-                                f"🌐 Translated [{lang}]: {title[:60]}"
-                            )
-                        else:
-                            skipped_count += 1
-                            self.logger.debug(
-                                f"⏭️  No translation needed [{lang}]: {title[:60]}"
-                            )
-                    except Exception as e:
-                        self.logger.error(
-                            f"Translation DB write failed for {article_id}: {e}"
-                        )
-
-                    await asyncio.sleep(TRANSLATE_DELAY)
-
-                self.logger.info(
-                    f"🌐 Translation cycle done — translated={translated_count}, "
-                    f"skipped={skipped_count} — sleeping {TRANSLATE_CYCLE_INTERVAL}s"
-                )
-                await asyncio.sleep(TRANSLATE_CYCLE_INTERVAL)
-
-            except asyncio.CancelledError:
-                self.logger.info("🏁 Translation backfill task cancelled")
-                return
-            except Exception as e:
-                self.logger.error(f"Translation backfill unexpected error: {e}", exc_info=True)
-                await asyncio.sleep(60)
+        except asyncio.CancelledError:
+            self.logger.info("🏁 Translation feeder cancelled — draining stages…")
+        finally:
+            stage_t0.signal_upstream_done()
+            await stage_t0.wait_done()
+            stage_tw.signal_upstream_done()
+            await stage_tw.wait_done()
+            self.logger.info("🏁 Translation pipeline drained")
 
     async def _refresh_queue_stats(self, interval: int = 20) -> None:
         """Background task: refresh db.cached_stats every `interval` seconds."""
@@ -3133,6 +3204,7 @@ class NewsGather():
             # Live pipeline objects (only set mid-cycle)
             stage2 = g._rss_stage2
             q_s2s3 = g._rss_q_s2s3
+            q_s3s4 = g._rss_q_s3s4
             return {
                 'cycle':      rc['cycle'],
                 'status':     'sleeping' if sleeping_until else ('running' if started else 'idle'),
@@ -3146,15 +3218,17 @@ class NewsGather():
                 'err_http':   rc['err_http'],
                 'err_content': rc['err_content'],
                 'err_timeout': rc['err_timeout'],
-                # Stage 2 — process (dynamic worker pool)
+                # Stage 2 — process (CPU, dynamic workers)
                 'queued':          rc['queued'],
                 'processed':       rc['processed'],
                 'ok':              rc['ok'],
                 'articles_new':    rc['articles_new'],
                 'stage2_workers':  stage2.worker_count if stage2 else 0,
                 's1s2_depth':      stage2.input_queue.depth if stage2 else 0,
-                # Stage 3 — DB write queue
+                # Stage 3 — dedup (async reads)
                 's2s3_depth':      q_s2s3.depth if q_s2s3 else 0,
+                # Stage 4 — DB write (serialised)
+                's3s4_depth':      q_s3s4.depth if q_s3s4 else 0,
                 'next_cycle_in_s': round(sleeping_until - now, 1) if sleeping_until and sleeping_until > now else None,
             }
 
@@ -3287,8 +3361,6 @@ class NewsGather():
 
                 # Return cached stats — refreshed every 20 s by _refresh_queue_stats()
                 s = gather.db.cached_stats
-                worker_q  = gather._enrichment_worker.input_queue.qsize()
-                in_flight = len(gather._backfill_processing_ids)
 
                 # Snapshot in-flight counts before any await (single-threaded asyncio)
                 cffi_fl       = len(gather._cffi_ids)
@@ -3301,8 +3373,6 @@ class NewsGather():
 
                 _TIER_NAMES = {0: 'cffi', 1: 'requests', 2: 'playwright'}
                 _fl_map = {'cffi': cffi_fl, 'requests': requests_fl, 'playwright': playwright_fl}
-                # Include any overflow tiers (enrich_try > 2) so the monitor
-                # can show that enrich_pending and sum(tier.pending) agree.
                 all_tier_keys = sorted(set(list(range(3)) + list(pending_by_tier.keys())))
                 tiers = [
                     {
@@ -3316,6 +3386,10 @@ class NewsGather():
                     }
                     for t in all_tier_keys
                 ]
+
+                # Live stage stats from PipelineStage objects
+                def _stage_info(st):
+                    return st.to_dict() if st is not None else {}
 
                 return {
                     "success": True,
@@ -3331,12 +3405,31 @@ class NewsGather():
                         "translate_skipped": s["translate_skipped"],
                     },
                     "enrichment": {
-                        "worker_queue": worker_q,
-                        "in_flight": in_flight,
+                        "stages": {
+                            "e0_cffi":      _stage_info(gather._enrich_stage_e0),
+                            "e1_requests":  _stage_info(gather._enrich_stage_e1),
+                            "e2_playwright":_stage_info(gather._enrich_stage_e2),
+                            "write":        _stage_info(gather._enrich_stage_ew),
+                        },
+                        "queues": {
+                            "e0_depth": gather._enrich_q_e0.depth if gather._enrich_q_e0 else 0,
+                            "e1_depth": gather._enrich_q_e1.depth if gather._enrich_q_e1 else 0,
+                            "e2_depth": gather._enrich_q_e2.depth if gather._enrich_q_e2 else 0,
+                            "ew_depth": gather._enrich_q_ew.depth if gather._enrich_q_ew else 0,
+                        },
+                        "in_flight": cffi_fl + requests_fl + playwright_fl,
                         "pending_db": s["enrich_pending"],
                         "tiers": tiers,
                     },
                     "translation": {
+                        "stages": {
+                            "t0_translate": _stage_info(gather._translate_stage_t0),
+                            "write":        _stage_info(gather._translate_stage_tw),
+                        },
+                        "queues": {
+                            "t0_depth": gather._translate_q_t0.depth if gather._translate_q_t0 else 0,
+                            "tw_depth": gather._translate_q_tw.depth if gather._translate_q_tw else 0,
+                        },
                         "pending_db": s["translate_pending"],
                     },
                     "rss": _rss_progress(gather),

@@ -192,6 +192,25 @@ class NewsDatabase:
             )
             logger.info(f"✅ Migration: stripped microseconds from {affected} published_at_gmt values")
 
+    async def open_ro_conn(self) -> "aiosqlite.Connection":
+        """
+        Open and return a *new* read-only aiosqlite connection to the same DB.
+
+        Each aiosqlite.Connection runs in its own background thread, so
+        multiple workers that each hold a private connection can execute
+        queries truly in parallel rather than serialising through _ro_conn.
+
+        The caller is responsible for closing the connection when done
+        (``await conn.close()``).
+        """
+        conn = await aiosqlite.connect(
+            f"file:{self._db_path}?mode=ro", uri=True, timeout=10.0
+        )
+        conn.row_factory = aiosqlite.Row
+        await conn.execute("PRAGMA busy_timeout=5000")
+        await conn.execute("PRAGMA cache_size=-8192")   # 8 MB per worker conn
+        return conn
+
     async def close(self) -> None:
         if self._ro_conn:
             await self._ro_conn.close()
@@ -414,30 +433,46 @@ class NewsDatabase:
             row = await cur.fetchone()
         return dict(row) if row else None
 
-    async def find_by_title_hash_bulk(self, hashes: list[str]) -> dict[str, dict]:
+    async def find_by_title_hash_bulk(
+        self,
+        hashes: list[str],
+        conn: Optional["aiosqlite.Connection"] = None,
+    ) -> dict[str, dict]:
         """
-        Batch version of find_by_title_hash.
-        Returns a dict {title_hash: enrichment_row} for any hash that has an
-        enriched article.  Missing hashes are simply absent from the result.
+        Kept for backwards compatibility.  New code should use
+        ``find_existing_title_hashes`` which is faster (covering-index only).
+        """
+        existing = await self.find_existing_title_hashes(hashes, conn=conn)
+        return {h: {} for h in existing}
+
+    async def find_existing_title_hashes(
+        self,
+        hashes: list[str],
+        conn: Optional["aiosqlite.Connection"] = None,
+    ) -> set[str]:
+        """
+        Return the subset of *hashes* that already exist in gm_articles.
+
+        Uses ``idx_articles_title_hash`` as a **covering index** — SQLite
+        resolves the query entirely from the index pages without reading any
+        table rows.  This is O(log N) per hash and involves no data I/O.
+
+        Pass ``conn`` to use a dedicated per-worker read connection (each
+        aiosqlite.Connection has its own background thread, so N workers with
+        N private connections run their queries in parallel).
         """
         if not hashes:
-            return {}
+            return set()
         placeholders = ", ".join("?" * len(hashes))
-        result: dict[str, dict] = {}
-        async with self._rc.execute(
-            f"""
-            SELECT title_hash, author, description, content, urlToImage
-            FROM gm_articles
-            WHERE title_hash IN ({placeholders})
-              AND is_enriched = 1
-              AND content IS NOT NULL AND content != ''
-            """,
+        c = conn if conn is not None else self._rc
+        existing: set[str] = set()
+        async with c.execute(
+            f"SELECT title_hash FROM gm_articles WHERE title_hash IN ({placeholders})",
             hashes,
         ) as cur:
             async for row in cur:
-                d = dict(row)
-                result[d["title_hash"]] = d
-        return result
+                existing.add(row[0])
+        return existing
 
     async def fetch_pending_enrichment(self, limit: int, enrich_try: int = 0) -> list[dict]:
         """
@@ -585,7 +620,8 @@ class NewsDatabase:
     async def bulk_skip_non_translatable(self) -> int:
         """
         Mark is_translated=-1 for articles whose detected_language doesn't
-        require translation (translate=0 or language not in the languages table).
+        require translation: NULL language, translate=0, or language not in
+        the languages table.
         Returns the number of rows updated.
         """
         cur = await self._c.execute(
@@ -593,9 +629,11 @@ class NewsDatabase:
             UPDATE gm_articles
             SET is_translated = -1
             WHERE is_translated = 0
-              AND detected_language IS NOT NULL
-              AND detected_language NOT IN (
-                  SELECT language_code FROM languages WHERE translate = 1
+              AND (
+                  detected_language IS NULL
+                  OR detected_language NOT IN (
+                      SELECT language_code FROM languages WHERE translate = 1
+                  )
               )
             """
         )

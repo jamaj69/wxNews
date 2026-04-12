@@ -149,7 +149,12 @@ def print_snapshot(
     t_skip,      d_tskip,  r_tskip  = delta_rate(["articles", "translate_skipped"])
     t_pend,      d_tpend,  r_tpend  = delta_rate(["translation", "pending_db"])
     in_flight,   d_ifl,    r_ifl    = delta_rate(["enrichment", "in_flight"])
-    worker_q,    _,        _        = delta_rate(["enrichment", "worker_queue"])
+    e0_depth = _get(d, "enrichment", "queues", "e0_depth", default=0)
+    e1_depth = _get(d, "enrichment", "queues", "e1_depth", default=0)
+    e2_depth = _get(d, "enrichment", "queues", "e2_depth", default=0)
+    ew_depth = _get(d, "enrichment", "queues", "ew_depth", default=0)
+    t0_depth = _get(d, "translation", "queues", "t0_depth", default=0)
+    tw_depth = _get(d, "translation", "queues", "tw_depth", default=0)
 
     stats_age = d.get("stats_age_s")
     ts_iso    = d.get("timestamp_iso", "—")
@@ -174,8 +179,14 @@ def print_snapshot(
     print(f"    Falhas       : {_c(RED, f'{enr_fail:>10,}')}  {_sign(d_efail) if d_efail is not None else ''}  {_rate(r_efail)}")
     print(_c(DIM, f"    {'─'*54}"))
     print(f"    {'Total DB':<13}: {_c(chk_enr_col+BOLD, f'{enr_sum:>10,}')}  {_c(chk_enr_col, chk_enr)}")
-    if worker_q:
-        print(f"    Fila worker  : {_c(DIM, f'{worker_q:>10,}')}")
+    # Pipeline queue depths
+    if any([e0_depth, e1_depth, e2_depth, ew_depth]):
+        q_col = lambda d: (YELLOW if d > 10 else (CYAN if d > 0 else DIM))
+        print(f"    Filas cffi/req/pw/write: "
+              f"{_c(q_col(e0_depth)+BOLD, str(e0_depth))} / "
+              f"{_c(q_col(e1_depth)+BOLD, str(e1_depth))} / "
+              f"{_c(q_col(e2_depth)+BOLD, str(e2_depth))} / "
+              f"{_c(q_col(ew_depth)+BOLD, str(ew_depth))}")
 
     # ── Por tier de enriquecimento ───────────────────────────────────────────
     tiers: list[dict] = _get(d, "enrichment", "tiers", default=[])
@@ -214,7 +225,8 @@ def print_snapshot(
     print(f"\n  {_c(BOLD, 'TRADUÇÃO')}")
     print(f"    Traduzidos   : {_c(BOLD+GREEN, f'{translated:>10,}')}  {_sign(d_transl) if d_transl is not None else ''}  {_rate(r_transl)}")
     print(f"    Ignorados    : {_c(DIM, f'{t_skip:>10,}')}  {_sign(d_tskip) if d_tskip is not None else ''}  {_rate(r_tskip)}")
-    print(f"    Pendentes    : {_c(BOLD+YELLOW, f'{t_pend:>10,}')}  {_sign(d_tpend) if d_tpend is not None else ''}  {_rate(r_tpend)}  ETA {_eta(t_pend, r_tpend)}")
+    t_queue_note = f"  (fila: {_c(CYAN, str(t0_depth))}→{_c(CYAN, str(tw_depth))})" if t0_depth or tw_depth else ""
+    print(f"    Pendentes    : {_c(BOLD+YELLOW, f'{t_pend:>10,}')}  {_sign(d_tpend) if d_tpend is not None else ''}  {_rate(r_tpend)}  ETA {_eta(t_pend, r_tpend)}{t_queue_note}")
     print(f"    Não elegível : {_c(DIM, f'{t_not_eligible:>10,}')}  {_c(DIM, '(aguardam enriquecimento ou idioma sem tradução)')}")
     print(_c(DIM, f"    {'─'*54}"))
     print(f"    {'Total DB':<13}: {_c(chk_tran_col+BOLD, f'{tran_sum:>10,}')}  {_c(chk_tran_col, chk_tran)}")
@@ -329,6 +341,7 @@ def print_snapshot(
         s2_workers  = rss.get("stage2_workers", 0)
         s1s2_depth  = rss.get("s1s2_depth", 0)
         s2s3_depth  = rss.get("s2s3_depth", 0)
+        s3s4_depth  = rss.get("s3s4_depth", 0)
         err_total   = rss.get("err_http", 0) + rss.get("err_content", 0) + rss.get("err_timeout", 0)
 
         if rss_status == "running":
@@ -359,12 +372,20 @@ def print_snapshot(
             f"fila S1→S2={_c(q12_col+BOLD, str(s1s2_depth))}"
         )
 
-        # Stage 3
+        # Stage 3 — dedup
         q23_col = YELLOW if s2s3_depth > 10 else (CYAN if s2s3_depth > 0 else DIM)
+        q34_col = YELLOW if s3s4_depth > 10 else (CYAN if s3s4_depth > 0 else DIM)
         print(
-            f"    {'Stage 3 (DB write)':<20}  "
+            f"    {'Stage 3 (dedup)':<20}  "
+            f"fila S2→S3={_c(q23_col+BOLD, str(s2s3_depth))}  "
+            f"fila S3→S4={_c(q34_col+BOLD, str(s3s4_depth))}"
+        )
+
+        # Stage 4 — DB write
+        print(
+            f"    {'Stage 4 (DB write)':<20}  "
             f"artigos novos={_c(GREEN+BOLD, str(rss_art))}  "
-            f"fila S2→S3={_c(q23_col+BOLD, str(s2s3_depth))}"
+            f"fila S3→S4={_c(q34_col+BOLD, str(s3s4_depth))}"
         )
 
     # ── Rodapé ───────────────────────────────────────────────────────────────
