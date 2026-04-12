@@ -1341,17 +1341,26 @@ class NewsGather():
         Tests common RSS URL patterns.
         """
         common_patterns = [
+            # WordPress – pretty permalinks (most common)
             f'https://{domain}/feed/',
+            f'https://{domain}/feed/rss2/',
+            f'https://{domain}/feed/rss/',
+            f'https://{domain}/feed/atom/',
+            # WordPress – no pretty permalinks (common on older/regional sites)
+            f'https://{domain}/?feed=rss2',
+            f'https://{domain}/?feed=rss',
+            f'https://{domain}/?feed=atom',
+            # Generic RSS/Atom paths
             f'https://{domain}/rss',
             f'https://{domain}/rss.xml',
             f'https://{domain}/rss/all.xml',
             f'https://{domain}/feed',
-            f'https://{domain}/feeds/posts/default',  # Blogger
             f'https://{domain}/index.xml',
             f'https://{domain}/atom.xml',
-            f'https://{domain}/feed/rss/',
-            f'https://{domain}/feed/rss',
+            f'https://{domain}/feeds/posts/default',  # Blogger
+            # HTTP fallbacks
             f'http://{domain}/feed/',
+            f'http://{domain}/?feed=rss2',
             f'http://{domain}/rss',
             f'http://{domain}/rss.xml',
             f'http://{domain}/rss/all.xml',
