@@ -50,6 +50,25 @@ NLLB_LANG_MAP: dict[str, str] = {
     'it':    'ita_Latn',  # Italian
     'pt':    'por_Latn',  # Portuguese
     'en':    'eng_Latn',  # English
+    'cy':    'cym_Latn',  # Welsh
+    'ca':    'cat_Latn',  # Catalan
+    'sv':    'swe_Latn',  # Swedish
+    'da':    'dan_Latn',  # Danish
+    'af':    'afr_Latn',  # Afrikaans
+    'no':    'nob_Latn',  # Norwegian Bokmål
+    'et':    'est_Latn',  # Estonian
+    'hu':    'hun_Latn',  # Hungarian
+    'ro':    'ron_Latn',  # Romanian
+    'cs':    'ces_Latn',  # Czech
+    'sk':    'slk_Latn',  # Slovak
+    'fi':    'fin_Latn',  # Finnish
+    'lt':    'lit_Latn',  # Lithuanian
+    'lv':    'lvs_Latn',  # Latvian
+    'bg':    'bul_Cyrl',  # Bulgarian
+    'hr':    'hrv_Latn',  # Croatian
+    'sr':    'srp_Cyrl',  # Serbian
+    'sl':    'slv_Latn',  # Slovenian
+    'el':    'ell_Grek',  # Greek
     # Target language codes used in translate_to column
     'por_Latn': 'por_Latn',
     'eng_Latn': 'eng_Latn',
