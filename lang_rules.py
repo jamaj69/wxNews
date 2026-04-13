@@ -57,3 +57,11 @@ def _load_language_rules() -> dict:
 def get_language_rules(language_code: str) -> dict | None:
     """Return the translation rule for *language_code*, or ``None`` if unknown."""
     return _load_language_rules().get(language_code)
+
+
+# Warm the cache synchronously at import time so the first call from an
+# async context never opens a sqlite3 connection on the event loop thread.
+try:
+    _load_language_rules()
+except Exception:
+    pass

@@ -297,6 +297,10 @@ def _html_has_content(html: str | None) -> bool:
     the 15 KB truncation that caused false negatives on large news pages
     (BBC, IndiaToday, FoxNews, etc.) where article text starts after 30-50 KB
     of <head>, scripts and navigation markup.
+
+    NOTE: CPU-bound (DOTALL regex on raw HTML). Call via
+    ``await loop.run_in_executor(None, _html_has_content, html)``
+    when inside an async context.
     """
     if not html:
         return False
@@ -307,6 +311,19 @@ def _html_has_content(html: str | None) -> bool:
             if count >= 2:
                 return True
     return False
+
+
+def _parse_and_extract(html: str, url: str) -> dict | None:
+    """Parse HTML and extract article fields in one executor-friendly call.
+
+    Combines ``_parse_html`` + ``_soup_to_fields`` so both CPU-bound steps
+    run in the thread-pool executor without returning a BeautifulSoup object
+    (which is not safe to pass between threads).
+    """
+    soup = _parse_html(html, url)
+    if soup is None:
+        return None
+    return _soup_to_fields(soup)
 
 
 def _parse_html(html: str, url: str = '') -> 'BeautifulSoup | None':
@@ -523,10 +540,15 @@ class ArticleContentFetcher:
         best = primary
 
         # Playwright fallback
+        loop = asyncio.get_running_loop()
+        primary_has_content = (
+            primary['success']
+            and await loop.run_in_executor(None, _html_has_content, primary.get('html'))
+        )
         try_pw = (
             primary['error_code'] in _BOT_BLOCKED_CODES
             or (not primary['success'] and primary['error_type'] == ERROR_TEMPORARY)
-            or (primary['success'] and not _html_has_content(primary.get('html')))
+            or (primary['success'] and not primary_has_content)
         )
         if try_pw:
             logger.debug("[fetch-async] playwright fallback (primary=%s): %s",
@@ -537,13 +559,11 @@ class ArticleContentFetcher:
             elif not primary['success'] and pw['error_type'] == ERROR_PERMANENT:
                 best = pw
 
-        # Parse HTML in executor (lxml is CPU-bound C extension)
+        # Parse HTML in executor (CPU-bound: lxml parse + BeautifulSoup traversal)
         html = best.get('html')
         if best['success'] and html:
-            loop = asyncio.get_running_loop()
-            soup = await loop.run_in_executor(None, _parse_html, html, sanitized)
-            if soup:
-                fields = _soup_to_fields(soup)
+            fields = await loop.run_in_executor(None, _parse_and_extract, html, sanitized)
+            if fields is not None:
                 paywall_detected = fields.pop('_paywall', False)
                 result.update(fields)
                 result['success'] = True
@@ -555,11 +575,10 @@ class ArticleContentFetcher:
                         sanitized, self.timeout, options={'nojs': True}
                     )
                     if nojs.get('success') and nojs.get('html'):
-                        nojs_soup = await loop.run_in_executor(
-                            None, _parse_html, nojs['html'], sanitized
+                        nojs_fields = await loop.run_in_executor(
+                            None, _parse_and_extract, nojs['html'], sanitized
                         )
-                        if nojs_soup:
-                            nojs_fields = _soup_to_fields(nojs_soup)
+                        if nojs_fields is not None:
                             nojs_fields.pop('_paywall', None)
                             if nojs_fields.get('content'):
                                 result.update(nojs_fields)
@@ -700,9 +719,8 @@ async def _fetch_and_parse_one(backend: _ProcessFetcher, url: str, timeout: int)
     result['error_type'] = raw.get('error_type')
     if raw.get('success') and raw.get('html'):
         loop = asyncio.get_running_loop()
-        soup = await loop.run_in_executor(None, _parse_html, raw['html'], sanitized)
-        if soup:
-            fields = _soup_to_fields(soup)
+        fields = await loop.run_in_executor(None, _parse_and_extract, raw['html'], sanitized)
+        if fields is not None:
             fields.pop('_paywall', None)
             result.update(fields)
             result['success'] = bool(fields.get('content') or fields.get('description'))
