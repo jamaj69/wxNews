@@ -539,17 +539,17 @@ class ArticleContentFetcher:
 
         best = primary
 
-        # Playwright fallback
+        # Playwright fallback — check in short-circuit order to avoid
+        # running _html_has_content (CPU-bound) when it's not needed.
         loop = asyncio.get_running_loop()
-        primary_has_content = (
-            primary['success']
-            and await loop.run_in_executor(None, _html_has_content, primary.get('html'))
+        try_pw = primary['error_code'] in _BOT_BLOCKED_CODES or (
+            not primary['success'] and primary['error_type'] == ERROR_TEMPORARY
         )
-        try_pw = (
-            primary['error_code'] in _BOT_BLOCKED_CODES
-            or (not primary['success'] and primary['error_type'] == ERROR_TEMPORARY)
-            or (primary['success'] and not primary_has_content)
-        )
+        if not try_pw and primary.get('success') and primary.get('html'):
+            has_content = await loop.run_in_executor(
+                None, _html_has_content, primary['html']
+            )
+            try_pw = not has_content
         if try_pw:
             logger.debug("[fetch-async] playwright fallback (primary=%s): %s",
                          primary['error_code'] or 'no content', sanitized)

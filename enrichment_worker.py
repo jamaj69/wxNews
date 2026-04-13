@@ -264,14 +264,14 @@ class EnrichmentWorker:
 
             # --- description (sanitize HTML) ---
             if not has_description and result.get('description'):
-                clean = await asyncio.to_thread(sanitize_html_content, result['description'])
+                clean = sanitize_html_content(result['description'])
                 if clean and re.sub(r'<[^>]+>', '', clean).strip():
                     article['description'] = clean
                     updated.append('description')
 
             # --- content (sanitize HTML) ---
             if not has_content and result.get('content'):
-                clean = await asyncio.to_thread(sanitize_html_content, result['content'])
+                clean = sanitize_html_content(result['content'])
                 if clean and clean.strip():
                     article['content'] = clean
                     updated.append('content')
