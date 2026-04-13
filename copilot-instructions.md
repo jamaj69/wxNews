@@ -717,19 +717,28 @@ Monitora tradução + tiers de enriquecimento via `/api/monitor`.
 
 ---
 
-## 📡 Endpoints API
+## 📡 Endpoints API (porta 8765)
 
-| Endpoint | Cache | Descrição |
-|----------|-------|-----------|
-| `/api/health` | não | Health check |
-| `/api/articles` | não | Artigos por timestamp/source |
-| `/api/sources` | não | Lista de fontes |
-| `/api/stats` | não | total, last_24h, last_hour, total_sources |
-| `/api/queues` | 20s | Enriquecimento + tradução + tiers detalhados |
-| `/api/monitor` | 20s | Stats completas + pending_by_language |
-| `/api/latest_timestamp` | não | Último inserted_at_ms |
+Todos os endpoints respondem em JSON com `"success": true/false`. Base URL: `http://localhost:8765`
 
-O campo `stats_age_s` em `/api/queues` indica há quantos segundos o cache foi atualizado.
+| Endpoint | Parâmetros | Cache | Descrição |
+|----------|-----------|-------|-----------|
+| `GET /` | — | não | Lista todos os endpoints disponíveis |
+| `GET /api/health` | — | não | Health check: status do DB + uptime timestamp |
+| `GET /api/articles` | `since` (ms, obrigatório), `limit` (1–500, def 100), `sources` (CSV) | não | Artigos inseridos após `since` ms |
+| `GET /api/articles/translations` | `since` (ms, obrigatório), `limit` (1–500, def 100) | não | Traduções concluídas após `since` ms |
+| `GET /api/latest_timestamp` | — | não | Último `inserted_at_ms` + total de artigos |
+| `GET /api/sources` | — | não | Fontes ativas com contagem de artigos |
+| `GET /api/stats` | — | não | `total`, `last_24h`, `last_hour`, `total_sources` |
+| `GET /api/queues` | — | 20s | Profundidade das filas + stages + tiers de enriquecimento |
+| `GET /api/monitor` | — | 20s | Stats completas: enriquecimento + tradução + RSS + `pending_by_language` |
+| `GET /api/watchdog` | `mode` (recent\|slow\|stats\|lag\|clear), `n`, `min_ms`, `threshold_ms` | não | Profiler de spans do event-loop |
+
+**Notas:**
+- O campo `stats_age_s` em `/api/queues` e `/api/monitor` indica há quantos segundos o cache foi atualizado (TTL ≈ 20s).
+- `/api/articles` e `/api/articles/translations` requerem `since` em **milissegundos** Unix epoch.
+- `/api/watchdog?mode=stats` retorna agregados por função; `mode=slow` retorna spans acima de `threshold_ms` (padrão 50ms).
+- Swagger UI interativo: `http://localhost:8765/docs` | ReDoc: `http://localhost:8765/redoc`
 
 ---
 

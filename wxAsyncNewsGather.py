@@ -3503,14 +3503,36 @@ class NewsGather():
             return {
                 "name": "wxNews API", "version": "2.0.0", "status": "running",
                 "endpoints": {
-                    "GET /api/health": "Health check",
-                    "GET /api/articles": "Get articles since timestamp",
-                    "GET /api/latest_timestamp": "Get latest insertion timestamp",
-                    "GET /api/sources": "Get available news sources",
-                    "GET /api/stats": "Get collection statistics",
-                    },
-                    "GET /api/queues": "Queue sizes (enrichment, translation)",
+                    "GET /api/health":              "Health check (uptime, DB, service state)",
+                    "GET /api/articles":             "Get articles inserted after ?since=<ms>",
+                    "GET /api/articles/translations":"Get translation updates after ?since=<ms>",
+                    "GET /api/latest_timestamp":     "Latest inserted_at_ms + total article count",
+                    "GET /api/sources":              "All sources with article counts",
+                    "GET /api/stats":                "Collection statistics (24h, 1h)",
+                    "GET /api/queues":               "Pipeline queue depths and enrichment tiers",
+                    "GET /api/monitor":              "Full dashboard stats (enrichment + translation + RSS)",
+                    "GET /api/watchdog":             "Event-loop span profiler (?mode=recent|slow|stats|lag|clear)",
+                },
                 "database": "connected",
+            }
+
+        @api_app.get("/api/health")
+        async def get_health():
+            """Lightweight health check — returns uptime and DB connectivity."""
+            try:
+                with gather.eng.connect() as conn:
+                    row = conn.execute(
+                        select(sa_func.count()).select_from(gather.gm_articles)
+                    ).fetchone()
+                    db_ok = True
+            except Exception:
+                db_ok = False
+            now_ms = int(time.time() * 1000)
+            return {
+                "status":    "ok" if db_ok else "degraded",
+                "database":  "connected" if db_ok else "error",
+                "timestamp": now_ms,
+                "timestamp_iso": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(now_ms / 1000)),
             }
 
         @api_app.get("/api/articles")
