@@ -175,16 +175,34 @@ class _ProcessTranslator:
             self._sync_pending.pop(req_id, None)
         return slot[1]
 
+    # Timeout (seconds) for a single translate_async call.  If the NLLB/Google
+    # subprocess does not respond within this window the future is cancelled,
+    # the pending entry is removed, and None is returned so the article is
+    # queued for a later retry rather than blocking the worker indefinitely.
+    ASYNC_TIMEOUT: float = 120.0
+
     async def translate_async(
         self, text: str, src_code: str, tgt_code: str
     ) -> str | None:
         """
         Non-blocking translation for use inside an asyncio event loop.
-        Returns the translated string, or None on failure.
+        Returns the translated string, or None on failure/timeout.
         """
         if self._shutdown.is_set():
             return None
         self._ensure_started()
+        # Restart pump thread if it died unexpectedly.
+        if self._pump_thread is not None and not self._pump_thread.is_alive():
+            import logging as _logging
+            _logging.getLogger(__name__).error(
+                "%s pump thread died — restarting", self.__class__.__name__
+            )
+            self._pump_thread = threading.Thread(
+                target=self._pump_responses,
+                daemon=True,
+                name=self._PUMP_NAME,
+            )
+            self._pump_thread.start()
         loop = asyncio.get_running_loop()
         if self._loop is None:
             self._loop = loop
@@ -194,7 +212,17 @@ class _ProcessTranslator:
             self._async_pending[req_id] = fut
         assert self._req_q is not None
         self._req_q.put((req_id, text, src_code, tgt_code))
-        return await fut
+        try:
+            return await asyncio.wait_for(fut, timeout=self.ASYNC_TIMEOUT)
+        except asyncio.TimeoutError:
+            import logging as _logging
+            _logging.getLogger(__name__).warning(
+                "%s translate_async timed out after %.0fs (req_id=%s)",
+                self.__class__.__name__, self.ASYNC_TIMEOUT, req_id,
+            )
+            with self._lock:
+                self._async_pending.pop(req_id, None)
+            return None
 
 
 # ---------------------------------------------------------------------------

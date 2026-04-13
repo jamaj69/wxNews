@@ -82,7 +82,7 @@ def _bar(value: int, total: int, width: int = 30) -> str:
 
 # ─── HTTP helper ─────────────────────────────────────────────────────────────
 
-def fetch_json(url: str, timeout: float = 5.0) -> dict | None:
+def fetch_json(url: str, timeout: float = 15.0) -> dict | None:
     try:
         with urllib.request.urlopen(url, timeout=timeout) as resp:
             return json.loads(resp.read())

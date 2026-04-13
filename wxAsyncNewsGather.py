@@ -3773,6 +3773,7 @@ class NewsGather():
             - mode=recent  → last N spans (optional min_ms filter), newest first
             - mode=slow    → all spans >= threshold_ms (default 50 ms), newest first
             - mode=stats   → aggregate per-function count/avg/median/max/p95
+            - mode=lag     → event-loop lag sensor (rolling 60 s window + peak ever)
             - mode=clear   → empty the ring buffer
             """
             from loop_watchdog import watchdog as _wd
@@ -3787,6 +3788,9 @@ class NewsGather():
             elif mode == "clear":
                 _wd.clear()
                 return {'success': True, 'mode': 'clear', 'message': 'Ring buffer cleared'}
+            elif mode == "lag":
+                from loop_watchdog import lag_sensor as _ls
+                return {'success': True, 'mode': 'lag', 'data': _ls.stats()}
             else:  # recent
                 return {'success': True, 'mode': 'recent', 'n': n, 'min_ms': min_ms,
                         'data': _wd.get_recent(n, min_ms),
@@ -3963,6 +3967,10 @@ if __name__ == '__main__':
             loop.create_task(app._refresh_queue_stats()),
             loop.create_task(app.serve_api()),
         ]
+
+        # Start loop lag sensor (measures actual event-loop responsiveness)
+        from loop_watchdog import lag_sensor as _lag_sensor
+        loop.create_task(_lag_sensor.run())
         
         # Store tasks globally for signal handler access
         collector_tasks.extend(tasks)

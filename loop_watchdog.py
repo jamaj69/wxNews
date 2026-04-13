@@ -210,3 +210,81 @@ class LoopWatchdog:
 # ---------------------------------------------------------------------------
 
 watchdog = LoopWatchdog(maxlen=1000)
+
+
+# ---------------------------------------------------------------------------
+# Loop lag sensor
+# ---------------------------------------------------------------------------
+
+class LoopLagSensor:
+    """
+    Measures real-time event-loop lag by scheduling ``asyncio.sleep(interval)``
+    repeatedly and comparing the actual elapsed time against the expected one.
+
+    A lag >> 0 means the event loop was blocked (e.g. blocking I/O, heavy CPU
+    in a coroutine, GIL contention) for the excess duration.
+
+    Usage::
+
+        # start once at service boot
+        loop.create_task(lag_sensor.run())
+
+        # query at any time
+        lag_sensor.stats()    → dict with avg/max/p95/peak_ever
+
+    The rolling window holds the last ``window`` samples (default 120 × 0.5 s
+    = 60 s of history).  ``peak_ever_ms`` survives across rollovers.
+    """
+
+    def __init__(self, interval: float = 0.5, window: int = 120) -> None:
+        self._interval   = interval
+        self._window     = window
+        self._samples: deque[float] = deque(maxlen=window)
+        self._peak_ms    = 0.0
+        self._running    = False
+
+    async def run(self) -> None:
+        """Background coroutine — run as an asyncio Task at startup."""
+        self._running = True
+        loop = asyncio.get_event_loop()
+        while True:
+            t0 = loop.time()
+            await asyncio.sleep(self._interval)
+            actual   = loop.time() - t0
+            lag_ms   = max(0.0, (actual - self._interval) * 1000.0)
+            self._samples.append(lag_ms)
+            if lag_ms > self._peak_ms:
+                self._peak_ms = lag_ms
+
+    def stats(self) -> dict:
+        """Return aggregate lag statistics for the current rolling window."""
+        if not self._samples:
+            return {
+                'running': self._running,
+                'interval_s': self._interval,
+                'window_s': self._window * self._interval,
+                'samples': 0,
+                'avg_ms': None, 'median_ms': None, 'max_ms': None,
+                'p95_ms': None, 'peak_ever_ms': round(self._peak_ms, 2),
+            }
+        s = sorted(self._samples)
+        n = len(s)
+        return {
+            'running':      self._running,
+            'interval_s':   self._interval,
+            'window_s':     round(n * self._interval, 1),
+            'samples':      n,
+            'avg_ms':       round(mean(s), 2),
+            'median_ms':    round(median(s), 2),
+            'max_ms':       round(max(s), 2),
+            'p95_ms':       round(s[int(n * 0.95)], 2) if n >= 20 else None,
+            'peak_ever_ms': round(self._peak_ms, 2),
+        }
+
+    def reset_peak(self) -> None:
+        """Reset the all-time peak (e.g. after a known startup spike)."""
+        self._peak_ms = 0.0
+
+
+# Global singleton
+lag_sensor = LoopLagSensor(interval=0.5, window=120)
