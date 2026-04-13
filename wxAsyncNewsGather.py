@@ -3293,7 +3293,8 @@ class NewsGather():
                     title, description, content, lang
                 )
 
-            if TRANSLATE_DELAY > 0:
+            # Only rate-limit Google Translate (API quota); NLLB is local — no delay needed.
+            if TRANSLATE_DELAY > 0 and tv._backend_for(lang) == 'google':
                 await asyncio.sleep(TRANSLATE_DELAY)
 
             return (article_id, lang, title, t_title, ok_t, t_desc, ok_d, t_cont, ok_c)

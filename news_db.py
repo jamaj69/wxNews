@@ -605,17 +605,53 @@ class NewsDatabase:
         """
         Return up to *batch_size* articles pending translation using the
         optimised view v_articles_pending_translation.
+
+        Articles are interleaved by backend so that Google and NLLB workers
+        both receive work concurrently.  Each backend contributes at most
+        half the batch; remaining slots go to whichever backend has more.
         """
+        half = batch_size // 2
+        # Fetch up to half from each backend ordered by recency
         async with self._rc.execute(
             """
             SELECT id_article, detected_language, title, description, content
             FROM v_articles_pending_translation
+            WHERE translate_backend = 'google'
             ORDER BY translate_without_enrichment DESC, inserted_at_ms DESC
             LIMIT ?
             """,
-            (batch_size,),
+            (half,),
         ) as cur:
-            return [dict(r) for r in await cur.fetchall()]
+            google_rows = [dict(r) for r in await cur.fetchall()]
+
+        async with self._rc.execute(
+            """
+            SELECT id_article, detected_language, title, description, content
+            FROM v_articles_pending_translation
+            WHERE translate_backend = 'nllb'
+               OR translate_backend IS NULL
+            ORDER BY translate_without_enrichment DESC, inserted_at_ms DESC
+            LIMIT ?
+            """,
+            (half,),
+        ) as cur:
+            nllb_rows = [dict(r) for r in await cur.fetchall()]
+
+        # If one backend is short, fill from the other up to batch_size
+        shortage = batch_size - len(google_rows) - len(nllb_rows)
+        if shortage > 0 and len(google_rows) < half:
+            nllb_rows = nllb_rows[:half + shortage]
+        elif shortage > 0 and len(nllb_rows) < half:
+            google_rows = google_rows[:half + shortage]
+
+        # Interleave so workers for both backends get fed right away
+        result: list[dict] = []
+        for g, n in zip(google_rows, nllb_rows):
+            result.append(g)
+            result.append(n)
+        result.extend(google_rows[len(nllb_rows):])
+        result.extend(nllb_rows[len(google_rows):])
+        return result
 
     async def bulk_skip_non_translatable(self) -> int:
         """

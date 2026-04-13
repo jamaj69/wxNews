@@ -230,6 +230,7 @@ class _NLLBProcessTranslator(_ProcessTranslator):
                 nllb_worker.NLLB_MODEL_ID,
                 dict(nllb_worker.NLLB_LANG_MAP),
                 dict(nllb_worker.NLLB_TARGET_MAP),
+                nllb_worker.NLLB_BATCH_SIZE,
             ),
             daemon=True,
             name=self._PROCESS_NAME,
