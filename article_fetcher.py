@@ -44,6 +44,7 @@ from bs4 import BeautifulSoup
 import cffi_worker
 import requests_worker
 import playwright_worker
+from loop_watchdog import watchdog as _watchdog
 
 logger = logging.getLogger(__name__)
 
@@ -691,6 +692,7 @@ def fetch_article_content(url: str, timeout: int = 10) -> dict:
     return ArticleContentFetcher(timeout).fetch(url)
 
 
+@_watchdog.track
 async def fetch_article_content_async(url: str, timeout: int = 10) -> dict:
     """Fetch article content (async). No threads — uses IPC futures directly.
     Drop-in async replacement for fetch_article_content()."""

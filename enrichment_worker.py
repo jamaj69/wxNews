@@ -42,6 +42,7 @@ from article_fetcher import (
     fetch_playwright_only_async,
 )
 from html_utils import sanitize_html_content, extract_and_remove_first_image
+from loop_watchdog import watchdog as _watchdog
 
 # Maps backend name → single-backend fetch function
 _BACKEND_FETCH = {
@@ -196,6 +197,7 @@ class EnrichmentWorker:
             enriched = await self._do_enrich(article)
             await self.output_queue.put((article, enriched))
 
+    @_watchdog.track
     async def _do_enrich(self, article: ArticleDict) -> bool:
         """
         Core enrichment logic (extracted from

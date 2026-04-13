@@ -66,6 +66,9 @@ from db_factory import get_db_class, get_db_dsn, get_db_backend
 # Generic multi-producer/multi-consumer pipeline infrastructure
 from pipeline import PipelineQueue, PipelineStage, PipelineSupervisor
 
+# Async event-loop span profiler — circular ring buffer maxlen=1000
+from loop_watchdog import watchdog as _watchdog
+
 # FastAPI server (optional - enabled via API_SERVER_ENABLED)
 try:
     from fastapi import FastAPI, Query, HTTPException
@@ -2013,6 +2016,7 @@ class NewsGather():
             self.logger.info("📡 RSS collector stopped")
 
     
+    @_watchdog.track
     async def _rss_fetcher(self, session, source, semaphore, queue):
         """
         Stage 1 — HTTP fetch + feedparser parse only.
@@ -2069,6 +2073,7 @@ class NewsGather():
             # fully completes.
             await asyncio.sleep(0)
 
+    @_watchdog.track
     async def _rss_process_one(self, item: tuple) -> Optional[tuple]:
         """
         Stage 2 handler — CPU + DB-read work for one (source, feed) pair.
@@ -2233,6 +2238,7 @@ class NewsGather():
         finally:
             self._rss_cycle['processed'] += 1
 
+    @_watchdog.track
     async def _rss_dedup(self, item: tuple) -> Optional[tuple]:
         """
         Stage 3 handler — title-hash dedup.
@@ -2278,6 +2284,7 @@ class NewsGather():
             self.logger.error(f"❌ RSS dedup [{source_name}]: {e}", exc_info=True)
             return item   # pass through unmodified on error
 
+    @_watchdog.track
     async def _rss_write_batch(self, item: tuple) -> None:
         """
         Stage 4 handler — serialised DB writes for one processed feed batch.
@@ -2923,6 +2930,7 @@ class NewsGather():
             await stage_ew.wait_done()
             self.logger.info("🏁 Backfill pipeline drained")
 
+    @_watchdog.track
     async def enrich_article_content(self, article_dict, source_name='', source_id=''):
         """
         Attempt to fetch missing content from article URL.
@@ -2971,7 +2979,6 @@ class NewsGather():
         # Attempt to fetch content
         try:
             self.logger.debug(f"🔍 [{source_name}] Attempting to fetch missing content from URL...")
-            
             result = await fetch_article_content_async(url, ENRICH_TIMEOUT)
             
             # Only permanently-blocked requests count against the source.
@@ -3752,6 +3759,38 @@ class NewsGather():
                 }
             except Exception as e:
                 raise _HTTPException(status_code=500, detail=str(e))
+
+        @api_app.get("/api/watchdog")
+        async def get_watchdog(
+            mode: str = "recent",   # "recent" | "slow" | "stats"
+            n: int = 100,           # for mode=recent
+            min_ms: float = 0.0,    # for mode=recent: min duration filter
+            threshold_ms: float = 50.0,  # for mode=slow
+        ):
+            """
+            Async event-loop span profiler.
+
+            - mode=recent  → last N spans (optional min_ms filter), newest first
+            - mode=slow    → all spans >= threshold_ms (default 50 ms), newest first
+            - mode=stats   → aggregate per-function count/avg/median/max/p95
+            - mode=clear   → empty the ring buffer
+            """
+            from loop_watchdog import watchdog as _wd
+            if mode == "stats":
+                return {'success': True, 'mode': 'stats', 'data': _wd.stats(),
+                        'ring_size': len(_wd), 'maxlen': _wd.maxlen}
+            elif mode == "slow":
+                return {'success': True, 'mode': 'slow',
+                        'threshold_ms': threshold_ms,
+                        'data': _wd.get_slow(threshold_ms),
+                        'ring_size': len(_wd)}
+            elif mode == "clear":
+                _wd.clear()
+                return {'success': True, 'mode': 'clear', 'message': 'Ring buffer cleared'}
+            else:  # recent
+                return {'success': True, 'mode': 'recent', 'n': n, 'min_ms': min_ms,
+                        'data': _wd.get_recent(n, min_ms),
+                        'ring_size': len(_wd), 'maxlen': _wd.maxlen}
 
         @api_app.get("/api/monitor")
         async def get_monitor():
