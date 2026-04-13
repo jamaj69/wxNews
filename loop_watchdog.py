@@ -288,3 +288,110 @@ class LoopLagSensor:
 
 # Global singleton
 lag_sensor = LoopLagSensor(interval=0.5, window=120)
+
+
+# ---------------------------------------------------------------------------
+# Stall probe — reusable for any worker type
+# ---------------------------------------------------------------------------
+
+class StallProbe:
+    """
+    Rate-limited stall detector for workers (sync or async).
+
+    Tracks elapsed time since the last "success" event and emits a WARNING
+    log when a configurable threshold is exceeded **and** there is pending
+    work to be done.  Warnings back off exponentially (threshold doubles on
+    each trigger) so log spam is avoided during prolonged stalls.  The
+    threshold resets every time :meth:`reset` is called (i.e. on each
+    successful response).
+
+    The log message format is standardised so that ``grep``/``journalctl``
+    queries work uniformly across all worker types::
+
+        WARNING mypackage.translatev1 MyWorker.pump: no response for 60s,
+                pending=8, subprocess_alive=True, exitcode=None
+
+    Sync usage (pump threads / blocking consumer loops)::
+
+        probe = StallProbe("NLLBWorker.pump", logger, warn_after=60.0)
+        while running:
+            try:
+                item = q.get(timeout=0.5)
+            except queue.Empty:
+                probe.check(pending=len(pending), subprocess_alive=proc.is_alive())
+                continue
+            probe.reset()
+            # process item …
+
+    Async usage (asyncio workers / monitoring tasks)::
+
+        probe = StallProbe("EnrichmentWorker", logger, warn_after=60.0)
+        while True:
+            item = await q.get()
+            probe.reset()
+            # process item …
+
+        # In a periodic monitor coroutine:
+        await probe.check_async(pending=input_q.qsize())
+    """
+
+    def __init__(
+        self,
+        name:       str,
+        logger:     "logging.Logger",
+        warn_after: float = 60.0,
+    ) -> None:
+        import logging as _logging
+        self._name       = name
+        self._log        = logger
+        self._warn_after = warn_after          # initial threshold (s)
+        self._threshold  = warn_after          # current threshold (doubles on each hit)
+        self._last_ok    = time.monotonic()    # time of last successful event
+
+    # ------------------------------------------------------------------
+    # Core events
+    # ------------------------------------------------------------------
+
+    def reset(self) -> None:
+        """Call on every successful event (response received, item processed)."""
+        self._last_ok   = time.monotonic()
+        self._threshold = self._warn_after     # reset exponential back-off
+
+    def elapsed(self) -> float:
+        """Seconds since the last successful event."""
+        return time.monotonic() - self._last_ok
+
+    # ------------------------------------------------------------------
+    # Sync check (call from a thread / blocking loop on each idle tick)
+    # ------------------------------------------------------------------
+
+    def check(self, pending: int, **state) -> bool:
+        """
+        Emit a stall WARNING if elapsed >= threshold and *pending* > 0.
+
+        Extra keyword arguments are appended to the log message verbatim,
+        e.g. ``subprocess_alive=True, exitcode=None``.
+
+        Returns ``True`` if a warning was emitted, ``False`` otherwise.
+        """
+        if pending <= 0:
+            return False
+        elapsed = self.elapsed()
+        if elapsed < self._threshold:
+            return False
+        extras = ", ".join(f"{k}={v}" for k, v in state.items())
+        self._log.warning(
+            "%s: no response for %.0fs, pending=%d%s",
+            self._name, elapsed, pending,
+            (", " + extras) if extras else "",
+        )
+        self._threshold *= 2   # back off — next warning at 2× the current interval
+        return True
+
+    # ------------------------------------------------------------------
+    # Async check (call from a monitoring coroutine / periodic task)
+    # ------------------------------------------------------------------
+
+    async def check_async(self, pending: int, **state) -> bool:
+        """Async-compatible wrapper — same behaviour as :meth:`check`."""
+        return self.check(pending, **state)

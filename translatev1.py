@@ -106,34 +106,28 @@ class _ProcessTranslator:
 
     def _pump_responses(self) -> None:
         """Daemon thread: drains resp_q and wakes waiting callers."""
-        import logging as _logging
-        import time as _time
+        from loop_watchdog import StallProbe
         assert self._resp_q is not None
-        _log        = _logging.getLogger(__name__)
-        _last_resp  = _time.monotonic()
-        _stall_warn = 60.0   # first warning after 60 s; doubles on each repeat
+        probe = StallProbe(
+            name       = f"{self.__class__.__name__}.pump",
+            logger     = logging.getLogger(__name__),
+            warn_after = 60.0,
+        )
         while not self._shutdown.is_set():
             try:
                 item = self._resp_q.get(timeout=0.5)
             except Exception:
-                # Stall detector: no response for a while despite pending work?
-                elapsed = _time.monotonic() - _last_resp
-                if elapsed >= _stall_warn:
-                    with self._lock:
-                        n_pending = len(self._async_pending) + len(self._sync_pending)
-                    if n_pending > 0:
-                        alive    = self._process.is_alive()  if self._process else None
-                        exitcode = self._process.exitcode    if self._process else None
-                        _log.warning(
-                            "%s pump_responses: no response for %.0fs, "
-                            "pending=%d, subprocess_alive=%s, exitcode=%s",
-                            self.__class__.__name__, elapsed,
-                            n_pending, alive, exitcode,
-                        )
-                        _stall_warn *= 2   # back off to avoid log spam
+                with self._lock:
+                    n_pending = len(self._async_pending) + len(self._sync_pending)
+                alive    = self._process.is_alive()  if self._process else None
+                exitcode = self._process.exitcode    if self._process else None
+                probe.check(
+                    pending           = n_pending,
+                    subprocess_alive  = alive,
+                    exitcode          = exitcode,
+                )
                 continue
-            _last_resp  = _time.monotonic()
-            _stall_warn = 60.0   # reset backoff on each successful response
+            probe.reset()
             req_id, result = item
             with self._lock:
                 fut       = self._async_pending.pop(req_id, None)
