@@ -658,9 +658,15 @@ class NewsDatabase:
         Mark is_translated=-1 for articles whose detected_language doesn't
         require translation: NULL language, translate=0, or language not in
         the languages table.
-        Returns the number of rows updated.
+
+        Also resets is_translated=-1 back to 0 for articles whose language
+        was later enabled for translation (translate changed from 0 to 1),
+        so they get picked up on the next cycle.
+
+        Returns the number of rows updated (skip + restore combined).
         """
-        cur = await self._c.execute(
+        # Skip non-translatable
+        cur_skip = await self._c.execute(
             """
             UPDATE gm_articles
             SET is_translated = -1
@@ -673,8 +679,19 @@ class NewsDatabase:
               )
             """
         )
+        # Restore articles incorrectly skipped when language was later enabled
+        cur_restore = await self._c.execute(
+            """
+            UPDATE gm_articles
+            SET is_translated = 0
+            WHERE is_translated = -1
+              AND detected_language IN (
+                  SELECT language_code FROM languages WHERE translate = 1
+              )
+            """
+        )
         await self._c.commit()
-        return cur.rowcount
+        return cur_skip.rowcount + cur_restore.rowcount
 
     async def get_proxy_articles_pending_resolution(self, limit: int = 30) -> list[dict]:
         """Return articles with is_enriched=-2 (proxy URL not yet resolved)."""
