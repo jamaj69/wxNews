@@ -184,7 +184,8 @@ BACKFILL_ENABLED = config('BACKFILL_ENABLED', default=True, cast=bool)
 BACKFILL_BATCH_SIZE = int(config('BACKFILL_BATCH_SIZE', default=50))   # articles per batch
 BACKFILL_DELAY = float(config('BACKFILL_DELAY', default=1.0))           # seconds between articles
 BACKFILL_CYCLE_INTERVAL = int(config('BACKFILL_CYCLE_INTERVAL', default=10))  # seconds between cycles
-ENRICH_WRITE_BATCH = int(config('ENRICH_WRITE_BATCH', default=10))      # articles per DB commit in enrich-write stage
+ENRICH_WRITE_BATCH   = int(config('ENRICH_WRITE_BATCH',   default=10))   # articles per DB commit in enrich-write stage
+ENRICH_WRITE_WORKERS = int(config('ENRICH_WRITE_WORKERS', default=1))    # parallel write workers (pipeline aiosqlite awaits)
 
 # ── Translation Pipeline ──────────────────────────────────────────────────────
 # Stage T1  Google Translate    thread     Google subprocess
@@ -2860,7 +2861,7 @@ class NewsGather():
         stage_ew = PipelineStage(
             'enrich-write', q_ew, None,
             handler=_handle_enrich_write,
-            min_workers=1, max_workers=1,
+            min_workers=1, max_workers=ENRICH_WRITE_WORKERS,
         )
         self._enrich_stage_e0 = stage_e0
         self._enrich_stage_e1 = stage_e1
@@ -2871,7 +2872,7 @@ class NewsGather():
         await stage_e0.start(initial=CFFI_CONCURRENCY)
         await stage_e1.start(initial=REQUESTS_CONCURRENCY)
         await stage_e2.start(initial=PLAYWRIGHT_CONCURRENCY)
-        await stage_ew.start(initial=1)
+        await stage_ew.start(initial=ENRICH_WRITE_WORKERS)
         sup.start()
 
         # ── DB feeder loop (runs until shutdown_flag or CancelledError) ──
