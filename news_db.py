@@ -888,7 +888,7 @@ class NewsDatabase:
             "enrich_pending":    enrich_map.get(0,  0),
             "enrich_failed":     enrich_map.get(-1, 0),
             "translated":        trans_map.get(1,   0),
-            "translate_skipped": trans_map.get(-1,  0),
+            "translate_skipped": trans_map.get(-1, 0) + trans_map.get(-2, 0),
             "translate_pending": tp_row[0] if tp_row else 0,
             "pending_by_tier":   tier_map,
             "refreshed_at":      int(time.time() * 1000),

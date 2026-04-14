@@ -3310,7 +3310,13 @@ class NewsGather():
             article_id, lang, title, t_title, ok_t, t_desc, ok_d, t_cont, ok_c = item
             any_translated = ok_t or ok_d or ok_c
             try:
-                values: dict = {'is_translated': 1 if any_translated else -1}
+                # -1 = language not in translate list (may be reset by restore query
+                #       if language is later enabled for translation)
+                # -2 = translation was attempted but the content is already in the
+                #       target language (or NLLB/Google returned same text) — permanent
+                #       skip so the restore query in bulk_skip_non_translatable does NOT
+                #       re-queue these articles in an infinite loop.
+                values: dict = {'is_translated': 1 if any_translated else -2}
                 if ok_t:
                     values['translated_title'] = t_title
                 if ok_d:

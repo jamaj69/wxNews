@@ -86,6 +86,7 @@ NLLB_MODEL_ID  = "facebook/nllb-200-distilled-600M"
 # batch_size=16 is safe; increase to 32 if VRAM allows.
 import os as _os
 NLLB_BATCH_SIZE: int = int(_os.environ.get("NLLB_BATCH_SIZE", 16))
+NLLB_NUM_BEAMS:  int = int(_os.environ.get("NLLB_NUM_BEAMS",  4))   # 1=greedy (fast), 4=beam (slower, marginally better)
 
 
 # ---------------------------------------------------------------------------
@@ -99,6 +100,7 @@ def worker(
     lang_map: dict,
     target_map: dict,
     batch_size: int = 8,
+    num_beams: int = 4,
 ) -> None:
     """
     GPU worker process.  Loads the NLLB model once, then processes translation
@@ -154,9 +156,9 @@ def worker(
                 output_ids = model.generate(
                     **inputs,
                     forced_bos_token_id=forced_bos,
-                    max_new_tokens=512,
+                    max_new_tokens=256,
                     max_length=None,
-                    num_beams=4,
+                    num_beams=num_beams,
                 )
             decoded = tokenizer.batch_decode(output_ids, skip_special_tokens=True)
             return [s.strip() or None for s in decoded]
