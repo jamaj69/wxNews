@@ -37,11 +37,14 @@ def _decode(response) -> str:
     # (common on Russian news sites such as interfax.ru / sport-interfax.ru).
     # response.text uses errors='replace' so it never raises but silently
     # produces garbled output for such mismatches.
-    declared = (response.encoding or '').lower().strip()
-    apparent = (response.apparent_encoding or '').lower().strip()
+    # Use getattr() — curl_cffi does not guarantee .apparent_encoding on all
+    # response types/versions, so a plain attribute access would raise
+    # AttributeError and bubble up as a failed fetch.
+    declared = (getattr(response, 'encoding', None) or '').lower().strip()
+    apparent = (getattr(response, 'apparent_encoding', None) or '').lower().strip()
     if apparent and apparent not in ('ascii', declared):
         try:
-            return response.content.decode(response.apparent_encoding)
+            return response.content.decode(apparent)
         except (UnicodeDecodeError, LookupError):
             pass
     try:

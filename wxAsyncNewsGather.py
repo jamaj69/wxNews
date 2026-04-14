@@ -167,6 +167,7 @@ PLAYWRIGHT_BATCH_SIZE  = int(config('PLAYWRIGHT_BATCH_SIZE',  default=12))
 ENRICH_CFFI_MAX_WORKERS       = int(config('ENRICH_CFFI_MAX_WORKERS',       default=40))
 ENRICH_REQUESTS_MAX_WORKERS   = int(config('ENRICH_REQUESTS_MAX_WORKERS',   default=20))
 ENRICH_PLAYWRIGHT_MAX_WORKERS = int(config('ENRICH_PLAYWRIGHT_MAX_WORKERS', default=6))
+HTTP_POOL_SIZE             = int(config('HTTP_POOL_SIZE',             default=10))
 # Backwards-compat aliases
 CFFI_CONCURRENCY       = ENRICH_CFFI_MAX_WORKERS
 REQUESTS_CONCURRENCY   = ENRICH_REQUESTS_MAX_WORKERS
@@ -183,6 +184,7 @@ BACKFILL_ENABLED = config('BACKFILL_ENABLED', default=True, cast=bool)
 BACKFILL_BATCH_SIZE = int(config('BACKFILL_BATCH_SIZE', default=50))   # articles per batch
 BACKFILL_DELAY = float(config('BACKFILL_DELAY', default=1.0))           # seconds between articles
 BACKFILL_CYCLE_INTERVAL = int(config('BACKFILL_CYCLE_INTERVAL', default=10))  # seconds between cycles
+ENRICH_WRITE_BATCH = int(config('ENRICH_WRITE_BATCH', default=10))      # articles per DB commit in enrich-write stage
 
 # ── Translation Pipeline ──────────────────────────────────────────────────────
 # Stage T1  Google Translate    thread     Google subprocess
@@ -192,6 +194,9 @@ TRANSLATE_BATCH_SIZE     = int(config('TRANSLATE_BATCH_SIZE',     default=100)) 
 TRANSLATE_MAX_WORKERS    = int(config('TRANSLATE_MAX_WORKERS',    default=4))     # concurrent translations
 TRANSLATE_DELAY          = float(config('TRANSLATE_DELAY',        default=2.0))   # seconds between articles
 TRANSLATE_CYCLE_INTERVAL = int(config('TRANSLATE_CYCLE_INTERVAL', default=60))    # seconds between cycles
+NLLB_BATCH_SIZE          = int(config('NLLB_BATCH_SIZE',          default=16))    # GPU batch size (16=safe for 6 GB; 32 if VRAM allows)
+NLLB_NUM_BEAMS           = int(config('NLLB_NUM_BEAMS',           default=4))     # 1=greedy (fast), 4=beam (slower, marginally better)
+NLLB_ASYNC_TIMEOUT       = float(config('NLLB_ASYNC_TIMEOUT',     default=120.0)) # seconds before a pending request is cancelled
 
 # Blocked-source probing — periodically re-tests blocked sources and unblocks survivors
 PROBE_ENABLED = config('PROBE_ENABLED', default=True, cast=bool)
@@ -1049,7 +1054,7 @@ class NewsGather():
                 'isolation_level': None  # Autocommit mode for better concurrency
             },
             pool_pre_ping=True,
-            pool_size=10,  # Connection pool to avoid creating new connections
+            pool_size=HTTP_POOL_SIZE,
             max_overflow=20
         )
         
@@ -2802,12 +2807,23 @@ class NewsGather():
             return _handler
 
         # ── Write stage handler ───────────────────────────────────────────
+        # Batch counter: accumulate ENRICH_WRITE_BATCH execute()s before
+        # committing.  Reduces fsync frequency under high write load — with
+        # 66 enrichment workers producing simultaneously a single commit per
+        # article saturates the shared aiosqlite thread.
+        _ew_pending = 0
+
         async def _handle_enrich_write(item: tuple):
+            nonlocal _ew_pending
             article, current_try = item
             article_id = article['id_article']
             try:
                 raw_desc    = article.get('description') or ''
                 _desc_text  = re.sub(r'<[^>]+>', '', raw_desc).strip()
+                _ew_pending += 1
+                do_commit = (_ew_pending >= ENRICH_WRITE_BATCH)
+                if do_commit:
+                    _ew_pending = 0
                 await self.db.save_enriched_article(
                     article_id,
                     author=      article.get('author')     or None,
@@ -2815,9 +2831,11 @@ class NewsGather():
                     content=     article.get('content')    or None,
                     url_to_image=article.get('urlToImage') or None,
                     is_enriched= 1,
+                    commit=      do_commit,
                 )
                 self.logger.debug(
                     f"✅ Backfill saved: [{article.get('source_name','')}] {article_id}"
+                    + (" [commit]" if do_commit else "")
                 )
             except Exception as exc:
                 self.logger.error(f"Enrich write failed for {article_id}: {exc}")
@@ -2928,6 +2946,13 @@ class NewsGather():
             )
             stage_ew.signal_upstream_done()
             await stage_ew.wait_done()
+            # Flush any uncommitted writes left in the batch buffer
+            if _ew_pending > 0:
+                try:
+                    await self.db._c.commit()
+                    self.logger.debug(f"🏁 Backfill enrich-write: flushed {_ew_pending} uncommitted write(s)")
+                except Exception as exc:
+                    self.logger.error(f"Backfill enrich-write flush failed: {exc}")
             self.logger.info("🏁 Backfill pipeline drained")
 
     @_watchdog.track
@@ -3270,6 +3295,19 @@ class NewsGather():
         import translatev1 as tv
         tv._load_language_rules.cache_clear()
 
+        # Apply .env-configurable NLLB settings before starting workers.
+        # nllb_worker reads defaults from os.environ at import time, but
+        # python-decouple does not populate os.environ — so we override
+        # the module-level variables here, after config() has been resolved.
+        tv.nllb_worker.NLLB_BATCH_SIZE = NLLB_BATCH_SIZE
+        tv.nllb_worker.NLLB_NUM_BEAMS  = NLLB_NUM_BEAMS
+        tv._nllb.ASYNC_TIMEOUT         = NLLB_ASYNC_TIMEOUT
+        self.logger.debug(
+            f"[translate-init] NLLB config — "
+            f"batch_size={NLLB_BATCH_SIZE}, num_beams={NLLB_NUM_BEAMS}, "
+            f"async_timeout={NLLB_ASYNC_TIMEOUT}s"
+        )
+
         # Start both subprocess workers eagerly so they are warm before use.
         # Google starts in milliseconds; NLLB takes ~40 s to load the model.
         tv._google.start()
@@ -3352,7 +3390,12 @@ class NewsGather():
         self._translate_stage_tw = stage_tw
 
         await stage_t0.start(initial=TRANSLATE_MAX_WORKERS)
+        self.logger.debug(
+            f"[translate-init] stage 't0-translate' started — "
+            f"{TRANSLATE_MAX_WORKERS} worker(s)"
+        )
         await stage_tw.start(initial=1)
+        self.logger.debug("[translate-init] stage 'tw-write' started — 1 worker")
 
         # ── DB feeder loop (runs until shutdown_flag or CancelledError) ──
         try:

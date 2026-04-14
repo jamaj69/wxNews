@@ -529,11 +529,15 @@ class NewsDatabase:
         content:      Optional[str],
         url_to_image: Optional[str],
         is_enriched:  int,
+        commit:       bool = True,
     ) -> None:
         """
         Persist enrichment results atomically.
         When is_enriched=1 the article is also reset to is_translated=0 so the
         translation pipeline picks it up on its next cycle.
+
+        Set commit=False to batch multiple writes and call self._c.commit()
+        manually afterwards — reduces fsync overhead under high write load.
         """
         await self._c.execute(
             """
@@ -549,7 +553,8 @@ class NewsDatabase:
             (author, description, content, is_enriched,
              url_to_image, is_enriched, article_id),
         )
-        await self._c.commit()
+        if commit:
+            await self._c.commit()
 
     async def save_enrichment_failure(
         self, article_id: str, has_content: bool
