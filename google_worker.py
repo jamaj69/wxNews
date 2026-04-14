@@ -14,6 +14,10 @@ Spawned by ``translatev1._GoogleProcessTranslator._ensure_started()``.
 import multiprocessing
 import signal
 
+# Sentinel returned when Google cannot translate this language (permanent failure).
+# Callers must distinguish this from None (transient/network error).
+NOLANG = "<<GOOGLE_NOLANG>>"
+
 
 def worker(
     req_q: "multiprocessing.Queue[tuple | None]",
@@ -79,6 +83,7 @@ def worker(
                     f"[google-worker] Language not supported {src_code}→{tgt_code}: {e}",
                     flush=True,
                 )
+                result = NOLANG  # permanent — caller should route to other backend
             except Exception as e:
                 print(
                     f"[google-worker] Error {src_code}→{tgt_code}: {str(e)[:200]}",

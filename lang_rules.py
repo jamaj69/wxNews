@@ -45,7 +45,7 @@ def _load_language_rules() -> dict:
                 'translate': bool(row['translate']),
                 'translate_to': row['translate_to'],
                 'translator_code': row['translator_code'] or row['language_code'],
-                'translate_backend': row['translate_backend'] or 'nllb',
+                'translate_backend': row['translate_backend'],  # None = no explicit backend (round-robin)
                 'translate_without_enrichment': bool(row['translate_without_enrichment']),
             }
         con.close()

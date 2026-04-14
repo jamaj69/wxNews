@@ -31,10 +31,23 @@ def _classify(status: int) -> str:
 
 
 def _decode(response) -> str:
+    # Prefer apparent_encoding (chardet/charset-normalizer) when it disagrees
+    # with the declared encoding.  This handles servers that send charset=utf-8
+    # in their Content-Type but actually serve cp1251 or other legacy encodings
+    # (common on Russian news sites such as interfax.ru / sport-interfax.ru).
+    # response.text uses errors='replace' so it never raises but silently
+    # produces garbled output for such mismatches.
+    declared = (response.encoding or '').lower().strip()
+    apparent = (response.apparent_encoding or '').lower().strip()
+    if apparent and apparent not in ('ascii', declared):
+        try:
+            return response.content.decode(response.apparent_encoding)
+        except (UnicodeDecodeError, LookupError):
+            pass
     try:
         return response.text
     except (UnicodeDecodeError, LookupError):
-        for enc in ('utf-8', 'latin-1', 'iso-8859-1', 'cp1252'):
+        for enc in ('utf-8', 'cp1251', 'latin-1', 'iso-8859-1', 'cp1252'):
             try:
                 return response.content.decode(enc)
             except (UnicodeDecodeError, LookupError):

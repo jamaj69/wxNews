@@ -291,16 +291,28 @@ class _NLLBProcessTranslator(_ProcessTranslator):
 _google = _GoogleProcessTranslator()
 _nllb   = _NLLBProcessTranslator()
 
-def _backend_for(language_code: str | None) -> str:
-    """Return 'google' or 'nllb' based on the translate_backend column in the
-    languages table.  Falls back to 'nllb' for unknown languages."""
-    if not language_code:
-        return 'nllb'
-    rules = get_language_rules(language_code)
-    if rules and rules.get('translate_backend'):
-        return rules['translate_backend']
-    return 'nllb'
+# Round-robin counter for languages with no explicit translate_backend.
+# Alternates the primary backend on each call: nllb → google → nllb → …
+_rr_counter = itertools.count()
 
+
+def _backend_for(language_code: str | None) -> str | None:
+    """Return 'google', 'nllb', or None.
+    None means the language has no explicit backend assigned
+    (translate_backend IS NULL in the languages table); callers
+    should use round-robin or their own fallback."""
+    if not language_code:
+        return None
+    rules = get_language_rules(language_code)
+    if rules:
+        return rules.get('translate_backend')  # None when DB value is NULL
+    return None
+
+
+# Singleton sentinel returned by _via_google() / _via_nllb() when a backend
+# permanently cannot translate a given language (as opposed to a transient
+# network or rate-limit failure, which returns None).
+_PERM_FAIL = object()
 
 # ---------------------------------------------------------------------------
 # Translation orchestration (Google primary → NLLB fallback)
@@ -339,9 +351,11 @@ def _translate_via_google_sync(
     target: str,
 ) -> list[tuple[str, bool]] | None:
     """Send each field as one or more chunked requests to the Google subprocess.
-    Returns the results list, or None if every field failed."""
+    Returns the results list, None on transient failure, or _PERM_FAIL if
+    Google permanently cannot translate this language."""
     results: list[tuple[str, bool]] = [(f, False) for f in fields]
     any_translated = False
+    perm_fail = False
     for field_idx, original in non_empty:
         chunks = _chunk_text(original, GOOGLE_MAX_CHARS)
         translated_parts: list[str] = []
@@ -349,6 +363,11 @@ def _translate_via_google_sync(
         for chunk in chunks:
             logger.debug("[google-sync] → auto→%s [%d chars] %r", target, len(chunk), chunk[:120])
             part = _google.translate_sync(chunk, 'auto', target)
+            if part == google_worker.NOLANG:
+                logger.info("[google-sync] Language permanently unsupported by Google")
+                perm_fail = True
+                ok = False
+                break
             if part:
                 logger.debug("[google-sync] ← %r", part[:120])
                 translated_parts.append(part)
@@ -362,6 +381,8 @@ def _translate_via_google_sync(
             results[field_idx] = (translated, was_translated)
             if was_translated:
                 any_translated = True
+    if perm_fail and not any_translated:
+        return _PERM_FAIL  # type: ignore[return-value]
     return results if any_translated else None
 
 
@@ -372,20 +393,27 @@ def _translate_via_nllb_sync(
     target: str,
 ) -> list[tuple[str, bool]] | None:
     """Send each field as a separate request to the NLLB subprocess.
-    Returns the results list, or None if all fields failed."""
+    Returns the results list, None on transient failure, or _PERM_FAIL if
+    NLLB permanently cannot translate this language."""
     src = source_language_code or 'auto'
     results: list[tuple[str, bool]] = [(f, False) for f in fields]
     any_translated = False
+    perm_fail = False
     for field_idx, original in non_empty:
         text = original[:MAX_TRANSLATE_CHARS]  # NLLB context limited to ~512 tokens
         logger.debug("[nllb-sync]   → src=%s tgt=%s text=%r", src, target, text[:120])
         translated = _nllb.translate_sync(text, src, target)
-        if translated and translated != original:
+        if translated == nllb_worker.NOLANG:
+            logger.info("[nllb-sync] Language permanently unsupported by NLLB")
+            perm_fail = True
+        elif translated and translated != original:
             logger.debug("[nllb-sync]   ← %r", translated[:120])
             results[field_idx] = (translated, True)
             any_translated = True
         else:
             logger.debug("[nllb-sync]   ← no result")
+    if perm_fail and not any_translated:
+        return _PERM_FAIL  # type: ignore[return-value]
     return results if any_translated else None
 
 
@@ -418,18 +446,33 @@ def translate_article_fields(
         return (title, False), (description, False), (content, False)
 
     backend = _backend_for(source_language_code)
+    if backend is None:
+        backend = 'nllb' if next(_rr_counter) % 2 == 0 else 'google'
+        logger.debug("[translate-sync] round-robin selected backend=%s for lang=%s", backend, source_language_code)
     logger.debug("[translate-sync] backend=%s lang=%s→%s", backend, source_language_code, target)
 
     if backend == 'google':
         results = _translate_via_google_sync(fields, non_empty, target)
-        if results is None:
-            logger.debug("[translate-sync] google failed, falling back to nllb")
+        if results is _PERM_FAIL:
+            logger.info("[translate-sync] Google permanently unsupported for lang=%s → NLLB", source_language_code)
             results = _translate_via_nllb_sync(fields, non_empty, source_language_code, target)
+            if results is _PERM_FAIL:
+                results = None
+        elif results is None:
+            logger.debug("[translate-sync] google transient failure, falling back to nllb")
+            nllb_r = _translate_via_nllb_sync(fields, non_empty, source_language_code, target)
+            results = None if nllb_r is _PERM_FAIL else nllb_r
     else:
         results = _translate_via_nllb_sync(fields, non_empty, source_language_code, target)
-        if results is None:
-            logger.debug("[translate-sync] nllb failed, falling back to google")
+        if results is _PERM_FAIL:
+            logger.info("[translate-sync] NLLB permanently unsupported for lang=%s → Google", source_language_code)
             results = _translate_via_google_sync(fields, non_empty, target)
+            if results is _PERM_FAIL:
+                results = None
+        elif results is None:
+            logger.debug("[translate-sync] nllb transient failure, falling back to google")
+            google_r = _translate_via_google_sync(fields, non_empty, target)
+            results = None if google_r is _PERM_FAIL else google_r
 
     if results is None:
         return (title, False), (description, False), (content, False)
@@ -441,19 +484,25 @@ async def translate_article_fields_async(
     description: str,
     content: str,
     source_language_code: str | None,
-) -> tuple[tuple[str, bool], tuple[str, bool], tuple[str, bool]]:
+) -> tuple[tuple[str, bool], tuple[str, bool], tuple[str, bool], str | None]:
     """
     Fully async version of translate_article_fields.
 
-    Alternates between Google and NLLB backends on each call.
-    If the selected backend fails, the other is used as fallback.
+    Returns a 4-tuple:
+        (t_title, ok_t), (t_desc, ok_d), (t_cont, ok_c), backend_recommendation
 
-    Google: all fields batched in one request (fast, single round-trip).
-    NLLB:   each field sent as a separate request, all concurrent via asyncio.gather.
+    ``backend_recommendation`` is set to ``'google'`` or ``'nllb'`` when a
+    primary backend permanently cannot translate the language (LanguageNotSupportedException
+    for Google, unknown lang-code for NLLB) and the other backend succeeded.
+    Callers should persist this to ``languages.translate_backend`` so future
+    articles skip the failing backend entirely.
+
+    ``backend_recommendation`` is ``None`` for transient failures (network,
+    rate-limit, timeout) — those do NOT warrant a permanent DB change.
     """
     rules = get_language_rules(source_language_code) if source_language_code else None
     if rules is not None and not rules['translate']:
-        return (title, False), (description, False), (content, False)
+        return (title, False), (description, False), (content, False), None
 
     target   = rules['translate_to'] if rules else AUTO_FALLBACK_TARGET
     fields   = [title, description, content]
@@ -463,22 +512,32 @@ async def translate_article_fields_async(
         if f and f.strip()
     ]
     if not non_empty:
-        return (title, False), (description, False), (content, False)
+        return (title, False), (description, False), (content, False), None
 
     backend = _backend_for(source_language_code)
+    if backend is None:
+        backend = 'nllb' if next(_rr_counter) % 2 == 0 else 'google'
+        logger.debug("[translate-async] round-robin selected backend=%s for lang=%s", backend, source_language_code)
     src     = source_language_code or 'auto'
     logger.debug("[translate-async] backend=%s lang=%s→%s", backend, source_language_code, target)
 
     async def _via_google() -> list[tuple[str, bool]] | None:
+        """Returns results list, None (transient), or _PERM_FAIL (permanent lang failure)."""
         res: list[tuple[str, bool]] = [(f, False) for f in fields]
         any_translated = False
+        perm_fail = False
 
         async def _translate_field(field_idx: int, original: str) -> None:
+            nonlocal any_translated, perm_fail
             chunks = _chunk_text(original, GOOGLE_MAX_CHARS)
             translated_parts: list[str] = []
             for chunk in chunks:
                 logger.debug("[google-async] → auto→%s [%d chars] %r", target, len(chunk), chunk[:120])
                 part = await _google.translate_async(chunk, 'auto', target)
+                if part == google_worker.NOLANG:
+                    logger.info("[google-async] Language permanently unsupported by Google for lang=%s", source_language_code)
+                    perm_fail = True
+                    return
                 if part:
                     logger.debug("[google-async] ← %r", part[:120])
                     translated_parts.append(part)
@@ -489,13 +548,15 @@ async def translate_article_fields_async(
                 translated = ' '.join(translated_parts)
                 if translated != original:
                     res[field_idx] = (translated, True)
-                    nonlocal any_translated
                     any_translated = True
 
         await asyncio.gather(*[_translate_field(fi, orig) for fi, orig in non_empty])
+        if perm_fail and not any_translated:
+            return _PERM_FAIL  # type: ignore[return-value]
         return res if any_translated else None
 
     async def _via_nllb() -> list[tuple[str, bool]] | None:
+        """Returns results list, None (transient), or _PERM_FAIL (permanent lang failure)."""
         nllb_non_empty = [(fi, orig[:MAX_TRANSLATE_CHARS]) for fi, orig in non_empty]
         for _, original in nllb_non_empty:
             logger.debug("[nllb-async]  → src=%s tgt=%s text=%r", src, target, original[:120])
@@ -503,29 +564,57 @@ async def translate_article_fields_async(
         translated_list = await asyncio.gather(*tasks)
         res: list[tuple[str, bool]] = [(f, False) for f in fields]
         any_translated = False
+        perm_fail = False
         for (field_idx, original), translated in zip(nllb_non_empty, translated_list):
-            if translated and translated != original:
+            if translated == nllb_worker.NOLANG:
+                logger.info("[nllb-async]  Language permanently unsupported by NLLB for lang=%s", source_language_code)
+                perm_fail = True
+            elif translated and translated != original:
                 logger.debug("[nllb-async]  ← %r", translated[:120])
                 res[field_idx] = (translated, True)
                 any_translated = True
             else:
                 logger.debug("[nllb-async]  ← no result")
+        if perm_fail and not any_translated:
+            return _PERM_FAIL  # type: ignore[return-value]
         return res if any_translated else None
 
+    backend_recommendation: str | None = None
+    results = None
+
     if backend == 'google':
-        results = await _via_google()
-        if results is None:
-            logger.debug("[translate-async] google failed, falling back to nllb")
-            results = await _via_nllb()
-    else:
-        results = await _via_nllb()
-        if results is None:
-            logger.debug("[translate-async] nllb failed, falling back to google")
-            results = await _via_google()
+        g_result = await _via_google()
+        if g_result is _PERM_FAIL:
+            logger.info("[translate-async] Google permanently unsupported for lang=%s → NLLB", source_language_code)
+            n_result = await _via_nllb()
+            results = None if (n_result is None or n_result is _PERM_FAIL) else n_result
+            if results is not None:
+                backend_recommendation = 'nllb'
+        elif g_result is None:
+            logger.debug("[translate-async] google transient failure for lang=%s, falling back to nllb", source_language_code)
+            n_result = await _via_nllb()
+            results = None if (n_result is None or n_result is _PERM_FAIL) else n_result
+        else:
+            results = g_result
+    else:  # 'nllb'
+        n_result = await _via_nllb()
+        if n_result is _PERM_FAIL:
+            logger.info("[translate-async] NLLB permanently unsupported for lang=%s → Google", source_language_code)
+            g_result = await _via_google()
+            results = None if (g_result is None or g_result is _PERM_FAIL) else g_result
+            if results is not None:
+                backend_recommendation = 'google'
+        elif n_result is None:
+            logger.debug("[translate-async] nllb transient failure for lang=%s, falling back to google", source_language_code)
+            g_result = await _via_google()
+            results = None if (g_result is None or g_result is _PERM_FAIL) else g_result
+        else:
+            results = n_result
 
     if results is None:
-        return (title, False), (description, False), (content, False)
-    return tuple(results)  # type: ignore[return-value]
+        return (title, False), (description, False), (content, False), None
+    t = tuple(results)
+    return t[0], t[1], t[2], backend_recommendation  # type: ignore[return-value]
 
 
 # ---------------------------------------------------------------------------

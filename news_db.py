@@ -738,6 +738,14 @@ class NewsDatabase:
         )
         await self._c.commit()
 
+    async def update_translate_backend(self, language_code: str, backend: str) -> None:
+        """Update translate_backend for a language after permanent failure auto-discovery."""
+        await self._c.execute(
+            "UPDATE languages SET translate_backend=? WHERE language_code=?",
+            (backend, language_code),
+        )
+        await self._c.commit()
+
     async def fetch_articles_missing_gmt(
         self, source_id: str
     ) -> list[tuple[str, str]]:

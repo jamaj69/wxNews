@@ -88,6 +88,10 @@ import os as _os
 NLLB_BATCH_SIZE: int = int(_os.environ.get("NLLB_BATCH_SIZE", 16))
 NLLB_NUM_BEAMS:  int = int(_os.environ.get("NLLB_NUM_BEAMS",  4))   # 1=greedy (fast), 4=beam (slower, marginally better)
 
+# Sentinel returned when NLLB cannot map this language (source or target not in lang_map).
+# Callers must distinguish this from None (transient inference error).
+NOLANG = "<<NLLB_NOLANG>>"
+
 
 # ---------------------------------------------------------------------------
 # Worker entry-point
@@ -214,7 +218,9 @@ def worker(
             if not ready or not text or not text.strip() or not src_nllb or not tgt_nllb:
                 if not src_nllb or not tgt_nllb:
                     print(f"[nllb-worker] Unknown lang: src={src_code!r} tgt={tgt_code!r}", flush=True)
-                results[req_id] = None
+                    results[req_id] = NOLANG  # permanent — caller should route to other backend
+                else:
+                    results[req_id] = None
                 continue
             key = (src_nllb, tgt_nllb)
             groups.setdefault(key, []).append((req_id, text.strip(), src_code))

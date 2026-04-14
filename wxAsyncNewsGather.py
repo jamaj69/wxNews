@@ -3295,19 +3295,20 @@ class NewsGather():
             description = row['description'] or ''
             content     = row['content']     or ''
 
-            (t_title, ok_t), (t_desc, ok_d), (t_cont, ok_c) = \
+            (t_title, ok_t), (t_desc, ok_d), (t_cont, ok_c), backend_rec = \
                 await tv.translate_article_fields_async(
                     title, description, content, lang
                 )
 
             # Only rate-limit Google Translate (API quota); NLLB is local — no delay needed.
-            if TRANSLATE_DELAY > 0 and tv._backend_for(lang) == 'google':
+            # None = round-robin (may hit Google), so apply delay conservatively.
+            if TRANSLATE_DELAY > 0 and tv._backend_for(lang) in ('google', None):
                 await asyncio.sleep(TRANSLATE_DELAY)
 
-            return (article_id, lang, title, t_title, ok_t, t_desc, ok_d, t_cont, ok_c)
+            return (article_id, lang, title, t_title, ok_t, t_desc, ok_d, t_cont, ok_c, backend_rec)
 
         async def _handle_translate_write(item: tuple):
-            article_id, lang, title, t_title, ok_t, t_desc, ok_d, t_cont, ok_c = item
+            article_id, lang, title, t_title, ok_t, t_desc, ok_d, t_cont, ok_c, backend_rec = item
             any_translated = ok_t or ok_d or ok_c
             try:
                 # -1 = language not in translate list (may be reset by restore query
@@ -3328,6 +3329,10 @@ class NewsGather():
                     self.logger.debug(f"🌐 Translated [{lang}]: {title[:60]}")
                 else:
                     self.logger.debug(f"⏭️  No translation needed [{lang}]: {title[:60]}")
+                if backend_rec:
+                    await self.db.update_translate_backend(lang, backend_rec)
+                    tv._load_language_rules.cache_clear()
+                    self.logger.info(f"🌐 Language '{lang}' auto-assigned to backend '{backend_rec}' (permanent failure detected)")
             except Exception as e:
                 self.logger.error(f"Translation DB write failed for {article_id}: {e}")
             return None
