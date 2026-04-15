@@ -166,27 +166,13 @@ class LoopWatchdog:
             for r in records
         ]
 
-    def stats(self, since_ts: Optional[float] = None) -> Dict[str, Dict]:
+    def stats(self) -> Dict[str, Dict]:
         """
-        Aggregate per-function stats from the ring buffer.
-
-        If *since_ts* is given (a ``time.time()`` value), only spans whose
-        ``wall_time >= since_ts`` are included.  Use this to get a "last N
-        seconds" view instead of all-time stats.
-
+        Aggregate per-function stats from the entire ring buffer contents.
         Returned dict is sorted by max_ms descending (worst offenders first).
         """
         by_name: Dict[str, List[float]] = {}
         for r in self._ring:
-            if since_ts is not None and r.wall_time < since_ts:
-                continued of all-time stats.
-
-        Returned dict is sorted by max_ms descending (worst offenders first).
-        """
-        by_name: Dict[str, List[float]] = {}
-        for r in self._ring:
-            if since_ts is not None and r.wall_time < since_ts:
-                continue
             by_name.setdefault(r.name, []).append(r.duration_ms)
 
         result: Dict[str, Dict] = {}
@@ -270,9 +256,16 @@ class LoopLagSensor:
             if lag_ms > self._peak_ms:
                 self._peak_ms = lag_ms
 
-    def stats(self) -> dict:
+    def stats(self, since_ts: Optional[float] = None) -> dict:
         """Return aggregate lag statistics for the current rolling window."""
-        if not self._samples:
+        samples = list(self._samples)
+        if since_ts is not None and samples:
+            # Each sample is interval_s apart; most recent is the last element.
+            # Estimate how many recent samples fall within the requested window.
+            age_s = max(0.0, time.time() - since_ts)
+            keep = max(1, round(age_s / self._interval))
+            samples = samples[-keep:]
+        if not samples:
             return {
                 'running': self._running,
                 'interval_s': self._interval,
@@ -281,7 +274,7 @@ class LoopLagSensor:
                 'avg_ms': None, 'median_ms': None, 'max_ms': None,
                 'p95_ms': None, 'peak_ever_ms': round(self._peak_ms, 2),
             }
-        s = sorted(self._samples)
+        s = sorted(samples)
         n = len(s)
         return {
             'running':      self._running,
