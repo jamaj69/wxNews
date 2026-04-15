@@ -246,13 +246,22 @@ class NewsDatabase:
             try:
                 before = os.path.getsize(wal_path) if os.path.exists(wal_path) else 0
                 ckpt_conn = await aiosqlite.connect(self._db_path, timeout=30.0)
-                await ckpt_conn.execute("PRAGMA wal_checkpoint(PASSIVE)")
+                # PASSIVE: checkpoint all committed frames without blocking.
+                # Returns (busy, log, checkpointed); busy=0 means all done.
+                cur = await ckpt_conn.execute("PRAGMA wal_checkpoint(PASSIVE)")
+                row = await cur.fetchone()
+                busy, log, checkpointed = (row or (None, None, None))
+                # If everything was checkpointed (busy=0), escalate to TRUNCATE
+                # to physically shrink the WAL file to 0 bytes.
+                if busy == 0:
+                    await ckpt_conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
                 await ckpt_conn.close()
                 ckpt_conn = None
                 after = os.path.getsize(wal_path) if os.path.exists(wal_path) else 0
                 logger.debug(
-                    f"🗄️  WAL checkpoint (PASSIVE): "
-                    f"{before // 1024 // 1024}MB → {after // 1024 // 1024}MB"
+                    f"🗄️  WAL checkpoint: {before // 1024 // 1024}MB → "
+                    f"{after // 1024 // 1024}MB "
+                    f"(busy={busy} log={log} ckpt={checkpointed})"
                 )
             except Exception as exc:
                 logger.warning(f"⚠️  WAL checkpoint failed: {exc}")
