@@ -119,6 +119,8 @@ class NewsDatabase:
         await self._conn.execute("PRAGMA journal_mode=WAL")
         await self._conn.execute("PRAGMA synchronous=NORMAL")
         await self._conn.execute("PRAGMA busy_timeout=60000")
+        # Checkpoint automatically when WAL reaches 1000 pages (~4 MB)
+        await self._conn.execute("PRAGMA wal_autocheckpoint=1000")
         await self._migrate()
         await self._conn.commit()
         # Read-only connection: runs in its own aiosqlite thread — never queues
@@ -129,6 +131,11 @@ class NewsDatabase:
         self._ro_conn.row_factory = aiosqlite.Row
         await self._ro_conn.execute("PRAGMA busy_timeout=5000")
         logger.info(f"✅ NewsDatabase connected: {self._db_path}")
+        # Periodic WAL checkpoint task (every 5 min) to prevent WAL from growing unbounded
+        import asyncio
+        self._checkpoint_task: asyncio.Task = asyncio.get_event_loop().create_task(
+            self._periodic_wal_checkpoint()
+        )
 
     async def _migrate(self) -> None:
         """Apply incremental schema migrations (idempotent)."""
@@ -210,11 +217,31 @@ class NewsDatabase:
         await conn.execute("PRAGMA cache_size=-8192")   # 8 MB per worker conn
         return conn
 
+    async def _periodic_wal_checkpoint(self) -> None:
+        """Run PRAGMA wal_checkpoint(PASSIVE) every 5 minutes to keep WAL small."""
+        import asyncio
+        while True:
+            await asyncio.sleep(300)
+            if self._conn is None:
+                break
+            try:
+                await self._conn.execute("PRAGMA wal_checkpoint(PASSIVE)")
+                logger.debug("🗄️  WAL checkpoint (PASSIVE) completed")
+            except Exception as exc:
+                logger.warning(f"⚠️  WAL checkpoint failed: {exc}")
+
     async def close(self) -> None:
+        if hasattr(self, '_checkpoint_task') and self._checkpoint_task:
+            self._checkpoint_task.cancel()
         if self._ro_conn:
             await self._ro_conn.close()
             self._ro_conn = None
         if self._conn:
+            try:
+                await self._conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+                logger.debug("🗄️  WAL checkpoint (TRUNCATE) on close")
+            except Exception:
+                pass
             await self._conn.close()
             self._conn = None
             NewsDatabase._instance = None
