@@ -233,19 +233,6 @@ class NewsDatabase:
             old_ro = self._ro_conn
             self._ro_conn = None
 
-            # Immediately open a fresh read-only connection so new callers of
-            # _rc have minimal downtime (no RuntimeError window).
-            if self._conn is not None:
-                try:
-                    new_conn = await aiosqlite.connect(
-                        f"file:{self._db_path}?mode=ro", uri=True, timeout=10.0
-                    )
-                    new_conn.row_factory = aiosqlite.Row
-                    await new_conn.execute("PRAGMA busy_timeout=5000")
-                    self._ro_conn = new_conn
-                except Exception as exc_ro:
-                    logger.error(f"❌  Failed to pre-open _ro_conn before checkpoint: {exc_ro}")
-
             # Close the old connection with a brief grace period so any
             # in-flight cursors can finish their __aexit__ cleanup before the
             # underlying sqlite3.Connection is torn down (avoids
@@ -290,7 +277,7 @@ class NewsDatabase:
                     except Exception:
                         pass
             finally:
-                # Fallback: reopen _ro_conn if the pre-open above failed.
+                # Reopen _ro_conn after the checkpoint so readers can resume.
                 if self._ro_conn is None and self._conn is not None:
                     try:
                         conn = await aiosqlite.connect(

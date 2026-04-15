@@ -2897,9 +2897,19 @@ class NewsGather():
                 for tier_id, q, ids, batch, backend in _tier_spec:
                     if self.shutdown_flag:
                         break
+                    # Back-pressure: don't fetch more work if the queue already
+                    # has enough items buffered.  This prevents the playwright
+                    # tier from loading thousands of pending articles into RAM.
+                    headroom = batch - q.depth
+                    if headroom <= 0:
+                        self.logger.debug(
+                            f"⏸  Backfill[{backend}]: queue full "
+                            f"(depth={q.depth}, batch={batch}) — skipping"
+                        )
+                        continue
                     try:
                         rows = await self.db.fetch_pending_enrichment(
-                            batch + len(ids), enrich_try=tier_id
+                            headroom + len(ids), enrich_try=tier_id
                         )
                         rows = [r for r in rows if r['id_article'] not in ids]
                         if not rows:
