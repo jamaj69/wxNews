@@ -238,12 +238,17 @@ class NewsDatabase:
                     await old_ro.close()
             except Exception:
                 pass
-            # Now checkpoint — _ro_conn pin is gone, workers' per-request
-            # connections have very short lifetimes so they rarely block.
+            # Checkpoint using a dedicated short-lived connection that has NO open
+            # transaction.  Using _conn would fail with SQLITE_LOCKED whenever a
+            # write batch is in-progress (uncommitted transaction on _conn).
+            wal_path = self._db_path + "-wal"
+            ckpt_conn = None
             try:
-                wal_path = self._db_path + "-wal"
                 before = os.path.getsize(wal_path) if os.path.exists(wal_path) else 0
-                await self._conn.execute("PRAGMA wal_checkpoint(PASSIVE)")
+                ckpt_conn = await aiosqlite.connect(self._db_path, timeout=30.0)
+                await ckpt_conn.execute("PRAGMA wal_checkpoint(PASSIVE)")
+                await ckpt_conn.close()
+                ckpt_conn = None
                 after = os.path.getsize(wal_path) if os.path.exists(wal_path) else 0
                 logger.debug(
                     f"🗄️  WAL checkpoint (PASSIVE): "
@@ -251,6 +256,11 @@ class NewsDatabase:
                 )
             except Exception as exc:
                 logger.warning(f"⚠️  WAL checkpoint failed: {exc}")
+                if ckpt_conn is not None:
+                    try:
+                        await ckpt_conn.close()
+                    except Exception:
+                        pass
             finally:
                 # Always reopen _ro_conn regardless of checkpoint outcome.
                 if self._ro_conn is None and self._conn is not None:
@@ -272,7 +282,11 @@ class NewsDatabase:
             self._ro_conn = None
         if self._conn:
             try:
-                await self._conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+                # Use a fresh connection so TRUNCATE isn't blocked by an open
+                # write transaction on _conn.
+                ckpt_conn = await aiosqlite.connect(self._db_path, timeout=30.0)
+                await ckpt_conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+                await ckpt_conn.close()
                 logger.debug("🗄️  WAL checkpoint (TRUNCATE) on close")
             except Exception:
                 pass
