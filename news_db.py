@@ -230,14 +230,33 @@ class NewsDatabase:
             if self._conn is None:
                 break
             # Cycle _ro_conn: release the stale read-snapshot pin on the WAL.
-            # During the brief close→reopen window _rc raises RuntimeError (< 1ms).
             old_ro = self._ro_conn
             self._ro_conn = None
-            try:
-                if old_ro:
+
+            # Immediately open a fresh read-only connection so new callers of
+            # _rc have minimal downtime (no RuntimeError window).
+            if self._conn is not None:
+                try:
+                    new_conn = await aiosqlite.connect(
+                        f"file:{self._db_path}?mode=ro", uri=True, timeout=10.0
+                    )
+                    new_conn.row_factory = aiosqlite.Row
+                    await new_conn.execute("PRAGMA busy_timeout=5000")
+                    self._ro_conn = new_conn
+                except Exception as exc_ro:
+                    logger.error(f"❌  Failed to pre-open _ro_conn before checkpoint: {exc_ro}")
+
+            # Close the old connection with a brief grace period so any
+            # in-flight cursors can finish their __aexit__ cleanup before the
+            # underlying sqlite3.Connection is torn down (avoids
+            # "Cannot operate on a closed database" ProgrammingError).
+            if old_ro is not None:
+                await asyncio.sleep(0.5)
+                try:
                     await old_ro.close()
-            except Exception:
-                pass
+                except Exception:
+                    pass
+
             # Checkpoint using a dedicated short-lived connection that has NO open
             # transaction.  Using _conn would fail with SQLITE_LOCKED whenever a
             # write batch is in-progress (uncommitted transaction on _conn).
@@ -259,19 +278,19 @@ class NewsDatabase:
                 ckpt_conn = None
                 after = os.path.getsize(wal_path) if os.path.exists(wal_path) else 0
                 logger.debug(
-                    f"🗄️  WAL checkpoint: {before // 1024 // 1024}MB → "
+                    f"WAL checkpoint: {before // 1024 // 1024}MB -> "
                     f"{after // 1024 // 1024}MB "
                     f"(busy={busy} log={log} ckpt={checkpointed})"
                 )
             except Exception as exc:
-                logger.warning(f"⚠️  WAL checkpoint failed: {exc}")
+                logger.warning(f"WAL checkpoint failed: {exc}")
                 if ckpt_conn is not None:
                     try:
                         await ckpt_conn.close()
                     except Exception:
                         pass
             finally:
-                # Always reopen _ro_conn regardless of checkpoint outcome.
+                # Fallback: reopen _ro_conn if the pre-open above failed.
                 if self._ro_conn is None and self._conn is not None:
                     try:
                         conn = await aiosqlite.connect(
@@ -281,7 +300,7 @@ class NewsDatabase:
                         await conn.execute("PRAGMA busy_timeout=5000")
                         self._ro_conn = conn
                     except Exception as exc2:
-                        logger.error(f"❌  Failed to reopen _ro_conn after checkpoint: {exc2}")
+                        logger.error(f"Failed to reopen _ro_conn after checkpoint: {exc2}")
 
     async def close(self) -> None:
         if hasattr(self, '_checkpoint_task') and self._checkpoint_task:
