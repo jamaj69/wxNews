@@ -3756,15 +3756,30 @@ class NewsGather():
                 # Per-tier pending from cache (updated every 30s — no live DB query)
                 pending_by_tier = s.get("pending_by_tier", {})
 
+                    {
+                        "tier":      t,
+                        "backend":   _TIER_NAMES.get(t, f"stale(try={t})"),
+                        "pending":   pending_by_tier.get(t, 0),
                 _TIER_NAMES = {0: 'cffi', 1: 'requests', 2: 'playwright'}
-                _fl_map = {'cffi': cffi_fl, 'requests': requests_fl, 'playwright': playwright_fl}
+                # in_stage: all IDs committed to the stage (queue + active workers).
+                # active:   only IDs currently being processed by a worker (from PipelineStage).
+                _in_stage_map = {'cffi': cffi_fl, 'requests': requests_fl, 'playwright': playwright_fl}
+                _active_map = {
+                    'cffi':       _stage_info(gather._enrich_stage_e0).get('in_flight', 0),
+                    'requests':   _stage_info(gather._enrich_stage_e1).get('in_flight', 0),
+                    'playwright': _stage_info(gather._enrich_stage_e2).get('in_flight', 0),
+                }
+                pending_by_tier = s.get("pending_by_tier", {})
                 all_tier_keys = sorted(set(list(range(3)) + list(pending_by_tier.keys())))
                 tiers = [
                     {
                         "tier":      t,
                         "backend":   _TIER_NAMES.get(t, f"stale(try={t})"),
                         "pending":   pending_by_tier.get(t, 0),
-                        "in_flight": _fl_map.get(_TIER_NAMES.get(t, ''), 0),
+                        # in_stage = queue_depth + active_workers for this tier
+                        "in_stage":  _in_stage_map.get(_TIER_NAMES.get(t, ''), 0),
+                        # active = workers currently processing (not waiting in queue)
+                        "active":    _active_map.get(_TIER_NAMES.get(t, ''), 0),
                         "resolved":  gather._tier_resolved.get(_TIER_NAMES.get(t, ''), 0),
                         "advanced":  gather._tier_advanced.get(_TIER_NAMES.get(t, ''), 0),
                         "gave_up":   gather._tier_gave_up.get(_TIER_NAMES.get(t, ''), 0),
@@ -3772,9 +3787,16 @@ class NewsGather():
                     for t in all_tier_keys
                 ]
 
-                # Live stage stats from PipelineStage objects
-                def _stage_info(st):
-                    return st.to_dict() if st is not None else {}
+                        # in_stage = queue_depth + active_workers for this tier
+                        "in_stage":  _in_stage_map.get(_TIER_NAMES.get(t, ''), 0),
+                        # active = workers currently processing (not waiting in queue)
+                        "active":    _active_map.get(_TIER_NAMES.get(t, ''), 0),
+                        "resolved":  gather._tier_resolved.get(_TIER_NAMES.get(t, ''), 0),
+                        "advanced":  gather._tier_advanced.get(_TIER_NAMES.get(t, ''), 0),
+                        "gave_up":   gather._tier_gave_up.get(_TIER_NAMES.get(t, ''), 0),
+                    }
+                    for t in all_tier_keys
+                ]
 
                 return {
                     "success": True,
@@ -3828,21 +3850,12 @@ class NewsGather():
                 st = await gather.db.fetch_article_stats()
                 return {
                     'success': True,
-                    'total_articles':    st['total'],
-                    'articles_last_24h': st['last_24h'],
-                    'articles_last_hour':st['last_hour'],
-                    'total_sources':     st['total_sources'],
-                    'timestamp':         st['timestamp'],
-                }
-            except Exception as e:
-                raise _HTTPException(status_code=500, detail=str(e))
-
-        @api_app.get("/api/watchdog")
-        async def get_watchdog(
-            mode: str = "recent",   # "recent" | "slow" | "stats"
-            n: int = 100,           # for mode=recent
-            min_ms: float = 0.0,    # for mode=recent: min duration filter
+                    'total_articles' # "recent" | "slow" | "stats" | "lag" | "clear"
+            n: int = 100,            # for mode=recent
+            min_ms: float = 0.0,     # for mode=recent: min duration filter
             threshold_ms: float = 50.0,  # for mode=slow
+            since_s: float = 0.0,    # for mode=stats: only spans in the last N seconds (0=all)
+            reset_peak: bool = False, # for mode=lag: reset peak_ever_ms before returning
         ):
             """
             Async event-loop span profiler.
@@ -3850,12 +3863,17 @@ class NewsGather():
             - mode=recent  → last N spans (optional min_ms filter), newest first
             - mode=slow    → all spans >= threshold_ms (default 50 ms), newest first
             - mode=stats   → aggregate per-function count/avg/median/max/p95
+                             since_s=300 limits to spans in the last 5 minutes
             - mode=lag     → event-loop lag sensor (rolling 60 s window + peak ever)
+                             reset_peak=true resets the all-time peak before returning
             - mode=clear   → empty the ring buffer
             """
             from loop_watchdog import watchdog as _wd
             if mode == "stats":
-                return {'success': True, 'mode': 'stats', 'data': _wd.stats(),
+                since_ts = (time.time() - since_s) if since_s > 0 else None
+                return {'success': True, 'mode': 'stats',
+                        'since_s': since_s if since_s > 0 else None,
+                        'data': _wd.stats(since_ts=since_ts),
                         'ring_size': len(_wd), 'maxlen': _wd.maxlen}
             elif mode == "slow":
                 return {'success': True, 'mode': 'slow',
@@ -3867,19 +3885,21 @@ class NewsGather():
                 return {'success': True, 'mode': 'clear', 'message': 'Ring buffer cleared'}
             elif mode == "lag":
                 from loop_watchdog import lag_sensor as _ls
-                return {'success': True, 'mode': 'lag', 'data': _ls.stats()}
-            else:  # recent
-                return {'success': True, 'mode': 'recent', 'n': n, 'min_ms': min_ms,
-                        'data': _wd.get_recent(n, min_ms),
+                if reset_peak:
+                    _ls.reset_peak()
+            """
+            from loop_watchdog import watchdog as _wd
+            if mode == "stats":
+                since_ts = (time.time() - since_s) if since_s > 0 else None
+                return {'success': True, 'mode': 'stats',
+                        'since_s': since_s if since_s > 0 else None,
+                        'data': _wd.stats(since_ts=since_ts),
                         'ring_size': len(_wd), 'maxlen': _wd.maxlen}
-
-        @api_app.get("/api/monitor")
-        async def get_monitor():
-            """Full stats for watch_translations and other dashboards."""
-            try:
-                s    = gather.db.cached_stats
-                total = s['enriched'] + s['enrich_failed'] + s['enrich_pending']
-                # Snapshot in-flight (no awaits needed — all data from cache)
+            elif mode == "slow":
+                return {'success': True, 'mode': 'slow',
+                        'threshold_ms': threshold_ms,
+                        'data': _wd.get_slow(threshold_ms),
+                        'ring_stage counts (single-threaded asyncio — no lock needed)
                 cffi_fl       = len(gather._cffi_ids)
                 requests_fl   = len(gather._requests_ids)
                 playwright_fl = len(gather._playwright_ids)
@@ -3887,14 +3907,54 @@ class NewsGather():
                 # Per-tier pending from cache (updated every 30s)
                 pending_by_tier = s.get('pending_by_tier', {})
                 _TIER_NAMES = {0: 'cffi', 1: 'requests', 2: 'playwright'}
-                _fl_map = {'cffi': cffi_fl, 'requests': requests_fl, 'playwright': playwright_fl}
+                # in_stage = queue + active workers; active = only workers processing
+                _in_stage_map = {'cffi': cffi_fl, 'requests': requests_fl, 'playwright': playwright_fl}
+                _active_map = {
+                    'cffi':       (gather._enrich_stage_e0.to_dict().get('in_flight', 0)
+                                   if gather._enrich_stage_e0 else 0),
+                    'requests':   (gather._enrich_stage_e1.to_dict().get('in_flight', 0)
+                                   if gather._enrich_stage_e1 else 0),
+                    'playwright': (gather._enrich_stage_e2.to_dict().get('in_flight', 0)
+                                   if gather._enrich_stage_e2 else 0),
+                }
                 all_tier_keys = sorted(set(list(range(3)) + list(pending_by_tier.keys())))
                 tiers = [
                     {
                         "tier":      t,
                         "backend":   _TIER_NAMES.get(t, f"stale(try={t})"),
                         "pending":   pending_by_tier.get(t, 0),
-                        "in_flight": _fl_map.get(_TIER_NAMES.get(t, ''), 0),
+                        "in_stage":  _in_stage_map.get(_TIER_NAMES.get(t, ''), 0),
+                        "active":    _active
+            """Full stats for watch_translations and other dashboards."""
+            try:
+                s    = gather.db.cached_stats
+                total = s['enriched'] + s['enrich_failed'] + s['enrich_pending']
+                # Snapshot in-stage counts (single-threaded asyncio — no lock needed)
+                cffi_fl       = len(gather._cffi_ids)
+                requests_fl   = len(gather._requests_ids)
+                playwright_fl = len(gather._playwright_ids)
+                pending_by_lang = await gather.db.fetch_pending_by_language()
+                # Per-tier pending from cache (updated every 30s)
+                pending_by_tier = s.get('pending_by_tier', {})
+                _TIER_NAMES = {0: 'cffi', 1: 'requests', 2: 'playwright'}
+                # in_stage = queue + active workers; active = only workers processing
+                _in_stage_map = {'cffi': cffi_fl, 'requests': requests_fl, 'playwright': playwright_fl}
+                _active_map = {
+                    'cffi':       (gather._enrich_stage_e0.to_dict().get('in_flight', 0)
+                                   if gather._enrich_stage_e0 else 0),
+                    'requests':   (gather._enrich_stage_e1.to_dict().get('in_flight', 0)
+                                   if gather._enrich_stage_e1 else 0),
+                    'playwright': (gather._enrich_stage_e2.to_dict().get('in_flight', 0)
+                                   if gather._enrich_stage_e2 else 0),
+                }
+                all_tier_keys = sorted(set(list(range(3)) + list(pending_by_tier.keys())))
+                tiers = [
+                    {
+                        "tier":      t,
+                        "backend":   _TIER_NAMES.get(t, f"stale(try={t})"),
+                        "pending":   pending_by_tier.get(t, 0),
+                        "in_stage":  _in_stage_map.get(_TIER_NAMES.get(t, ''), 0),
+                        "active":    _active_map.get(_TIER_NAMES.get(t, ''), 0),
                         "resolved":  gather._tier_resolved.get(_TIER_NAMES.get(t, ''), 0),
                         "advanced":  gather._tier_advanced.get(_TIER_NAMES.get(t, ''), 0),
                         "gave_up":   gather._tier_gave_up.get(_TIER_NAMES.get(t, ''), 0),

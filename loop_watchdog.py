@@ -166,13 +166,27 @@ class LoopWatchdog:
             for r in records
         ]
 
-    def stats(self) -> Dict[str, Dict]:
+    def stats(self, since_ts: Optional[float] = None) -> Dict[str, Dict]:
         """
-        Aggregate per-function stats from the entire ring buffer contents.
+        Aggregate per-function stats from the ring buffer.
+
+        If *since_ts* is given (a ``time.time()`` value), only spans whose
+        ``wall_time >= since_ts`` are included.  Use this to get a "last N
+        seconds" view instead of all-time stats.
+
         Returned dict is sorted by max_ms descending (worst offenders first).
         """
         by_name: Dict[str, List[float]] = {}
         for r in self._ring:
+            if since_ts is not None and r.wall_time < since_ts:
+                continued of all-time stats.
+
+        Returned dict is sorted by max_ms descending (worst offenders first).
+        """
+        by_name: Dict[str, List[float]] = {}
+        for r in self._ring:
+            if since_ts is not None and r.wall_time < since_ts:
+                continue
             by_name.setdefault(r.name, []).append(r.duration_ms)
 
         result: Dict[str, Dict] = {}
