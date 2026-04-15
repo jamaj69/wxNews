@@ -218,17 +218,51 @@ class NewsDatabase:
         return conn
 
     async def _periodic_wal_checkpoint(self) -> None:
-        """Run PRAGMA wal_checkpoint(PASSIVE) every 5 minutes to keep WAL small."""
-        import asyncio
+        """Cycle _ro_conn and run WAL checkpoint every 5 min to keep WAL small.
+
+        The _ro_conn holds a read snapshot that 'pins' old WAL frames, preventing
+        SQLite from checkpointing them.  Closing and reopening it releases the pin
+        so that PASSIVE can move those frames back into the main DB file.
+        """
+        import asyncio, os
         while True:
             await asyncio.sleep(300)
             if self._conn is None:
                 break
+            # Cycle _ro_conn: release the stale read-snapshot pin on the WAL.
+            # During the brief close→reopen window _rc raises RuntimeError (< 1ms).
+            old_ro = self._ro_conn
+            self._ro_conn = None
             try:
+                if old_ro:
+                    await old_ro.close()
+            except Exception:
+                pass
+            # Now checkpoint — _ro_conn pin is gone, workers' per-request
+            # connections have very short lifetimes so they rarely block.
+            try:
+                wal_path = self._db_path + "-wal"
+                before = os.path.getsize(wal_path) if os.path.exists(wal_path) else 0
                 await self._conn.execute("PRAGMA wal_checkpoint(PASSIVE)")
-                logger.debug("🗄️  WAL checkpoint (PASSIVE) completed")
+                after = os.path.getsize(wal_path) if os.path.exists(wal_path) else 0
+                logger.debug(
+                    f"🗄️  WAL checkpoint (PASSIVE): "
+                    f"{before // 1024 // 1024}MB → {after // 1024 // 1024}MB"
+                )
             except Exception as exc:
                 logger.warning(f"⚠️  WAL checkpoint failed: {exc}")
+            finally:
+                # Always reopen _ro_conn regardless of checkpoint outcome.
+                if self._ro_conn is None and self._conn is not None:
+                    try:
+                        conn = await aiosqlite.connect(
+                            f"file:{self._db_path}?mode=ro", uri=True, timeout=10.0
+                        )
+                        conn.row_factory = aiosqlite.Row
+                        await conn.execute("PRAGMA busy_timeout=5000")
+                        self._ro_conn = conn
+                    except Exception as exc2:
+                        logger.error(f"❌  Failed to reopen _ro_conn after checkpoint: {exc2}")
 
     async def close(self) -> None:
         if hasattr(self, '_checkpoint_task') and self._checkpoint_task:
