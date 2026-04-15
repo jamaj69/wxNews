@@ -3576,6 +3576,7 @@ class NewsGather():
                     "GET /api/stats":                "Collection statistics (24h, 1h)",
                     "GET /api/queues":               "Pipeline queue depths and enrichment tiers",
                     "GET /api/monitor":              "Full dashboard stats (enrichment + translation + RSS)",
+                    "GET /api/translate":            "Translation backend telemetry (Google vs NLLB outcomes, latency)",
                     "GET /api/watchdog":             "Event-loop span profiler (?mode=recent|slow|stats|lag|clear)",
                 },
                 "database": "connected",
@@ -3853,6 +3854,15 @@ class NewsGather():
                     'total_sources':     st['total_sources'],
                     'timestamp':         st['timestamp'],
                 }
+            except Exception as e:
+                raise _HTTPException(status_code=500, detail=str(e))
+
+        @api_app.get("/api/translate")
+        async def get_translate_stats():
+            """Translation backend telemetry: outcomes, latency, and routing per backend."""
+            try:
+                import translatev1 as _tv
+                return {"success": True, **_tv.get_stats()}
             except Exception as e:
                 raise _HTTPException(status_code=500, detail=str(e))
 

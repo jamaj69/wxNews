@@ -16,6 +16,7 @@ import logging
 import multiprocessing
 import re
 import threading
+import time as _time
 import uuid
 
 import google_worker
@@ -296,6 +297,88 @@ _nllb   = _NLLBProcessTranslator()
 _rr_counter = itertools.count()
 
 
+# ---------------------------------------------------------------------------
+# Translation telemetry
+# ---------------------------------------------------------------------------
+
+class _TranslationStats:
+    """Thread-safe counters for translation backend telemetry.
+
+    Tracks routing decisions, per-backend outcomes (ok / perm_fail /
+    transient), fallback usage, total call counts and cumulative latency
+    so /api/translate can expose precise per-backend statistics.
+    """
+    __slots__ = (
+        '_lock',
+        # routing
+        'rr_google', 'rr_nllb', 'explicit_google', 'explicit_nllb',
+        # google outcomes
+        'google_ok', 'google_perm_fail', 'google_transient',
+        'google_fallback_primary',          # times google was used as fallback
+        # nllb outcomes
+        'nllb_ok', 'nllb_perm_fail', 'nllb_transient',
+        'nllb_fallback_primary',            # times nllb was used as fallback
+        # overall
+        'total_ok', 'total_failed',
+        # cumulative timing (integer ms to avoid float drift)
+        'google_total_ms', 'google_calls',
+        'nllb_total_ms',   'nllb_calls',
+    )
+
+    def __init__(self) -> None:
+        object.__setattr__(self, '_lock', threading.Lock())
+        for s in self.__slots__[1:]:
+            object.__setattr__(self, s, 0)
+
+    def inc(self, **kwargs: int) -> None:
+        """Atomically increment one or more counters."""
+        with self._lock:
+            for k, v in kwargs.items():
+                object.__setattr__(self, k, getattr(self, k) + v)
+
+    def snapshot(self) -> dict:
+        """Return a consistent copy of all counters."""
+        with self._lock:
+            gc = max(self.google_calls, 1)
+            nc = max(self.nllb_calls,   1)
+            return {
+                "google": {
+                    "ok":               self.google_ok,
+                    "perm_fail":        self.google_perm_fail,
+                    "transient_fail":   self.google_transient,
+                    "fallback_primary": self.google_fallback_primary,
+                    "calls":            self.google_calls,
+                    "avg_ms":           round(self.google_total_ms / gc, 1),
+                },
+                "nllb": {
+                    "ok":               self.nllb_ok,
+                    "perm_fail":        self.nllb_perm_fail,
+                    "transient_fail":   self.nllb_transient,
+                    "fallback_primary": self.nllb_fallback_primary,
+                    "calls":            self.nllb_calls,
+                    "avg_ms":           round(self.nllb_total_ms / nc, 1),
+                },
+                "routing": {
+                    "round_robin_google": self.rr_google,
+                    "round_robin_nllb":   self.rr_nllb,
+                    "explicit_google":    self.explicit_google,
+                    "explicit_nllb":      self.explicit_nllb,
+                },
+                "totals": {
+                    "ok":     self.total_ok,
+                    "failed": self.total_failed,
+                },
+            }
+
+
+stats = _TranslationStats()
+
+
+def get_stats() -> dict:
+    """Return a snapshot of translation backend telemetry."""
+    return stats.snapshot()
+
+
 def _backend_for(language_code: str | None) -> str | None:
     """Return 'google', 'nllb', or None.
     None means the language has no explicit backend assigned
@@ -446,33 +529,82 @@ def translate_article_fields(
         return (title, False), (description, False), (content, False)
 
     backend = _backend_for(source_language_code)
+    _was_rr = backend is None
     if backend is None:
         backend = 'nllb' if next(_rr_counter) % 2 == 0 else 'google'
         logger.debug("[translate-sync] round-robin selected backend=%s for lang=%s", backend, source_language_code)
     logger.debug("[translate-sync] backend=%s lang=%s→%s", backend, source_language_code, target)
 
+    # ── routing telemetry ────────────────────────────────────────────────────
+    if _was_rr:
+        if backend == 'google': stats.inc(rr_google=1)
+        else:                   stats.inc(rr_nllb=1)
+    else:
+        if backend == 'google': stats.inc(explicit_google=1)
+        else:                   stats.inc(explicit_nllb=1)
+
     if backend == 'google':
+        _t0 = _time.perf_counter()
         results = _translate_via_google_sync(fields, non_empty, target)
+        stats.inc(google_calls=1, google_total_ms=int((_time.perf_counter() - _t0) * 1000))
         if results is _PERM_FAIL:
             logger.info("[translate-sync] Google permanently unsupported for lang=%s → NLLB", source_language_code)
+            stats.inc(google_perm_fail=1)
+            _t0 = _time.perf_counter()
             results = _translate_via_nllb_sync(fields, non_empty, source_language_code, target)
+            stats.inc(nllb_calls=1, nllb_total_ms=int((_time.perf_counter() - _t0) * 1000), nllb_fallback_primary=1)
             if results is _PERM_FAIL:
+                stats.inc(nllb_perm_fail=1, total_failed=1)
                 results = None
+            elif results is None:
+                stats.inc(nllb_transient=1, total_failed=1)
+            else:
+                stats.inc(nllb_ok=1, total_ok=1)
         elif results is None:
             logger.debug("[translate-sync] google transient failure, falling back to nllb")
+            stats.inc(google_transient=1)
+            _t0 = _time.perf_counter()
             nllb_r = _translate_via_nllb_sync(fields, non_empty, source_language_code, target)
+            stats.inc(nllb_calls=1, nllb_total_ms=int((_time.perf_counter() - _t0) * 1000), nllb_fallback_primary=1)
             results = None if nllb_r is _PERM_FAIL else nllb_r
+            if results is None:
+                if nllb_r is _PERM_FAIL: stats.inc(nllb_perm_fail=1, total_failed=1)
+                else:                    stats.inc(nllb_transient=1,  total_failed=1)
+            else:
+                stats.inc(nllb_ok=1, total_ok=1)
+        else:
+            stats.inc(google_ok=1, total_ok=1)
     else:
+        _t0 = _time.perf_counter()
         results = _translate_via_nllb_sync(fields, non_empty, source_language_code, target)
+        stats.inc(nllb_calls=1, nllb_total_ms=int((_time.perf_counter() - _t0) * 1000))
         if results is _PERM_FAIL:
             logger.info("[translate-sync] NLLB permanently unsupported for lang=%s → Google", source_language_code)
+            stats.inc(nllb_perm_fail=1)
+            _t0 = _time.perf_counter()
             results = _translate_via_google_sync(fields, non_empty, target)
+            stats.inc(google_calls=1, google_total_ms=int((_time.perf_counter() - _t0) * 1000), google_fallback_primary=1)
             if results is _PERM_FAIL:
+                stats.inc(google_perm_fail=1, total_failed=1)
                 results = None
+            elif results is None:
+                stats.inc(google_transient=1, total_failed=1)
+            else:
+                stats.inc(google_ok=1, total_ok=1)
         elif results is None:
             logger.debug("[translate-sync] nllb transient failure, falling back to google")
+            stats.inc(nllb_transient=1)
+            _t0 = _time.perf_counter()
             google_r = _translate_via_google_sync(fields, non_empty, target)
+            stats.inc(google_calls=1, google_total_ms=int((_time.perf_counter() - _t0) * 1000), google_fallback_primary=1)
             results = None if google_r is _PERM_FAIL else google_r
+            if results is None:
+                if google_r is _PERM_FAIL: stats.inc(google_perm_fail=1, total_failed=1)
+                else:                      stats.inc(google_transient=1,  total_failed=1)
+            else:
+                stats.inc(google_ok=1, total_ok=1)
+        else:
+            stats.inc(nllb_ok=1, total_ok=1)
 
     if results is None:
         return (title, False), (description, False), (content, False)
@@ -515,11 +647,20 @@ async def translate_article_fields_async(
         return (title, False), (description, False), (content, False), None
 
     backend = _backend_for(source_language_code)
+    _was_rr = backend is None
     if backend is None:
         backend = 'nllb' if next(_rr_counter) % 2 == 0 else 'google'
         logger.debug("[translate-async] round-robin selected backend=%s for lang=%s", backend, source_language_code)
     src     = source_language_code or 'auto'
     logger.debug("[translate-async] backend=%s lang=%s→%s", backend, source_language_code, target)
+
+    # ── routing telemetry ────────────────────────────────────────────────────
+    if _was_rr:
+        if backend == 'google': stats.inc(rr_google=1)
+        else:                   stats.inc(rr_nllb=1)
+    else:
+        if backend == 'google': stats.inc(explicit_google=1)
+        else:                   stats.inc(explicit_nllb=1)
 
     async def _via_google() -> list[tuple[str, bool]] | None:
         """Returns results list, None (transient), or _PERM_FAIL (permanent lang failure)."""
@@ -583,33 +724,71 @@ async def translate_article_fields_async(
     results = None
 
     if backend == 'google':
+        _t0 = _time.perf_counter()
         g_result = await _via_google()
+        stats.inc(google_calls=1, google_total_ms=int((_time.perf_counter() - _t0) * 1000))
         if g_result is _PERM_FAIL:
             logger.info("[translate-async] Google permanently unsupported for lang=%s → NLLB", source_language_code)
+            stats.inc(google_perm_fail=1)
+            _t0 = _time.perf_counter()
             n_result = await _via_nllb()
+            stats.inc(nllb_calls=1, nllb_total_ms=int((_time.perf_counter() - _t0) * 1000), nllb_fallback_primary=1)
             results = None if (n_result is None or n_result is _PERM_FAIL) else n_result
             if results is not None:
                 backend_recommendation = 'nllb'
+                stats.inc(nllb_ok=1, total_ok=1)
+            elif n_result is _PERM_FAIL:
+                stats.inc(nllb_perm_fail=1, total_failed=1)
+            else:
+                stats.inc(nllb_transient=1, total_failed=1)
         elif g_result is None:
             logger.debug("[translate-async] google transient failure for lang=%s, falling back to nllb", source_language_code)
+            stats.inc(google_transient=1)
+            _t0 = _time.perf_counter()
             n_result = await _via_nllb()
+            stats.inc(nllb_calls=1, nllb_total_ms=int((_time.perf_counter() - _t0) * 1000), nllb_fallback_primary=1)
             results = None if (n_result is None or n_result is _PERM_FAIL) else n_result
+            if results is None:
+                if n_result is _PERM_FAIL: stats.inc(nllb_perm_fail=1, total_failed=1)
+                else:                      stats.inc(nllb_transient=1,  total_failed=1)
+            else:
+                stats.inc(nllb_ok=1, total_ok=1)
         else:
             results = g_result
+            stats.inc(google_ok=1, total_ok=1)
     else:  # 'nllb'
+        _t0 = _time.perf_counter()
         n_result = await _via_nllb()
+        stats.inc(nllb_calls=1, nllb_total_ms=int((_time.perf_counter() - _t0) * 1000))
         if n_result is _PERM_FAIL:
             logger.info("[translate-async] NLLB permanently unsupported for lang=%s → Google", source_language_code)
+            stats.inc(nllb_perm_fail=1)
+            _t0 = _time.perf_counter()
             g_result = await _via_google()
+            stats.inc(google_calls=1, google_total_ms=int((_time.perf_counter() - _t0) * 1000), google_fallback_primary=1)
             results = None if (g_result is None or g_result is _PERM_FAIL) else g_result
             if results is not None:
                 backend_recommendation = 'google'
+                stats.inc(google_ok=1, total_ok=1)
+            elif g_result is _PERM_FAIL:
+                stats.inc(google_perm_fail=1, total_failed=1)
+            else:
+                stats.inc(google_transient=1, total_failed=1)
         elif n_result is None:
             logger.debug("[translate-async] nllb transient failure for lang=%s, falling back to google", source_language_code)
+            stats.inc(nllb_transient=1)
+            _t0 = _time.perf_counter()
             g_result = await _via_google()
+            stats.inc(google_calls=1, google_total_ms=int((_time.perf_counter() - _t0) * 1000), google_fallback_primary=1)
             results = None if (g_result is None or g_result is _PERM_FAIL) else g_result
+            if results is None:
+                if g_result is _PERM_FAIL: stats.inc(google_perm_fail=1, total_failed=1)
+                else:                      stats.inc(google_transient=1,  total_failed=1)
+            else:
+                stats.inc(google_ok=1, total_ok=1)
         else:
             results = n_result
+            stats.inc(nllb_ok=1, total_ok=1)
 
     if results is None:
         return (title, False), (description, False), (content, False), None
