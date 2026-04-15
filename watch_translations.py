@@ -39,6 +39,10 @@ class MonitorState:
     prev_translated: int | None = None
     rates: list[int] = field(default_factory=list)
     start_time: float = field(default_factory=time.time)
+    last_data: dict[str, Any] = field(default_factory=dict)
+    last_tdata: dict[str, Any] = field(default_factory=dict)
+    last_data_ts: float = 0.0
+    last_error: str = ""
 
 
 # ─── Display helpers ───────────────────────────────────────────────────
@@ -57,13 +61,28 @@ def _clear() -> None:
 
 # ─── Render ──────────────────────────────────────────────────────
 
-def render(data: dict[str, Any], state: MonitorState) -> None:
+def render(data: dict[str, Any], state: MonitorState, tdata: dict[str, Any] | None = None) -> None:
+    # Use last-known-good data when current fetch failed
+    stale_s: float | None = None
     if "_error" in data:
-        _clear()
-        print(f"\033[31m  Erro ao contactar API: {data['_error']}\033[0m")
-        print(f"  URL: {API_BASE}/api/monitor")
-        print(f"  A retentar em {INTERVAL}s…")
-        return
+        state.last_error = data["_error"]
+        if not state.last_data:
+            _clear()
+            print(f"\033[31m  Erro ao contactar API: {data['_error']}\033[0m")
+            print(f"  URL: {API_BASE}/api/monitor")
+            print(f"  A retentar em {INTERVAL}s…")
+            return
+        data = state.last_data
+        stale_s = time.time() - state.last_data_ts
+    else:
+        state.last_data = data
+        state.last_data_ts = time.time()
+        state.last_error = ""
+
+    if tdata and "_error" not in tdata:
+        state.last_tdata = tdata
+    elif state.last_tdata:
+        tdata = state.last_tdata
 
     total         = data.get("total", 0)
     enriched      = data.get("enriched", 0)
@@ -101,7 +120,10 @@ def render(data: dict[str, Any], state: MonitorState) -> None:
 
     _clear()
     print("━" * 60)
-    print("  📊  MONITOR DE ARTIGOS & TRADUÇÕES")
+    if stale_s is not None:
+        print(f"  📊  MONITOR DE ARTIGOS & TRADUÇÕES  \033[33m[STALE {stale_s:.0f}s — {state.last_error}]\033[0m")
+    else:
+        print("  📊  MONITOR DE ARTIGOS & TRADUÇÕES")
     print("━" * 60)
     print(f"  {'ARTIGOS':38}")
     print(f"  Total       : {total:>10,}")
@@ -156,6 +178,47 @@ def render(data: dict[str, Any], state: MonitorState) -> None:
     print(f"  Ritmo trad. :   ~{rate_per_h:,.0f} artigos/hora")
     print(f"  ETA trad.   :   {eta_str}")
     print("━" * 60)
+
+    # ── Backend telemetry (/api/translate) ──────────────────────────────
+    if tdata and tdata.get("success"):
+        g   = tdata.get("google",  {})
+        n   = tdata.get("nllb",    {})
+        rr  = tdata.get("routing", {})
+        tot = tdata.get("totals",  {})
+        print(f"  {'BACKENDS DE TRADUÇÃO':38}")
+        print(f"  {'':12} {'OK':>7} {'Perm':>6} {'Trans':>6} {'Fallbk':>7} {'Calls':>7} {'Lat ms':>8}")
+        print("  " + "─" * 56)
+        def _brow(label: str, bd: dict, color: str) -> None:
+            ok    = bd.get("ok",              0)
+            pf    = bd.get("perm_fail",       0)
+            tf    = bd.get("transient_fail",  0)
+            fb    = bd.get("fallback_primary", 0)
+            calls = bd.get("calls",           0)
+            ms    = bd.get("avg_ms",          0.0)
+            pf_col = "\033[31m" if pf else "\033[0m"
+            tf_col = "\033[33m" if tf else "\033[0m"
+            print(
+                f"  {color}\033[1m{label:<12}\033[0m"
+                f" \033[32m{ok:>7,}\033[0m"
+                f" {pf_col}{pf:>6,}\033[0m"
+                f" {tf_col}{tf:>6,}\033[0m"
+                f" \033[33m{fb:>7,}\033[0m"
+                f" \033[36m{calls:>7,}\033[0m"
+                f" {ms:>8.0f}"
+            )
+        _brow("Google",  g, "\033[34m")
+        _brow("NLLB",    n, "\033[35m")
+        print("  " + "─" * 56)
+        rr_g  = rr.get("round_robin_google", 0)
+        rr_n  = rr.get("round_robin_nllb",   0)
+        ex_g  = rr.get("explicit_google",    0)
+        ex_n  = rr.get("explicit_nllb",      0)
+        rr_total = rr_g + rr_n or 1
+        print(f"  Roteamento round-robin: Google {rr_g:,} ({rr_g/rr_total*100:.0f}%)  NLLB {rr_n:,} ({rr_n/rr_total*100:.0f}%)")
+        if ex_g or ex_n:
+            print(f"  Roteamento explícito  : Google {ex_g:,}  NLLB {ex_n:,}")
+        print(f"  Total OK: \033[32m{tot.get('ok', 0):,}\033[0m   Total falhas: \033[31m{tot.get('failed', 0):,}\033[0m")
+        print("━" * 60)
     elapsed = int(now - state.start_time)
     h2, rem2 = divmod(elapsed, 3600)
     m2, s2 = divmod(rem2, 60)
@@ -170,9 +233,10 @@ def main() -> None:
     print("\033[?25l", end="")  # ocultar cursor
     try:
         while True:
-            t0   = time.monotonic()
-            data = _fetch("/api/monitor")
-            render(data, state)
+            t0     = time.monotonic()
+            data   = _fetch("/api/monitor", timeout=15.0)
+            tdata  = _fetch("/api/translate", timeout=5.0)
+            render(data, state, tdata)
             elapsed = time.monotonic() - t0
             time.sleep(max(0.0, INTERVAL - elapsed))
     except KeyboardInterrupt:
