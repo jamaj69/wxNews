@@ -289,6 +289,21 @@ class NewsDatabase:
                     except Exception as exc2:
                         logger.error(f"Failed to reopen _ro_conn after checkpoint: {exc2}")
 
+    async def get_latest_published_gmt(self) -> "str | None":
+        """Return MAX(published_at_gmt) <= now as an ISO UTC string, or None if no articles.
+
+        Articles with a future-dated published_at_gmt are excluded so that
+        mis-dated records do not push the catch-up window into the future.
+        """
+        assert self._ro_conn is not None
+        async with self._ro_conn.execute(
+            "SELECT MAX(published_at_gmt) FROM gm_articles "
+            "WHERE published_at_gmt IS NOT NULL AND published_at_gmt != '' "
+            "AND published_at_gmt <= strftime('%Y-%m-%dT%H:%M:%S+00:00', 'now')"
+        ) as cursor:
+            row = await cursor.fetchone()
+        return row[0] if row and row[0] else None
+
     async def close(self) -> None:
         if hasattr(self, '_checkpoint_task') and self._checkpoint_task:
             self._checkpoint_task.cancel()

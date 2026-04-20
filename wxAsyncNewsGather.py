@@ -816,6 +816,21 @@ class NewsGather():
         except Exception:
             pass  # Table may not exist yet on first run
 
+        # Load last known published timestamp for restart catch-up.
+        # Collectors use this on their first cycle to fetch articles published
+        # after this date, recovering any articles missed while the service was down.
+        try:
+            self._startup_since_gmt: "str | None" = await self.db.get_latest_published_gmt()
+            if self._startup_since_gmt:
+                self.logger.info(
+                    f"📅 Last article in DB: {self._startup_since_gmt} (UTC) "
+                    f"— collectors will catch up from this date"
+                )
+            else:
+                self.logger.info("📅 No articles in DB — collectors start fresh")
+        except Exception:
+            self._startup_since_gmt = None
+
     def shutdown(self):
         """
         Gracefully shutdown the application.
@@ -1611,7 +1626,8 @@ class NewsGather():
         """
         self.logger.info("🗞️  NewsAPI collector started")
         cycle_count = 0
-        
+        _is_first_cycle = True  # On first cycle use /everything with from= if DB has articles
+
         # Language to API key mapping for rotation
         languages = ['en', 'pt', 'es', 'it']
         
@@ -1619,6 +1635,18 @@ class NewsGather():
             while not self.shutdown_flag:
                 cycle_count += 1
                 self.logger.info(f"📰 NewsAPI Cycle {cycle_count} starting...")
+                
+                # On the first cycle after a restart, use /everything?from=<last_gmt> to
+                # recover articles published while the service was offline.
+                # On subsequent cycles, use /top-headlines (no date filter needed).
+                _since_param: "str | None" = None
+                if _is_first_cycle and getattr(self, '_startup_since_gmt', None):
+                    _since_param = (
+                        self._startup_since_gmt.rstrip('Z').replace('+00:00', '')
+                    )
+                    self.logger.info(
+                        f"🔄 NewsAPI catch-up mode: fetching /everything from {_since_param} UTC"
+                    )
                 
                 async with aiohttp.ClientSession() as session:
                     for lang in languages:
@@ -1629,7 +1657,17 @@ class NewsGather():
                         api_key = self.newsapi_keys[self.current_newsapi_key_index]
                         self.current_newsapi_key_index = (self.current_newsapi_key_index + 1) % len(self.newsapi_keys)
                         
-                        url = f"https://newsapi.org/v2/top-headlines?language={lang}&pageSize=100&apiKey={api_key}"
+                        if _since_param:
+                            # Catch-up: /everything with date filter.
+                            # q='a OR e' is a broad query accepted by NewsAPI that
+                            # matches virtually every article in Latin-script languages.
+                            url = (
+                                f"https://newsapi.org/v2/everything"
+                                f"?q=a+OR+e&language={lang}&from={_since_param}"
+                                f"&sortBy=publishedAt&pageSize=100&apiKey={api_key}"
+                            )
+                        else:
+                            url = f"https://newsapi.org/v2/top-headlines?language={lang}&pageSize=100&apiKey={api_key}"
                         
                         self.logger.info(f"Fetching NewsAPI [{lang.upper()}] (key #{self.current_newsapi_key_index})...")
                         
@@ -1842,6 +1880,7 @@ class NewsGather():
                     self.logger.info(f"NewsAPI cycle {cycle_count} complete. Sleeping {NEWSAPI_CYCLE_INTERVAL}s...")
                     # Reload sources to pick up any database changes
                     await self.reload_sources()
+                    _is_first_cycle = False
                     await asyncio.sleep(NEWSAPI_CYCLE_INTERVAL)
         except asyncio.CancelledError:
             self.logger.info("🗞️  NewsAPI collector cancelled")
@@ -2410,7 +2449,8 @@ class NewsGather():
         """
         self.logger.info("🌍 MediaStack collector started")
         cycle_count = 0
-        
+        _is_first_cycle = True  # On first cycle add date_range for catch-up
+
         # Languages to collect (EN already covered by NewsAPI)
         languages = ['pt', 'es', 'it']
         
@@ -2444,6 +2484,17 @@ class NewsGather():
                                 'limit': 25,  # Collect 25 articles per language
                                 'sort': 'published_desc'
                             }
+                            # On first cycle after restart, add date_range to catch up
+                            # articles published while the service was offline.
+                            if _is_first_cycle and getattr(self, '_startup_since_gmt', None):
+                                from datetime import datetime as _dt
+                                from_date = self._startup_since_gmt[:10]  # YYYY-MM-DD
+                                to_date   = _dt.utcnow().strftime('%Y-%m-%d')
+                                params['date_range'] = f"{from_date},{to_date}"
+                                self.logger.info(
+                                    f"🌍 MediaStack catch-up [{language}]: "
+                                    f"date_range {from_date},{to_date}"
+                                )
                             
                             # Fetch news
                             async with session.get(
@@ -2565,6 +2616,7 @@ class NewsGather():
                     self.logger.info(f"MediaStack: Sleeping {MEDIASTACK_CYCLE_INTERVAL}s...")
                     # Reload sources to pick up any database changes
                     await self.reload_sources()
+                    _is_first_cycle = False
                     await asyncio.sleep(MEDIASTACK_CYCLE_INTERVAL)
         except asyncio.CancelledError:
             self.logger.info("🌍 MediaStack collector cancelled")
@@ -3706,6 +3758,7 @@ class NewsGather():
         @api_app.get("/api/latest_timestamp")
         async def get_latest_timestamp():
             try:
+                latest_published_gmt = await gather.db.get_latest_published_gmt()
                 with gather.eng.connect() as conn:
                     row = conn.execute(
                         select(
@@ -3715,6 +3768,7 @@ class NewsGather():
                     ).fetchone()
                 return {'success': True,
                         'latest_timestamp': (row[0] or 0) if row else 0,
+                        'latest_published_gmt': latest_published_gmt,
                         'total_articles': (row[1] or 0) if row else 0,
                         'timestamp': int(time.time() * 1000)}
             except Exception as e:
@@ -4078,7 +4132,10 @@ if __name__ == '__main__':
         app.logger.info(f"   • Probe blocked sources: every {PROBE_CYCLE_INTERVAL}s ({PROBE_CYCLE_INTERVAL//60} min)")
 
         # Create tasks for all collectors + translation + API server
+        # serve_api() is first so uvicorn binds to the port before the heavy
+        # multiprocessing workers (cffi/playwright) saturate the event loop.
         tasks = [
+            loop.create_task(app.serve_api()),
             loop.create_task(app.collect_newsapi()),
             loop.create_task(app.collect_rss_feeds()),
             loop.create_task(app.collect_mediastack()),
@@ -4089,7 +4146,6 @@ if __name__ == '__main__':
             loop.create_task(app.backfill_translations()),
             loop.create_task(app.probe_blocked_sources()),
             loop.create_task(app._refresh_queue_stats()),
-            loop.create_task(app.serve_api()),
         ]
 
         # Start loop lag sensor (measures actual event-loop responsiveness)
